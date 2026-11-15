@@ -1,0 +1,165 @@
+{
+  "repository": "Adirm007/reader",
+  "commit": "f847c4298b8ff5d65e138abaa6dc4e5ba5455869",
+  "release": "2026.11.10.8",
+  "dirty": [],
+  "syncedAt": "2026-11-10T04:28:54.276Z",
+  "files": {
+    "LICENSE": {
+      "bytes": 2109,
+      "sha256": "8be26b90e02abfbcbb81a8ce7167026f4c2b5f8913bf5201daae48711a659448"
+    },
+    "gacha/README.md": {
+      "bytes": 1280,
+      "sha256": "a5d61cfa3340b5591ff16367a926480a639fc79f60643757c98b1322b2221b25"
+    },
+    "gacha/build.mjs": {
+      "bytes": 2693,
+      "sha256": "505d2ae3b0696f27ea8c9fb4ee59da7f3eeb78265164dcc97a706992b0926302"
+    },
+    "gacha/package.json": {
+      "bytes": 435,
+      "sha256": "df70f90677b4a1e820984f934342bf86eda34e5033ddaffd8a74c28b787f25cc"
+    },
+    "gacha/src/gacha/bag.ts": {
+      "bytes": 9840,
+      "sha256": "b7203134d9a58b6e97a7d09a8e471941c190d775837d35544940dda6ec7bd3f1"
+    },
+    "gacha/src/gacha/dossier.ts": {
+      "bytes": 17309,
+      "sha256": "a036b7557f005a5cd9d48bb7f4b8fc4256c834088d34fa2c1e6f0a49d5bf9feb"
+    },
+    "gacha/src/gacha/net.ts": {
+      "bytes": 4890,
+      "sha256": "becce0b357c7a6883dcf7cf6a8e916f0736e600cf97f871ea2bced220b43fc46"
+    },
+    "gacha/src/gacha/pool.ts": {
+      "bytes": 33629,
+      "sha256": "e1b26bd5c8189b185971e78c9303e90aee1c5cb62cd3abfa58cae9b5ece1d187"
+    },
+    "gacha/src/gacha/rarity.ts": {
+      "bytes": 7627,
+      "sha256": "1e8b40f80a102583643596c921c3e8f7ed435856f75525e295f9a9532aafdb57"
+    },
+    "gacha/src/gacha/session.ts": {
+      "bytes": 36248,
+      "sha256": "27bd2df01c1bf602e22918d47300cfa125ac8779842ffa4c99ce923a51436094"
+    },
+    "gacha/src/gacha/sources.ts": {
+      "bytes": 34608,
+      "sha256": "fa938364c3fca620a4e4006a9708daf408dd092759e6285e85f1512a7512e112"
+    },
+    "gacha/src/gacha/spec.ts": {
+      "bytes": 8502,
+      "sha256": "d9bf0e70b704874afb65b44a1cdeca06f10cc6d29ba20bc796a29dce9ac12d2d"
+    },
+    "gacha/src/gacha/themes.ts": {
+      "bytes": 11347,
+      "sha256": "d71e4486e79b05649b81915d646ef18e2fed5d3a6b39921b64d5f63c28ab890c"
+    },
+    "gacha/src/reader/gacha-entry.ts": {
+      "bytes": 731,
+      "sha256": "299d0e843ba220f01591bb42b7ca56ab33d841d6217983202807d1e303c2d048"
+    },
+    "gacha/src/reader/gacha-reader.ts": {
+      "bytes": 12863,
+      "sha256": "cd7ffbb21c3a70cfc610c50d4e6af359dea0b6e2f3f8205c8b3abe3053d7180e"
+    },
+    "gacha/src/ui/gacha-art.ts": {
+      "bytes": 10553,
+      "sha256": "a8e5ccf2319f4c3ab5b6229af90be8cbdc12ddb24b37e02ef66416cd1766a01e"
+    },
+    "gacha/src/ui/gacha-panel.ts": {
+      "bytes": 63325,
+      "sha256": "b564410c393b85eddb15552a47370538522057f9a1969d7c1ff42ded33c99809"
+    },
+    "gacha/src/ui/gacha-style.ts": {
+      "bytes": 53100,
+      "sha256": "501cdc67e863fdac10444f873b93ff8efad81fa7b25a5d31c0c5418ca1f7d451"
+    },
+    "gacha/src/ui/game-dom.ts": {
+      "bytes": 793,
+      "sha256": "6a47a1e350f2fb5fdb7698e85743f8a7db638358df4bfeb47a7a15da8709974b"
+    },
+    "gacha/src/ui/octo-kit.ts": {
+      "bytes": 1660,
+      "sha256": "009152e87c034f500cb64020a478519d2b540af0b3b5d840f0d864372b1a0340"
+    },
+    "gacha/tests/gacha.test.ts": {
+      "bytes": 74097,
+      "sha256": "28ded63e53c6ce8720fd6d9058f1c210104abd1489b729cfeba45286745091f3"
+    },
+    "gacha/tsconfig.json": {
+      "bytes": 277,
+      "sha256": "17066573e67dfa5923a3a865cbab7e3c43b33f4e52375b0e095ea2d2978bbb23"
+    },
+    "source/booksea-album.js": {
+      "bytes": 29189,
+      "sha256": "951c2b039009f3fff8f9b4393c1f970e7a3efb51577bc6ab21b23f8d5f43c69b"
+    },
+    "source/controller-adapter.js": {
+      "bytes": 11419,
+      "sha256": "f57c3d1f4d358ef15e7c6b78a7eb16c0f0a23a86602ab1e5af0d079a837b788f"
+    },
+    "source/controller-prelude.js": {
+      "bytes": 4167,
+      "sha256": "8c835ff764c081205cafd0625eba9f20a3700cf9ee97e36494b212177caebd98"
+    },
+    "source/core-runtime.mjs": {
+      "bytes": 25694,
+      "sha256": "87bea4680f2a054b288efad727c69151d540a61f911aa7b7aa7cc2f85f754a0b"
+    },
+    "source/legacy-body.html": {
+      "bytes": 17223,
+      "sha256": "8197775e596d03a57b7488289efff07e8992398643ef4dff6cddc089d2942d5d"
+    },
+    "source/legacy-letter-body.html": {
+      "bytes": 7257,
+      "sha256": "9a7d75f44e51a65ab97675f8d60b24069390aa5bc38ea43a68c31c1f737aad2a"
+    },
+    "source/legacy-reader.css": {
+      "bytes": 70769,
+      "sha256": "35758e4ba8beece01c754bd4fdfcd1d5f70e06e4d05b3d65c3d8caa52b5d6eeb"
+    },
+    "source/legacy-reader.js": {
+      "bytes": 736850,
+      "sha256": "a734b5ef753a9019f70234ae1e1bf00c34a7fe60f0250c8183ea4ec3d0be6427"
+    },
+    "source/letter-body.html": {
+      "bytes": 4703,
+      "sha256": "41e621f6c6243eb311e0d2586f4ad0d47869676dd3c381a0e69cc6f5eae3c37e"
+    },
+    "source/letter.js": {
+      "bytes": 12223,
+      "sha256": "788599143928340c9acd2af94598a1436aa97177713b0361e4075c6fa1ef6397"
+    },
+    "source/reader-letter.css": {
+      "bytes": 38214,
+      "sha256": "f0a3b2d7af28ec858bfaa200c5d66d3484870bf592973833f6ffd5dc4554e49f"
+    },
+    "source/reader-transactions.js": {
+      "bytes": 7286,
+      "sha256": "491f467e1001cf3a9ecc45a38b3c728d94e5ad630c709a2ccc1154b6fddbaaa9"
+    },
+    "source/reader-ui-switch.js": {
+      "bytes": 14227,
+      "sha256": "d09eeae6cec675e10f4f9e44f7bae586d0f207ee9483657405517380e5d0a762"
+    },
+    "source/reader-ui.js": {
+      "bytes": 126167,
+      "sha256": "d2b362774d5b6574dce1508c4285404ecd83baddfd2dcd6f1a355ef67695246e"
+    },
+    "source/template-system.js": {
+      "bytes": 67118,
+      "sha256": "19f821cdc2dde88abfad70d24796fcde6436719ae469bbe9c81d5d98b9915a6f"
+    },
+    "worldbook/notes.txt": {
+      "bytes": 2036,
+      "sha256": "37781ed1d6e30e31826e0aa4e98afe956e6f7d1cf3187f4f3ca3f1e9deb5a809"
+    },
+    "worldbook/读者核心本体.txt": {
+      "bytes": 314427,
+      "sha256": "c658ff06b1a225926a3069dc729f536512ade89feafadaea50a3050da1995033"
+    }
+  }
+}

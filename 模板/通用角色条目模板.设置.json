@@ -1,0 +1,24 @@
+{
+  "id": "reader-default-generic-character",
+  "name": "通用角色条目",
+  "generationInstruction": "依据模板中的字段、占位符说明与参考资料，编写一份完整的角色条目。必须保留模板的字段顺序、层级与列表形状；用具体内容替换每一个占位符，占位符里的说明与字数区间只用于理解，不要照抄进正文；模板开头以 # 开头的几行是写作要求，不要输出。篇幅以模板标注的字数区间为准：全文 3000–4000 字，没有「能力」一节时 2800–3600 字（按填好的正文算，含标点，不含字段名与缩进），不要为了简洁而缩写，也不要超出上限。这位角色既没有超出常人的能力、也没有值得一提的专业技艺时，把「能力」一节连同标题整节删去。不要输出 Markdown 代码块标记。",
+  "entryNameRule": "使用“基本信息.姓名”里的中文名作为条目名，不带原文写法、括号与书名号。",
+  "output": {
+    "targetWorldbook": "Reader生成条目",
+    "strategyType": "selective",
+    "positionType": "after_character_definition",
+    "role": "system",
+    "depth": 0,
+    "order": 601,
+    "probability": 100,
+    "scanDepth": "same_as_global",
+    "keywordMode": "smart",
+    "keywordRule": "主要关键词：这位角色会在聊天里自然出现的各种叫法——全名、姓或名单独的写法、昵称、绰号、头衔，每行一个，三到八个；不要整句，也不要“少女”“剑士”这类会误触发的泛称。次要关键词留空。",
+    "manualPrimary": "",
+    "manualSecondary": "",
+    "secondaryLogic": "and_any",
+    "preventIncoming": true,
+    "preventOutgoing": true,
+    "passthroughSettings": {}
+  }
+}

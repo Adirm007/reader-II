@@ -1,0 +1,93 @@
+{
+  "format": 1,
+  "name": "reader-ii",
+  "version": "4.0.0-alpha.1",
+  "hash": "SHA-256（UTF-8，换行统一为 LF 后计算）",
+  "files": {
+    "dist/reader-ii.ext.js": {
+      "sha256": "76234e0d025f9497105e0d43f9d23f9609b5649da077dd78a3029838ff6a3a78",
+      "bytes": 436809
+    },
+    "dist/reader-ii.script.json": {
+      "sha256": "e2d2b505827ce03ec24defa70270b820453a7bb905115c1efc3107a55fb56514",
+      "bytes": 931953
+    },
+    "dist/reader-ii.loader.json": {
+      "sha256": "b69cbc8b25b6c5a07a306abbc7e069df4a79cae0de046fee911028cc2d712a33",
+      "bytes": 6884
+    },
+    "dist/reader-ii.regex.event-prompt.json": {
+      "sha256": "d03c51dab2b7e215f74a76e38e3bbbd0374d9bac5d81070aa59e1a36ea9cd294",
+      "bytes": 429
+    },
+    "dist/reader-ii.regex.event-display.json": {
+      "sha256": "899f85136f8d896dd2fd307336553b3f95813ab4814a3f2c624233f51c2907aa",
+      "bytes": 426
+    },
+    "dist/reader-ii.regex.dream-render.json": {
+      "sha256": "89be042b27189fd7b13cdd540f9543ed30a6d6d1b44a80038b1f46aaea13ba9f",
+      "bytes": 508
+    },
+    "dist/reader-ii.worldbook.json": {
+      "sha256": "2b2c2ee95a147a3cd93525c39cb5dd0252bc1dcc0661f816bcfc0d82d233ec80",
+      "bytes": 120196
+    }
+  },
+  "components": {
+    "script": {
+      "file": "dist/reader-ii.script.json",
+      "id": "b7e4c1d2-3a9f-4e6b-8c15-2f7a9d0e4b63",
+      "name": "Reader-II主系统-v4.0.0-alpha.1",
+      "fingerprint": "594a24d21199abc84dd0e58cac0bb6fac553d8d242d5d8714ae46b57c9816280"
+    },
+    "loader": {
+      "file": "dist/reader-ii.loader.json",
+      "id": "e2a95f17-6c3b-4d84-a0f2-9b1c7e5d3a48",
+      "name": "Reader-II夜梦助手加载器-v4.0.0-alpha.1",
+      "fingerprint": "b2448edd3b77a4ec5c559cad6f2a4038c3b1ceeaa2f76c5d70d551a11d17a20b"
+    },
+    "regex": [
+      {
+        "file": "dist/reader-ii.regex.event-prompt.json",
+        "id": "a321f80c-96e4-418c-a666-f7c4f7ead4e4",
+        "name": "Reader-II事件隐藏-提示词",
+        "fingerprint": "3dd8dc959c66ddcb4e13dabd8d50bb19534ed3ea67416136a43de7c7dd9cf61c"
+      },
+      {
+        "file": "dist/reader-ii.regex.event-display.json",
+        "id": "266633e9-9ca9-4ef8-bf2f-77dfc5df7c49",
+        "name": "Reader-II事件隐藏-显示",
+        "fingerprint": "3dd8dc959c66ddcb4e13dabd8d50bb19534ed3ea67416136a43de7c7dd9cf61c"
+      },
+      {
+        "file": "dist/reader-ii.regex.dream-render.json",
+        "id": "89b4ce2b-1667-4cdd-9716-f0df6b6200fc",
+        "name": "读者对话渲染-通用版",
+        "fingerprint": "0da25aa5010e0a12d2b812d112fa361c82bc1c335310214d573d3022dae2bbbf"
+      }
+    ],
+    "worldbook": {
+      "file": "dist/reader-ii.worldbook.json",
+      "book": "reader-ii.worldbook",
+      "entries": [
+        {
+          "name": "[initvar]Reader-II初始化",
+          "fingerprint": "e5ae1309a07adc03e4b24bb525280bdf4b7d2f6419d4dde34ad1253ac94fed05"
+        },
+        {
+          "name": "[mvu_update]Reader-II变量更新规则",
+          "fingerprint": "979a27c5bbe9642aa4146596b34980644caf2154f14904797bc14806593025b1"
+        },
+        {
+          "name": "[Reader-II] 通用读者核心",
+          "fingerprint": "253c8888caa0efc264b1fb67ab9ee7da59ade1c566af572910f3a358ed1c770e"
+        },
+        {
+          "name": "Reader-II变量列表",
+          "fingerprint": "1af6b0734608e25136625a62dddd275e53a1b05846c2cedd5010d5bdc2139a45"
+        }
+      ]
+    }
+  },
+  "history": {}
+}

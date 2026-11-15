@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reader-II 冒烟宿主（假酒馆）</title>
+<style>
+  body { font: 14px/1.6 system-ui, sans-serif; background: #15171c; color: #d8dce6; margin: 0; padding: 16px; }
+  h3 { margin: 0 0 8px; }
+  #extensionsMenu { display: inline-flex; gap: 8px; padding: 6px; border: 1px dashed #445; border-radius: 6px; min-height: 32px; }
+  #extensionsMenu .list-group-item { cursor: pointer; padding: 4px 10px; background: #262b36; border-radius: 4px; display: inline-flex; gap: 6px; }
+  #chat .mes { border: 1px solid #333a48; margin: 6px 0; padding: 8px; border-radius: 6px; white-space: pre-wrap; }
+  #smoke-log { background: #0e1014; padding: 10px; border-radius: 6px; white-space: pre-wrap; }
+  .pass { color: #8fd18a; } .fail { color: #f08a7a; }
+</style>
+</head>
+<body>
+<!--
+  假酒馆：只模拟 Reader-II 扩展会碰到的那部分酒馆与酒馆助手接口，用来在浏览器里冒烟。
+    host.html            有酒馆助手；手动点「夜梦助手」试用，模型回复来自 __mock.replies（空时回一句固定的话）
+    host.html?auto=1     自动跑一遍脚本化场景，结果写在页面底部与标题里（SMOKE PASS / SMOKE FAIL）
+    host.html?th=0       没有酒馆助手，走酒馆原生接口（可与 auto=1 合用）
+  服务方式：在 reader-II 根目录起任意静态服务器，例如 python3 -m http.server 8791。
+-->
+<h3>假酒馆宿主</h3>
+<div id="extensionsMenu"></div>
+<select id="world_editor_select" hidden></select>
+<select id="world_info" multiple hidden><option value="0" selected>公共资料</option></select>
+<div id="chat"></div>
+<pre id="smoke-log">（冒烟结果会写在这里）</pre>
+
+<script>
+(() => {
+  const clone = (value) => (value === undefined ? undefined : JSON.parse(JSON.stringify(value)));
+  const params = new URLSearchParams(location.search);
+  const withHelper = params.get('th') !== '0';
+
+  const state = window.__mock = {
+    chat: [
+      { name: '旁白', is_user: false, mes: '清晨，王都的钟声响起。' },
+      { name: '我', is_user: true, mes: '我推开了酒馆的门。' },
+      { name: '艾琳', is_user: false, mes: '「欢迎回来。」艾琳放下了手里的杯子。' },
+    ],
+    worldbooks: {
+      设定集: [
+        { uid: 0, name: '王都', enabled: true, content: '王都位于北方。\n人口十万。\n守卫队长是雷恩。', strategy: { type: 'selective', keys: ['王都'] }, position: { type: 'before_character_definition', order: 100 } },
+        { uid: 1, name: '艾琳', enabled: true, content: '艾琳是酒馆的老板娘。', strategy: { type: 'constant', keys: [] }, position: {} },
+      ],
+      公共资料: [{ uid: 0, name: '货币', enabled: true, content: '通用货币是金币。', strategy: { type: 'selective', keys: ['金币'] }, position: {} }],
+    },
+    regexes: { global: [{ id: 'g1', script_name: '状态栏', enabled: true, find_regex: '/<status>([\\s\\S]*?)<\\/status>/g', replace_string: '<div class="bar">$1</div>' }], character: [] },
+    scripts: { global: [{ type: 'script', id: 's1', name: '示例脚本', enabled: true, content: 'console.log("hello")', info: '' }], character: [], preset: [] },
+    vars: { chat: { 数据: { 角色: { 金币: 10 } } }, global: {}, character: {}, message: { stat_data: { 主角: { 生命: 100 } } } },
+    replies: [], llmCalls: [], posts: [], prompts: {}, slash: [], toasts: [], appReady: false,
+  };
+
+  /* 酒馆原生格式的世界书（没有酒馆助手时用）。 */
+  const native = {};
+  for (const [book, entries] of Object.entries(state.worldbooks)) {
+    native[book] = { entries: {} };
+    entries.forEach((entry) => {
+      native[book].entries[entry.uid] = {
+        uid: entry.uid, key: entry.strategy.keys.slice(), keysecondary: [], comment: entry.name, content: entry.content,
+        constant: entry.strategy.type === 'constant', vectorized: false, selective: true, selectiveLogic: 0, order: 100, position: 0, disable: false, depth: 4, role: 0, probability: 100,
+      };
+    });
+  }
+  state.native = native;
+  const select = document.getElementById('world_editor_select');
+  select.innerHTML = '<option value="">--- 选择 ---</option>' + Object.keys(native).map((name, index) => `<option value="${index}">${name}</option>`).join('');
+
+  const listeners = {};
+  const eventSource = {
+    on(event, handler) { (listeners[event] = listeners[event] || []).push(handler); },
+    once(event, handler) {
+      const wrapped = (...args) => { eventSource.removeListener(event, wrapped); return handler(...args); };
+      eventSource.on(event, wrapped);
+      if (event === 'app_ready' && state.appReady) queueMicrotask(() => wrapped());   /* 酒馆对 APP_READY 会补发 */
+    },
+    removeListener(event, handler) { listeners[event] = (listeners[event] || []).filter((item) => item !== handler); },
+    async emit(event, ...args) { for (const handler of (listeners[event] || []).slice()) await handler(...args); },
+  };
+
+  function nextReply(messages) {
+    state.llmCalls.push(clone(messages));
+    const next = state.replies.shift();
+    if (next === undefined) return '（假酒馆：没有预设回复。可以在控制台往 __mock.replies 里放几句。）';
+    return typeof next === 'function' ? next(messages) : next;
+  }
+
+  const ctx = {
+    chat: state.chat, characterId: 0, name1: '我', name2: '艾琳', chatId: 'smoke-chat',
+    characters: [{ name: '艾琳', avatar: 'ailin.png', description: '老板娘', data: { description: '老板娘', alternate_greetings: ['你好'], extensions: { world: '设定集' } } }],
+    chatMetadata: { variables: state.vars.chat }, extensionSettings: { variables: { global: state.vars.global } },
+    eventSource, eventTypes: { APP_READY: 'app_ready', GENERATION_ENDED: 'generation_ended', MESSAGE_RECEIVED: 'message_received', CHAT_CHANGED: 'chat_id_changed', GENERATION_AFTER_COMMANDS: 'GENERATION_AFTER_COMMANDS', CHARACTER_EDITED: 'character_edited' },
+    getCurrentChatId: () => 'smoke-chat',
+    saveMetadata: async () => {}, saveSettingsDebounced: () => {}, saveChat: async () => {},
+    updateMessageBlock: () => renderChat(),
+    setExtensionPrompt: (id, text, position, depth) => { state.prompts[id] = { text, position, depth }; },
+    getRequestHeaders: () => ({ 'Content-Type': 'application/json' }),
+    loadWorldInfo: async (name) => clone(native[name]) || null,
+    saveWorldInfo: async (name, data) => { native[name] = clone(data); },
+    generateRaw: async ({ prompt }) => nextReply(prompt),
+    SlashCommandParser: { addCommandObject: (command) => state.slash.push(command) },
+    SlashCommand: { fromProps: (props) => props },
+  };
+  window.SillyTavern = { getContext: () => ctx };
+  window.toastr = { error: (message) => state.toasts.push(String(message)), warning() {}, info() {}, success() {} };
+
+  if (withHelper) {
+    const books = state.worldbooks;
+    window.TavernHelper = {
+      getTavernHelperVersion: () => '4.0.0-mock',
+      getWorldbookNames: () => Object.keys(books),
+      getGlobalWorldbookNames: () => ['公共资料'],
+      getCharWorldbookNames: () => ({ primary: '设定集', additional: [] }),
+      getChatWorldbookName: () => null,
+      getWorldbook: async (name) => clone(books[name]),
+      createWorldbook: async (name) => { books[name] = []; },
+      updateWorldbookWith: async (name, updater) => { books[name] = clone(updater(clone(books[name]))); return clone(books[name]); },
+      createWorldbookEntries: async (name, entries) => {
+        const made = entries.map((entry, index) => ({ uid: books[name].length + index + 10, enabled: true, strategy: { type: 'selective', keys: [] }, position: {}, ...entry }));
+        books[name].push(...made);
+        return { new_entries: clone(made) };
+      },
+      getTavernRegexes: ({ type }) => clone(state.regexes[type]),
+      updateTavernRegexesWith: async (updater, { type }) => { state.regexes[type] = clone(updater(clone(state.regexes[type]))); },
+      getScriptTrees: ({ type }) => clone(state.scripts[type]),
+      updateScriptTreesWith: async (updater, { type }) => { state.scripts[type] = clone(updater(clone(state.scripts[type]))); },
+      getVariables: (option) => clone(state.vars[option.type]),
+      replaceVariables: async (value, option) => { state.vars[option.type] = clone(value); if (option.type === 'chat') ctx.chatMetadata.variables = state.vars.chat; },
+      setChatMessages: async (list) => { list.forEach((item) => { state.chat[item.message_id].mes = item.message; }); renderChat(); },
+      injectPrompts: async (prompts) => { prompts.forEach((prompt) => { state.prompts[prompt.id] = prompt; }); },
+      uninjectPrompts: async (ids) => { ids.forEach((id) => { delete state.prompts[id]; }); },
+      generateRaw: async (config) => nextReply(config.ordered_prompts),
+    };
+  }
+
+  /* 静态服务器不认识酒馆的 /api/：在这里接住。 */
+  const realFetch = window.fetch.bind(window);
+  window.fetch = async (input, init) => {
+    const url = typeof input === 'string' ? input : input.url;
+    if (url.startsWith('/api/')) {
+      state.posts.push({ url, body: init && init.body ? JSON.parse(init.body) : null });
+      const body = url === '/api/extensions/discover' ? [{ type: 'global', name: 'third-party/reader-II' }] : {};
+      return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+    return realFetch(input, init);
+  };
+
+  function renderChat() {
+    document.getElementById('chat').innerHTML = state.chat.map((message, index) => `<div class="mes" mesid="${index}"><b>#${index} ${message.name}</b>\n${String(message.mes).replace(/</g, '&lt;')}</div>`).join('');
+  }
+  renderChat();
+  setTimeout(() => { state.appReady = true; eventSource.emit('app_ready'); }, 30);
+})();
+</script>
+<script type="module" src="../../index.js"></script>
+<script type="module" src="./scenario.js"></script>
+</body>
+</html>

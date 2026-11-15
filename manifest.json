@@ -1,0 +1,11 @@
+{
+  "display_name": "Reader-II · 夜梦",
+  "loading_order": 90,
+  "requires": [],
+  "optional": [],
+  "js": "index.js",
+  "author": "Adirm007",
+  "version": "4.0.0-alpha.1",
+  "homePage": "https://github.com/Adirm007/reader-II",
+  "auto_update": false
+}

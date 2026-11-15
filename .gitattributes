@@ -1,0 +1,2 @@
+# 发布产物按字节校验（dist/reader-ii.manifest.json 的 SHA-256）：检出时不要转换换行。
+dist/** -text

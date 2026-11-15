@@ -1,0 +1,17 @@
+{
+  "id": "266633e9-9ca9-4ef8-bf2f-77dfc5df7c49",
+  "scriptName": "Reader-II事件隐藏-显示",
+  "findRegex": "/<READER_(?:FP|TASK|ACTION)_EVENT>[\\s\\S]*?<\\/READER_(?:FP|TASK|ACTION)_EVENT>/gi",
+  "replaceString": "",
+  "trimStrings": [],
+  "placement": [
+    2
+  ],
+  "disabled": false,
+  "markdownOnly": true,
+  "promptOnly": false,
+  "runOnEdit": true,
+  "substituteRegex": 0,
+  "minDepth": null,
+  "maxDepth": null
+}
