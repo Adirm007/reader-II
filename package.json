@@ -1,0 +1,15 @@
+{
+  "name": "reader-ii",
+  "version": "4.0.0-alpha.2",
+  "private": true,
+  "description": "Reader-II · 夜梦：酒馆扩展（仓库根）+ 卡内组件（dist/）+ 后端伴侣（companion/）。这个文件只是让整个仓库克隆进酒馆的 plugins/ 时，酒馆能找到后端伴侣的入口。",
+  "main": "companion/index.mjs",
+  "scripts": {
+    "build": "node build.mjs",
+    "companion": "node companion/standalone.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "SEE LICENSE IN LICENSE"
+}

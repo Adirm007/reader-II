@@ -23,6 +23,16 @@
     var registry = modules.createRegistry();
     var probe = modules.installPageProbe(env);
     var agent = null, ui = null;
+    /* 联网、MCP、后端伴侣（交接 0.6 乙组）。密钥只在本机；三者的设置是助手设置里的 web / mcp / companion 三段。 */
+    var secrets = modules.createSecrets(env);
+    var agentSettings = function () { return agent ? agent.getSettings() : {}; };
+    var companion = null, mcp = null, web = null;
+    var net = modules.createNet(env, kit, { secrets: secrets, settings: function () { return agentSettings().web; }, companion: function () { return companion; } });
+    companion = modules.createCompanionClient(env, kit, {
+      net: net, secrets: secrets, version: modules.READER_AGENT_VERSION,
+      settings: function () { return agentSettings().companion; },
+      allowed: function () { return agentSettings().mode === 'device'; }
+    });
 
     /* 设置随酒馆账号走（extension_settings）；拿不到时退回 localStorage。 */
     var settingsIo = {
@@ -57,6 +67,8 @@
 
     modules.installBuiltinProviders(vfs, env, kit, { store: store, probe: probe, describeEnv: describeEnv, memory: memory });
     modules.installCoreTools(registry, { vfs: vfs, env: env, kit: kit });
+    web = modules.installWebTools(registry, vfs, env, kit, { net: net, secrets: secrets });
+    modules.installDeviceTools(registry, vfs, env, kit, { companion: companion });
     var legacy = modules.createAgentTools(env, kit, {
       core: function () { return host.ReaderCore && host.ReaderCore.__reader_core_api ? host.ReaderCore : null; },
       memory: memory,
@@ -69,11 +81,26 @@
 
     agent = modules.createAgent(env, llm, kit, memory, {
       registry: registry, vfs: vfs, journal: journal, connectors: connectors, settingsIo: settingsIo, apiTier: legacy.apiTier,
-      core: function () { return host.ReaderCore && host.ReaderCore.__reader_core_api ? host.ReaderCore : null; }
+      core: function () { return host.ReaderCore && host.ReaderCore.__reader_core_api ? host.ReaderCore : null; },
+      envLines: function () { return [web ? web.brief() : '', mcp ? mcp.brief() : '', companion.brief()]; }
+    });
+    mcp = modules.createMcp(env, kit, {
+      registry: registry, net: net, secrets: secrets, store: store, version: modules.READER_AGENT_VERSION,
+      companion: function () { return companion; },
+      settings: function () { return agentSettings().mcp; },
+      save: function (value) { agent.saveSettings({ mcp: value }); }
+    });
+    /* 设置被别处改了（面板、助手自己）时，MCP 工具箱跟着重新登记。 */
+    agent.onChange(function (reason) { if (reason === 'settings') { try { mcp.sync(); } catch (error) { /* 登记失败不影响别的 */ } } });
+    /* 之前放行过、或已经开到「设备全权」时，每轮开始前看一眼伴侣在不在（一分钟内不重复）；别的用户不会因此多发请求。 */
+    registry.on('run:start', function () {
+      if (companion.hasSaved() || agent.getSettings().mode === 'device') return companion.status(false);
+      return null;
     });
     var updates = modules.createUpdater(env, kit);
     ui = modules.createAgentUi(env, kit, agent, memory, llm, {
       updates: updates,
+      netUi: function (panel) { return modules.createNetUi(env, kit, agent, { net: net, secrets: secrets, mcp: mcp, companion: companion, web: web }, panel); },
       shell: function () { return host.ReaderShell || null; },
       core: function () { return host.ReaderCore && host.ReaderCore.__reader_core_api ? host.ReaderCore : null; }
     });
@@ -81,11 +108,12 @@
     try { memory.install(); } catch (error) { env.console.warn('[ReaderII] 记忆系统启动失败', error); }
     connectors.refresh();
     skills.loadUserSkills().catch(function () { /* 工作区不可用时没有用户知识 */ });
+    mcp.load().catch(function () { /* 没有缓存就等用户点刷新 */ });
 
     var api = {
       version: modules.READER_AGENT_VERSION, ready: true, carrier: env.carrier,
       agent: Object.assign(agent, { open: ui.open, close: ui.close }),
-      memory: memory, kit: kit, llm: llm, vfs: vfs, updates: updates,
+      memory: memory, kit: kit, llm: llm, vfs: vfs, updates: updates, mcp: mcp, companion: companion, net: net,
       dispose: function () {
         try { ui.dispose(); } catch (error) { /* ignore */ }
         try { memory.dispose(); } catch (error) { /* ignore */ }

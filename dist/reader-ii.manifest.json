@@ -1,19 +1,19 @@
 {
   "format": 1,
   "name": "reader-ii",
-  "version": "4.0.0-alpha.1",
+  "version": "4.0.0-alpha.2",
   "hash": "SHA-256（UTF-8，换行统一为 LF 后计算）",
   "files": {
     "dist/reader-ii.ext.js": {
-      "sha256": "76234e0d025f9497105e0d43f9d23f9609b5649da077dd78a3029838ff6a3a78",
-      "bytes": 436809
+      "sha256": "cb86d839afbb151c891b1ff215c17b60c04a7ff4d6115675998c1c4dddddc65a",
+      "bytes": 577322
     },
     "dist/reader-ii.script.json": {
-      "sha256": "e2d2b505827ce03ec24defa70270b820453a7bb905115c1efc3107a55fb56514",
+      "sha256": "3a5846cfd3b4bbeab73a68f12ca98a971f0d105cc4bbd1dfccbf3385c419dda9",
       "bytes": 931953
     },
     "dist/reader-ii.loader.json": {
-      "sha256": "b69cbc8b25b6c5a07a306abbc7e069df4a79cae0de046fee911028cc2d712a33",
+      "sha256": "ff40844ed99652c2d6a5118c54980b751b7422c6c5f5b833526c48d645eb1130",
       "bytes": 6884
     },
     "dist/reader-ii.regex.event-prompt.json": {
@@ -29,7 +29,7 @@
       "bytes": 508
     },
     "dist/reader-ii.worldbook.json": {
-      "sha256": "2b2c2ee95a147a3cd93525c39cb5dd0252bc1dcc0661f816bcfc0d82d233ec80",
+      "sha256": "f7828ade17c8fa23bcde2d0105bddb0a54af6a7dcee783927969f1cf99c34c8b",
       "bytes": 120196
     }
   },
@@ -37,14 +37,14 @@
     "script": {
       "file": "dist/reader-ii.script.json",
       "id": "b7e4c1d2-3a9f-4e6b-8c15-2f7a9d0e4b63",
-      "name": "Reader-II主系统-v4.0.0-alpha.1",
-      "fingerprint": "594a24d21199abc84dd0e58cac0bb6fac553d8d242d5d8714ae46b57c9816280"
+      "name": "Reader-II主系统-v4.0.0-alpha.2",
+      "fingerprint": "0347a71af7c310ca5b0dd0d008638c71087c285002f9c5500aafb2b511a114b3"
     },
     "loader": {
       "file": "dist/reader-ii.loader.json",
       "id": "e2a95f17-6c3b-4d84-a0f2-9b1c7e5d3a48",
-      "name": "Reader-II夜梦助手加载器-v4.0.0-alpha.1",
-      "fingerprint": "b2448edd3b77a4ec5c559cad6f2a4038c3b1ceeaa2f76c5d70d551a11d17a20b"
+      "name": "Reader-II夜梦助手加载器-v4.0.0-alpha.2",
+      "fingerprint": "01cb345286399adc962388992a955ff7bf55b2db9596524fa6fb2827e545099c"
     },
     "regex": [
       {
@@ -80,7 +80,7 @@
         },
         {
           "name": "[Reader-II] 通用读者核心",
-          "fingerprint": "253c8888caa0efc264b1fb67ab9ee7da59ade1c566af572910f3a358ed1c770e"
+          "fingerprint": "1e73e25665b34e6e6a4a79f1ccb309d027ac96380323ff8260ee745457ea61b5"
         },
         {
           "name": "Reader-II变量列表",
@@ -89,5 +89,21 @@
       ]
     }
   },
-  "history": {}
+  "history": {
+    "4.0.0-alpha.1": {
+      "script": "594a24d21199abc84dd0e58cac0bb6fac553d8d242d5d8714ae46b57c9816280",
+      "loader": "b2448edd3b77a4ec5c559cad6f2a4038c3b1ceeaa2f76c5d70d551a11d17a20b",
+      "regex": {
+        "a321f80c-96e4-418c-a666-f7c4f7ead4e4": "3dd8dc959c66ddcb4e13dabd8d50bb19534ed3ea67416136a43de7c7dd9cf61c",
+        "266633e9-9ca9-4ef8-bf2f-77dfc5df7c49": "3dd8dc959c66ddcb4e13dabd8d50bb19534ed3ea67416136a43de7c7dd9cf61c",
+        "89b4ce2b-1667-4cdd-9716-f0df6b6200fc": "0da25aa5010e0a12d2b812d112fa361c82bc1c335310214d573d3022dae2bbbf"
+      },
+      "worldbook": {
+        "[initvar]Reader-II初始化": "e5ae1309a07adc03e4b24bb525280bdf4b7d2f6419d4dde34ad1253ac94fed05",
+        "[mvu_update]Reader-II变量更新规则": "979a27c5bbe9642aa4146596b34980644caf2154f14904797bc14806593025b1",
+        "[Reader-II] 通用读者核心": "253c8888caa0efc264b1fb67ab9ee7da59ade1c566af572910f3a358ed1c770e",
+        "Reader-II变量列表": "1af6b0734608e25136625a62dddd275e53a1b05846c2cedd5010d5bdc2139a45"
+      }
+    }
+  }
 }

@@ -6,9 +6,11 @@
    *
    * 工具定义：
    *   { name, toolset = 'core', summary, params: [{ name, type: string|number|boolean|json, required, desc }],
-   *     effect: 'read' | 'note' | 'write' | 'danger' 或 (args) => 其一,
-   *     scope:  'workspace' | 'chat' | 'card' | 'tavern' | 'external' | 'device' 或 (args) => 其一,
+   *     effect: 'read' | 'note' | 'write' | 'danger' | 'net' 或 (args, ctx) => 其一（net = 联网，见 permissions.js）,
+   *     scope:  'workspace' | 'chat' | 'card' | 'tavern' | 'external' | 'device' 或 (args, ctx) => 其一,
    *     paths(args) → [VFS 路径]   这次调用会改到的资源：执行前留镜像，可撤销；也用来匹配权限规则
+   *     target(args) → 字符串      没有 VFS 路径的工具给权限规则匹配用（网址、cmd:命令 等）
+   *     sessionKey(args) → 字符串  「本次对话都允许」按它记（默认按 工具名 + 范围）；alwaysLabel(args) 是那个按钮上的字
    *     irreversible: true         无法自动撤销（斜杠命令、页面脚本等），会记进运行日志
    *     describe(args) → 给用户看的一句话, run(args, ctx) → 结果（字符串或可序列化对象） }
    *
@@ -83,8 +85,8 @@
     };
   }
 
-  function resolve(value, args, fallback) {
-    try { return typeof value === 'function' ? value(args) : value || fallback; } catch (error) { return fallback; }
+  function resolve(value, args, fallback, ctx) {
+    try { return typeof value === 'function' ? value(args, ctx) : value || fallback; } catch (error) { return fallback; }
   }
 
   /* 工具说明（写给模型看）。 */
@@ -109,7 +111,31 @@
     return (lines.join('\n') || '（空）') + tail;
   }
 
-  /* 在不带同源权限的沙箱 iframe 里跑一段脚本：碰不到酒馆，适合纯计算、数据处理、验证片段。 */
+  /*
+   * 沙箱里实际执行脚本的函数。它会被 toString() 之后放进沙箱（Worker 或 iframe）里运行，所以不能引用外面的任何变量。
+   */
+  function sandboxRunner(send, body) {
+    var logs = [];
+    var fmt = function (value) { try { return typeof value === 'string' ? value : JSON.stringify(value); } catch (error) { return String(value); } };
+    console.log = console.info = console.warn = console.error = function () {
+      if (logs.length < 200) logs.push(Array.prototype.map.call(arguments, fmt).join(' ').slice(0, 2000));
+    };
+    (async function () {
+      try {
+        var AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+        var result = await new AsyncFunction(body)();
+        send({ result: fmt(result === undefined ? null : result), logs: logs });
+      } catch (error) {
+        send({ error: String(error && error.stack || error), logs: logs });
+      }
+    })();
+  }
+
+  /*
+   * 在不带同源权限的沙箱 iframe 里跑一段脚本：碰不到酒馆，适合纯计算、数据处理、验证片段。
+   * 沙箱也不能联网：页面带 CSP（default-src 'none'），脚本放进 Worker 里跑——Worker 继承这份 CSP，发不出请求，也没有 location 可跳转。
+   * 这样「联网要先问」不会被一段沙箱脚本绕过去。Worker 起不来的浏览器退回在 iframe 里直接跑（CSP 仍拦着 fetch / XHR / WebSocket）。
+   */
   function runSandboxed(env, code, timeoutMs) {
     return new Promise(function (resolve, reject) {
       var doc = env.document, host = env.host;
@@ -135,12 +161,15 @@
       host.addEventListener('message', onMessage);
       frame.setAttribute('sandbox', 'allow-scripts');
       frame.style.display = 'none';
-      var body = 'const logs=[];const fmt=v=>{try{return typeof v==="string"?v:JSON.stringify(v)}catch(e){return String(v)}};'
-        + 'console.log=console.info=console.warn=console.error=(...a)=>{if(logs.length<200)logs.push(a.map(fmt).join(" ").slice(0,2000))};'
-        + '(async()=>{try{const result=await (async()=>{' + '\n' + code + '\n' + '})();'
-        + 'parent.postMessage({token:' + JSON.stringify(token) + ',result:fmt(result===undefined?null:result),logs},"*")}'
-        + 'catch(e){parent.postMessage({token:' + JSON.stringify(token) + ',error:String(e&&e.stack||e),logs},"*")}})()';
-      frame.srcdoc = '<!doctype html><script>' + body.replace(/<\/script/gi, '<\\/script') + '<\/script>';
+      var runner = '(' + sandboxRunner.toString() + ')';
+      var source = JSON.stringify(String(code));
+      var worker = runner + '(function(m){postMessage(m)},' + source + ');';
+      var body = 'var token=' + JSON.stringify(token) + ';var reply=function(m){m.token=token;parent.postMessage(m,"*")};'
+        + 'var direct=function(){' + runner + '(reply,' + source + ')};'
+        + 'try{var got=false;var w=new Worker(URL.createObjectURL(new Blob([' + JSON.stringify(worker) + '],{type:"text/javascript"})));'
+        + 'w.onmessage=function(e){got=true;reply(e.data)};w.onerror=function(){if(!got){got=true;try{w.terminate()}catch(x){}direct()}}}catch(e){direct()}';
+      frame.srcdoc = '<!doctype html><meta http-equiv="Content-Security-Policy" content="default-src \'none\'; script-src \'unsafe-inline\' \'unsafe-eval\' blob:; worker-src blob:; child-src blob:">'
+        + '<script>' + body.replace(/<\/script/gi, '<\\/script') + '<\/script>';
       doc.body.appendChild(frame);
     });
   }
@@ -218,7 +247,7 @@
       effect: function (args) { return args.target === 'page' ? 'danger' : 'read'; },
       scope: function (args) { return args.target === 'page' ? 'tavern' : 'workspace'; },
       irreversible: function (args) { return args.target === 'page'; },
-      summary: '运行一段 JavaScript 并取回 return 的值与 console 输出。target=sandbox（默认）在隔离沙箱里跑，碰不到酒馆，用来计算、处理数据、验证代码片段；target=page 在酒馆页面里跑，能访问 SillyTavern、TavernHelper 等一切对象，用来检查正在运行的东西。',
+      summary: '运行一段 JavaScript 并取回 return 的值与 console 输出。target=sandbox（默认）在隔离沙箱里跑，碰不到酒馆、不能联网、没有 DOM，用来计算、处理数据、验证代码片段；target=page 在酒馆页面里跑，能访问 SillyTavern、TavernHelper 等一切对象，用来检查正在运行的东西。',
       params: [{ name: 'code', type: 'string', required: true, desc: '函数体，可用 await，用 return 给出结果' }, { name: 'target', type: 'string', desc: 'sandbox 或 page' }],
       describe: function (args) { return args.target === 'page' ? '在酒馆页面里运行脚本' : '在沙箱里运行脚本'; },
       run: async function (args) {

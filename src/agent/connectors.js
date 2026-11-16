@@ -36,6 +36,8 @@
 
   function fromManifest(host, manifest) {
     if (!modules.isObject(manifest) || !/^[a-z][a-z0-9_]{1,31}$/.test(String(manifest.id || ''))) throw new Error('对接描述的 id 只能用小写字母、数字、下划线');
+    /* 对接的 id 就是工具箱的名字：不能占用内置工具箱的。 */
+    if (/^(?:core|reader|memory|tavern|web|device|mcp)$/.test(manifest.id)) throw new Error('对接描述的 id 不能用 ' + manifest.id + '（这是内置工具箱的名字）');
     var id = manifest.id;
     var tools = (Array.isArray(manifest.tools) ? manifest.tools : []).slice(0, 40).map(function (item) {
       if (!item || !/^[a-z][a-z0-9_]{1,47}$/.test(String(item.name || '')) || typeof item.call !== 'string') throw new Error('对接描述里的工具需要 name 与 call');

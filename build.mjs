@@ -40,12 +40,17 @@ export const EXT_MODULES = [
   'src/agent/vfs.js',
   'src/agent/providers.js',
   'src/agent/tools.js',
+  'src/agent/net.js',
+  'src/agent/web.js',
+  'src/agent/device.js',
+  'src/agent/mcp.js',
   'src/agent/connectors.js',
   'src/agent/skills.js',
   'src/agent/legacy-tools.js',
   'src/agent/personas.js',
   'src/agent/agent.js',
   'src/agent/updates.js',
+  'src/agent/ui-net.js',
   'src/agent/ui.js',
   'src/agent/boot.js'
 ];
@@ -290,6 +295,22 @@ function previousManifest() {
   try { return JSON.parse(readFileSync(file, 'utf8')); } catch { throw new Error(`${MANIFEST_FILE} 不是合法的 JSON：它带着历史版本的指纹，请先修好或从仓库恢复，不要直接删掉`); }
 }
 
+/* 后端伴侣（companion/）不经打包，直接随仓库分发；它与仓库根的 package.json 里的版本号跟着 manifest.json 走。 */
+export const PACKAGE_FILES = ['package.json', 'companion/package.json'];
+
+export function syncPackageVersions(version, check = false) {
+  const changed = [];
+  for (const file of PACKAGE_FILES) {
+    const data = JSON.parse(read(file));
+    if (data.version === version) continue;
+    if (check) throw new Error(`${file} 的版本号（${data.version}）与 manifest.json（${version}）不一致：先跑一次 node build.mjs`);
+    data.version = version;
+    writeFileSync(join(ROOT, file), JSON.stringify(data, null, 2) + '\n');
+    changed.push(file);
+  }
+  return changed;
+}
+
 function main() {
   const manifest = JSON.parse(read('manifest.json'));
   const ext = extBundle(manifest.version);
@@ -310,6 +331,7 @@ function main() {
     for (const [file, text] of outputs) writeFileSync(join(ROOT, file), text);
   }
   for (const [file, text, note] of outputs) console.log(`${file}  ${kb(text)}  (${note})`);
+  for (const file of syncPackageVersions(manifest.version, check)) console.log(`${file}  版本号同步为 ${manifest.version}`);
   console.log(check ? `检查通过（没有写文件），版本 ${manifest.version}` : `版本 ${manifest.version}`);
 }
 

@@ -104,7 +104,7 @@ async function runPage(cdp, url) {
   const evaluate = async (expression) => (await cdp.send('Runtime.evaluate', { expression, returnByValue: true }, sessionId)).result.value;
   const started = Date.now();
   let title = '';
-  while (Date.now() - started < 60000) {
+  while (Date.now() - started < 120000) {
     title = await evaluate('document.title').catch(() => '');
     if (/^SMOKE (PASS|FAIL)/.test(title)) break;
     await sleep(250);
@@ -177,7 +177,7 @@ async function runExtension(cdp, port) {
     const outcome = await runPage(cdp, `http://127.0.0.1:${port}/tools/smoke/host.html?${query}`);
     const ok = /^SMOKE PASS/.test(outcome.title);
     failed = failed || !ok;
-    console.log(`\n== ${label} ==  ${outcome.title || '没有跑完（60 秒内没有出结果）'}`);
+    console.log(`\n== ${label} ==  ${outcome.title || '没有跑完（120 秒内没有出结果）'}`);
     console.log(outcome.log.split('\n').filter((line) => /^(PASS|FAIL)/.test(line)).map((line) => '  ' + line).join('\n'));
   }
   return failed;

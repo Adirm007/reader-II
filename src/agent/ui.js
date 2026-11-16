@@ -58,7 +58,7 @@
     '#reader-agent-overlay .ra-chip{padding:3px 11px;border:1px solid var(--ra-line);border-radius:999px;background:transparent;font-size:12.5px;color:var(--ra-mute)}',
     '#reader-agent-overlay .ra-chip[aria-pressed="true"]{background:var(--ra-accent);border-color:var(--ra-accent);color:var(--ra-accent-ink)}',
     '#reader-agent-overlay .ra-input{display:flex;gap:8px;padding:10px 16px;border-top:1px solid var(--ra-line);background:var(--ra-panel)}',
-    '#reader-agent-overlay textarea,#reader-agent-overlay input[type=text],#reader-agent-overlay input[type=number],#reader-agent-overlay input[type=search],#reader-agent-overlay select{font:inherit;color:var(--ra-ink);background:var(--ra-bg);border:1px solid var(--ra-line);border-radius:8px;padding:7px 9px;min-width:0}',
+    '#reader-agent-overlay textarea,#reader-agent-overlay input[type=text],#reader-agent-overlay input[type=password],#reader-agent-overlay input[type=number],#reader-agent-overlay input[type=search],#reader-agent-overlay select{font:inherit;color:var(--ra-ink);background:var(--ra-bg);border:1px solid var(--ra-line);border-radius:8px;padding:7px 9px;min-width:0}',
     '#reader-agent-overlay .ra-input textarea{flex:1;height:64px;resize:none}',
     '#reader-agent-overlay .ra-foot{display:flex;gap:10px;align-items:center;padding:6px 16px 10px;font-size:12px;color:var(--ra-mute);background:var(--ra-panel)}',
     '#reader-agent-overlay .ra-foot span{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}@media (max-width:560px){.ra-foot span{white-space:normal}}',
@@ -83,7 +83,7 @@
     '#reader-agent-overlay .ra-form{display:grid;grid-template-columns:110px 1fr;gap:8px 10px;align-items:center}',
     '#reader-agent-overlay .ra-form label{font-size:13.5px;color:var(--ra-mute)}',
     '#reader-agent-overlay .ra-form textarea{width:100%;min-height:92px;resize:vertical}',
-    '#reader-agent-overlay .ra-form input[type=text],#reader-agent-overlay .ra-form select{width:100%}',
+    '#reader-agent-overlay .ra-form input[type=text],#reader-agent-overlay .ra-form input[type=password],#reader-agent-overlay .ra-form textarea,#reader-agent-overlay .ra-form select{width:100%}',
     '#reader-agent-overlay .ra-form .wide{grid-column:1/-1}',
     '#reader-agent-overlay .ra-check{display:flex;gap:8px;align-items:center;font-size:14px}',
     '#reader-agent-overlay .ra-status{font-size:12.5px;color:var(--ra-mute);min-height:1.4em}',
@@ -203,24 +203,30 @@
       return new Promise(function (resolve) {
         clearIndicator();
         var danger = request.tier === 'danger';
-        var node = append('<h4>' + (danger ? '需要确认：这个操作难以恢复' : '需要确认') + '</h4><div>' + esc(request.description || request.name) + '</div>'
+        var device = request.scope === 'device';
+        var title = danger ? '需要确认：这个操作难以恢复' : request.tier === 'net' ? '需要确认：要向外面发请求' : '需要确认';
+        var node = append('<h4>' + title + (device ? '（在你的设备上）' : '') + '</h4><div>' + esc(request.description || request.name) + '</div>'
           + '<pre>' + esc(JSON.stringify(request.args, null, 1)) + '</pre>'
           + '<div class="ra-row"><button type="button" class="ra-btn is-main" data-answer="allow">允许</button>'
-          + (danger ? '' : '<button type="button" class="ra-btn" data-answer="always">本次对话都允许这个工具</button>')
+          + (danger ? '' : '<button type="button" class="ra-btn" data-answer="always">' + esc(request.alwaysLabel || '本次对话都允许这个工具') + '</button>')
           + '<button type="button" class="ra-btn is-bad" data-answer="deny">拒绝</button></div>', 'ra-confirm' + (danger ? ' is-danger' : ''));
         var done = false;
         var finish = function (answer) {
           if (done) return;
           done = true;
           pendingConfirms = pendingConfirms.filter(function (item) { return item !== finish; });
-          if (node) node.innerHTML = '<div>' + esc(request.description || request.name) + '</div><div class="ra-note">' + (answer === 'deny' ? '已拒绝' : answer === 'always' ? '已允许（本次对话内不再询问这个工具）' : '已允许') + '</div>';
+          if (node) node.innerHTML = '<div>' + esc(request.description || request.name) + '</div><div class="ra-note">' + (answer === 'deny' ? '已拒绝' : answer === 'always' ? '已允许（本次对话内不再为此询问）' : '已允许') + '</div>';
           resolve(answer);
         };
         pendingConfirms.push(finish);
         if (!node) { finish('deny'); return; }
         node.addEventListener('click', function (event) {
           var button = event.target.closest('[data-answer]');
-          if (button) finish(button.getAttribute('data-answer'));
+          if (!button) return;
+          /* 设备上的操作只认真人的点击：页面里别的脚本用 click() 模拟的点击（isTrusted 为 false）不算数。
+             这只是多一道门槛；真正的边界在伴侣那边（要在设备本机的管理页放行）。 */
+          if (device && event.isTrusted === false && button.getAttribute('data-answer') !== 'deny') return;
+          finish(button.getAttribute('data-answer'));
         });
         var log = logNode();
         if (log) log.scrollTop = log.scrollHeight;
@@ -525,6 +531,7 @@
         + '<div class="ra-row"><button type="button" class="ra-btn" data-act="open-api">打开独立 API 设置</button><button type="button" class="ra-btn" data-act="open-panel">打开语义适配面板</button></div></div>'
         + '<div class="ra-row"><button type="button" class="ra-btn is-main" data-act="save-settings">保存设置</button><span class="ra-status" data-ra-status="settings"></span></div>'
         + connectorsCardHtml()
+        + (netUi ? netUi.cardsHtml() : '')
         + updatesCardHtml()
         + '<div class="ra-card"><h3>改动记录</h3><p class="ra-note">助手每一轮改过的东西都留有改动前的样子，可以按轮撤销。之后又被别处改过的不会被强行覆盖。</p><div id="ra-runs"></div></div>';
       renderRuns();
@@ -569,8 +576,14 @@
         + (rows || '<p class="ra-note">还没有。</p>')
         + '<textarea id="ra-conn-json" spellcheck="false" placeholder="{&quot;id&quot;: &quot;myplugin&quot;, &quot;title&quot;: &quot;我的插件&quot;, &quot;detect&quot;: &quot;window.MyPlugin&quot;, &quot;tools&quot;: […]}" style="width:100%;min-height:110px;margin-top:6px;box-sizing:border-box"></textarea>'
         + '<div class="ra-row"><button type="button" class="ra-btn is-small" data-act="conn-save">添加 / 按 id 更新</button><span class="ra-note">这一栏的改动立即生效。</span></div>'
-        + '<div id="ra-mcp" data-slot="mcp"><p class="ra-note" style="margin-top:10px"><b>MCP 服务器</b>：下一版加入（HTTP 直连；TauriTavern 走宿主自带的 MCP）。</p></div></div>';
+        + '<div id="ra-mcp" data-slot="mcp">' + (netUi ? netUi.mcpHtml() : '') + '</div></div>';
     }
+
+    /* 联网、MCP、后端伴侣三块设置在 ui-net.js；这里只留插槽与分发。 */
+    var netUi = deps && typeof deps.netUi === 'function' ? deps.netUi({
+      $: $, esc: esc, toast: toast,
+      ask: function (text) { showTab('chat'); if (!running) send(text); }
+    }) : null;
 
     function settingsAction(action, actor) {
       try {
@@ -792,8 +805,10 @@
         else if (action.indexOf('mem-') === 0) memoryAction(action, actor);
         else if (action.indexOf('rule-') === 0 || action.indexOf('conn-') === 0) settingsAction(action, actor);
         else if (action.indexOf('upd-') === 0) updatesAction(action, actor);
+        else if (netUi && /^(?:net|mcp|comp)-/.test(action)) netUi.action(action, actor, event);
       });
       overlay.addEventListener('change', function (event) {
+        if (netUi && netUi.change(event)) return;
         if (event.target.id === 'ra-upd-scope' && updates) {
           try { updates.saveSettings({ scope: event.target.value }); } catch (error) { /* 下面重新检查时会报出来 */ }
           updatesAction('upd-inspect');

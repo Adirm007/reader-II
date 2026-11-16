@@ -23,7 +23,10 @@
     { name: 'lwb-variables', summary: '小白X 的变量：存放位置、<state> 写法、模板与约束' },
     { name: 'card-workflow', summary: '制卡工作流：从设定到角色卡、世界书、开场白，再在当前酒馆里试跑；也说明怎么自定义工作流' },
     { name: 'connector-authoring', summary: '给没有预置对接的插件写对接：找接口、起草 connector.json、试调、启用' },
-    { name: 'reader-ii', summary: 'Reader-II 自己：FP、语义槽、轻信、大厅、抽卡各是什么，出问题看哪里' }
+    { name: 'reader-ii', summary: 'Reader-II 自己：FP、语义槽、轻信、大厅、抽卡各是什么，出问题看哪里' },
+    { name: 'web-github', summary: '联网与 GitHub：抓网页、读仓库（gh:/）、搜代码、把工作区里做好的东西推送上去' },
+    { name: 'mcp', summary: 'MCP 服务器：怎么接入、工具箱怎么用、连不上时怎么排查' },
+    { name: 'device', summary: '在设备上做事（要后端伴侣）：dev:/ 文件、跑命令与后台任务、装依赖、无头浏览器、给酒馆写扩展的流程' }
   ];
 
   function parseFrontmatter(text) {

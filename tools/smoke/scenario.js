@@ -212,6 +212,114 @@ async function main() {
     assert(/全部校验通过/.test(listed) && /主脚本/.test(listed) && /世界书/.test(listed) && /正则/.test(listed), '卡内组件清单不对：' + listed.slice(0, 200));
   });
 
+  /* ---------- 联网、MCP、后端伴侣（交接 0.6 乙组）；假对端在 host.html 里 ---------- */
+  await step('沙箱脚本不能联网（CSP + Worker）', async () => {
+    $('#reader-agent-overlay [data-tab="chat"]').click();
+    const before = mock.llmCalls.length;
+    /* 本机的静态服务器是连得上的：没有 CSP 的话这个请求会成功。Worker 里没有 document。 */
+    const target = location.origin + '/manifest.json';
+    const code = `let net; try { await fetch(${JSON.stringify(target)}, { mode: 'no-cors' }); net = 'reached'; } catch (error) { net = 'blocked'; } return net + '/' + typeof document;`;
+    await ask('再算一下', [call('run_js', { code }), '算完了。']);
+    const feedback = mock.llmCalls[before + 1].at(-1).content;
+    assert(/返回：blocked\/undefined/.test(feedback), feedback.slice(0, 300));
+  });
+
+  await step('联网：陌生主机先问，可按主机记住；网页转成正文并留在 web:/', async () => {
+    const before = mock.llmCalls.length;
+    mock.replies.push(call('web_fetch', { url: 'https://docs.smoke.test/page' }), '读完了。');
+    const input = await until(() => $('#ra-text'), '输入框');
+    input.value = '读一下那个页面';
+    $('#ra-send').click();
+    const card = await until(() => $('#ra-log .ra-confirm [data-answer="always"]')?.closest('.ra-confirm'), '确认卡');
+    assert(/要向外面发请求/.test(card.textContent), '确认卡没有说明这是联网：' + card.textContent.slice(0, 80));
+    assert(/本次对话都允许访问 docs\.smoke\.test/.test(card.textContent), '确认卡上没有按主机记住的按钮');
+    card.querySelector('[data-answer="always"]').click();
+    await until(() => !window.ReaderII.agent.isBusy(), '本轮结束', 15000);
+    const feedback = mock.llmCalls[before + 1].at(-1).content;
+    assert(/《冒烟文档》/.test(feedback) && /# 安装/.test(feedback), '网页没有转成正文：' + feedback.slice(0, 300));
+    assert(/\[下载页\]\(https:\/\/docs\.smoke\.test\/dl\)/.test(feedback), '链接没有转成绝对地址：' + feedback.slice(0, 300));
+    assert(/```\nnpm i reader\n```/.test(feedback), '代码块没有保留：' + feedback.slice(0, 300));
+    assert(!/导航栏|页脚|injected/.test(feedback), '导航、页脚或脚本混进了正文');
+    const cached = await vfs.list('web:/', {});
+    assert(cached.items.length === 1 && mock.web.hits.length === 1, '缓存或请求次数不对');
+    /* 同一主机第二次不再问。 */
+    await ask('再读另一页', [call('web_fetch', { url: 'https://docs.smoke.test/other' }), '读完了。']);
+    assert(mock.web.hits.length === 2, '第二次访问没有发出');
+    assert(document.querySelectorAll('#ra-log .ra-confirm [data-answer]').length === 0, '同一主机又问了一次');
+    return cached.items[0].name;
+  });
+
+  await step('MCP：粘贴 JSON 添加服务器 → 工具箱 → 调用 → 删除（密钥不进酒馆设置）', async () => {
+    $('#reader-agent-overlay [data-tab="settings"]').click();
+    const box = await until(() => $('#ra-mcp-json'), 'MCP 输入框');
+    assert($('#ra-net-card') && $('#ra-comp-card'), '设置页缺少「联网」或「后端伴侣」卡');
+    assert(!/undefined|\[object /.test($('#reader-agent-overlay [data-pane="settings"]').textContent), '设置页文字里出现了 undefined');
+    box.value = JSON.stringify({ mcpServers: { smoke: { url: 'https://mcp.smoke.test/mcp', headers: { Authorization: 'Bearer s3cret-smoke' } } } });
+    $('#reader-agent-overlay [data-act="mcp-add"]').click();
+    await until(() => /2 个工具/.test($('#ra-mcp')?.textContent || ''), 'MCP 工具目录', 10000);
+    assert(/已添加，2 个工具/.test($('#ra-mcp-note')?.textContent || ''), '没有显示添加结果：' + ($('#ra-mcp-note')?.textContent || ''));
+    assert(mock.mcp.seen[0].auth === 'Bearer s3cret-smoke', '请求头没有带上密钥');
+    assert(mock.mcp.seen.at(-1).session === 'smoke-session', '后续请求没有带会话标识');
+    const settingsText = JSON.stringify(window.SillyTavern.getContext().extensionSettings);
+    assert(!settingsText.includes('s3cret-smoke') && /"smoke"/.test(settingsText), '密钥进了酒馆设置，或服务器没有保存');
+    assert((localStorage.getItem('reader_ii_secrets_v1') || '').includes('s3cret-smoke'), '密钥没有存到本机');
+    assert(agent.listToolsets().some((set) => set.name === 'mcp/smoke'), '没有登记成工具箱');
+    $('#reader-agent-overlay [data-tab="chat"]').click();
+    const before = mock.llmCalls.length;
+    await ask('用一下那个工具', [call('mcp_smoke_echo', { text: '夜梦' }), '调用完了。'], 'allow');
+    const feedback = mock.llmCalls[before + 1].at(-1).content;
+    assert(/echo: \{"text":"夜梦"\}/.test(feedback), feedback.slice(0, 300));
+    assert(/- mcp\/smoke：/.test(mock.llmCalls[before][0].content), '工具箱目录里没有这个服务器');
+    $('#reader-agent-overlay [data-tab="settings"]').click();
+    (await until(() => $('#ra-mcp [data-mcp="smoke"] [data-act="mcp-del"]'), '删除按钮')).click();
+    (await until(() => $('#ra-mcp [data-mcp="smoke"] [data-act="mcp-del"][data-armed="1"]'), '二次确认')).click();
+    await until(() => !$('#ra-mcp [data-mcp="smoke"]'), '服务器从列表里消失');
+    assert(!agent.listToolsets().some((set) => set.name === 'mcp/smoke') && agent.getSettings().mcp.servers.length === 0, '删除后还留着');
+    assert(!(localStorage.getItem('reader_ii_secrets_v1') || '').includes('s3cret-smoke'), '删除后密钥还在本机');
+  });
+
+  await step('后端伴侣：没装时如实显示；配对放行；设备上的确认只认真人点击；断开', async () => {
+    $('#reader-agent-overlay [data-tab="settings"]').click();
+    (await until(() => $('#reader-agent-overlay [data-act="comp-check"]'), '检测按钮')).click();
+    await until(() => /没有检测到后端伴侣/.test($('#ra-comp-card')?.textContent || ''), '未检测到的提示');
+    assert(/没有连接后端伴侣/.test((await vfs.list('dev:/', {})).items[0].name), 'dev:/ 没有给出说明');
+    assert(!$('#reader-agent-overlay [data-act="comp-pair"]'), '没检测到伴侣时不该有申请放行的按钮');
+
+    mock.companion.present = true;
+    $('#reader-agent-overlay [data-act="comp-check"]').click();
+    const pairButton = await until(() => $('#reader-agent-overlay [data-act="comp-pair"]'), '申请放行按钮');
+    assert(/已检测到伴侣/.test($('#ra-comp-state').textContent), '状态行不对：' + $('#ra-comp-state').textContent);
+    pairButton.click();
+    await until(() => ($('#ra-comp-code')?.textContent || '') === '4821', '配对码');
+    await until(() => /已连接并放行/.test($('#ra-comp-state')?.textContent || ''), '放行后的状态', 8000);
+    assert(window.ReaderII.companion.ready(), '伴侣没有就绪');
+    assert(!JSON.stringify(window.SillyTavern.getContext().extensionSettings).includes(mock.companion.token), '伴侣令牌进了酒馆设置');
+    assert((await vfs.readText('dev:/~/a.txt')) === '设备上的文件\n', '读不到设备上的文件');
+
+    /* 设备上的操作：脚本模拟的点击不能点「允许」。 */
+    agent.saveSettings({ mode: 'device' });
+    $('#reader-agent-overlay [data-tab="chat"]').click();
+    mock.replies.push(call('device_exec', { command: 'echo hi' }), '你没有同意。');
+    const input = await until(() => $('#ra-text'), '输入框');
+    input.value = '跑一条命令';
+    $('#ra-send').click();
+    const allow = await until(() => $('#ra-log .ra-confirm [data-answer="allow"]'), '确认卡');
+    assert(/在你的设备上/.test(allow.closest('.ra-confirm').textContent), '确认卡没有标明是设备上的操作');
+    allow.click();
+    await sleep(300);
+    assert(window.ReaderII.agent.isBusy() && !mock.companion.ops.some((item) => item.op === 'exec'), '模拟的点击竟然放行了设备上的命令');
+    $('#ra-log .ra-confirm [data-answer="deny"]').click();
+    await until(() => !window.ReaderII.agent.isBusy(), '本轮结束', 15000);
+    assert(!mock.companion.ops.some((item) => item.op === 'exec'), '被拒绝的命令还是执行了');
+
+    $('#reader-agent-overlay [data-tab="settings"]').click();
+    (await until(() => $('#reader-agent-overlay [data-act="comp-release"]'), '断开按钮')).click();
+    await until(() => /还没放行/.test($('#ra-comp-state')?.textContent || ''), '断开后的状态');
+    assert(!(localStorage.getItem('reader_ii_secrets_v1') || '').includes(mock.companion.token), '断开后令牌还在本机');
+    agent.saveSettings({ mode: 'card' });
+    mock.companion.present = false;
+  });
+
   await step('全程没有新的报错', async () => {
     const errors = (window.__readerIIProbe && window.__readerIIProbe.errors || []).map((item) => item.text);
     assert(errors.length === 0, errors.join(' | ').slice(0, 400));

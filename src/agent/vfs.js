@@ -13,7 +13,9 @@
    *     list(segs, { offset, limit }) → { items: [{ name, dir, size, note }], total },
    *     read(segs) → string | null（不存在）,
    *     write(segs, text), remove(segs),
-   *     bulk(segs) → [{ path, text }]   检索用的快速通道，省略时按 list / read 递归 }
+   *     bulk(segs) → [{ path, text }]   检索用的快速通道，省略时按 list / read 递归,
+   *     grep(segs, pattern, { flags, context, limit, signal }) → { hits, total, files, scanned } | null
+   *                                     整个检索交给挂载点自己做（设备上的目录在伴侣那边检索，不把文件一个个搬过来）；返回 null 时走默认办法 }
    *
    * 写入一律经过这里：先留写入前镜像（撤销用），再交给挂载点。
    */
@@ -258,6 +260,11 @@
       catch (error) { expression = new RegExp(String(pattern).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), flags); }
       var context = Math.max(0, Math.min(5, Math.trunc(Number(opts.context) || 0)));
       var limit = Math.max(1, Math.min(200, Math.trunc(Number(opts.limit) || 40)));
+      var where = parsePath(path), owner = provider(where);
+      if (typeof owner.grep === 'function') {
+        var delegated = await owner.grep(where.segs, String(pattern), { flags: flags, context: context, limit: limit, signal: opts.signal, canonical: where.canonical });
+        if (delegated) return delegated;
+      }
       var files = await collect(path, { files: Math.max(1, Number(opts.maxFiles) || 600) });
       var hits = [], total = 0, matchedFiles = 0;
       for (var index = 0; index < files.length; index += 1) {
@@ -298,6 +305,7 @@
     };
   }
 
+  modules.vfsNumbered = numbered;
   modules.vfsEnc = enc;
   modules.vfsDec = dec;
   modules.parseVfsPath = parsePath;

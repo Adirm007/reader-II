@@ -1,0 +1,15 @@
+{
+  "name": "reader-ii-companion",
+  "version": "4.0.0-alpha.2",
+  "private": true,
+  "description": "Reader-II 夜梦助手的后端伴侣（酒馆后端插件 / 独立运行）。只用 Node 标准库。",
+  "type": "module",
+  "main": "index.mjs",
+  "scripts": {
+    "start": "node standalone.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "SEE LICENSE IN ../LICENSE"
+}

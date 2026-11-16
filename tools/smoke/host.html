@@ -136,10 +136,61 @@
     };
   }
 
+  /* ---------- 联网、MCP、后端伴侣的假对端（交接 0.6 乙组） ---------- */
+  const jsonReply = (data, status = 200, headers = {}) => new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json', ...headers } });
+  const headerOf = (init, name) => {
+    const headers = (init && init.headers) || {};
+    const key = Object.keys(headers).find((item) => item.toLowerCase() === name);
+    return key ? headers[key] : undefined;
+  };
+  state.web = { hits: [] };
+  const DOC_PAGE = '<!doctype html><html><head><title>冒烟文档</title><style>p{color:red}</style></head><body><nav>导航栏</nav><main><h1>安装</h1><p>先打开 <a href="/dl">下载页</a>。</p><pre>npm i reader</pre></main><footer>页脚</footer><scr' + 'ipt>window.injected = 1</scr' + 'ipt></body></html>';   /* 拆开写：这段在内联脚本里，不能出现完整的结束标签 */
+
+  /* 假的 MCP 服务器（Streamable HTTP，JSON 回应）。 */
+  state.mcp = { seen: [] };
+  function mcpFetch(init) {
+    const message = JSON.parse(init.body);
+    state.mcp.seen.push({ method: message.method, auth: headerOf(init, 'authorization'), session: headerOf(init, 'mcp-session-id'), params: message.params });
+    const reply = (result, extra) => jsonReply({ jsonrpc: '2.0', id: message.id, result }, 200, extra);
+    if (message.method === 'initialize') return reply({ protocolVersion: '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'smoke', version: '1' } }, { 'Mcp-Session-Id': 'smoke-session' });
+    if (message.method === 'notifications/initialized') return new Response(null, { status: 202 });
+    if (message.method === 'tools/list') return reply({ tools: [
+      { name: 'echo', description: '原样返回一段文字', inputSchema: { type: 'object', properties: { text: { type: 'string', description: '要返回的文字' } }, required: ['text'] } },
+      { name: 'now', description: '现在几点', inputSchema: { type: 'object' }, annotations: { readOnlyHint: true } },
+    ] });
+    if (message.method === 'tools/call') return reply({ content: [{ type: 'text', text: 'echo: ' + JSON.stringify(message.params.arguments) }] });
+    return jsonReply({ jsonrpc: '2.0', id: message.id, error: { code: -32601, message: 'no such method' } });
+  }
+
+  /* 假的后端伴侣：present 为 false 时就是「没装」（酒馆对不认识的 /api/ 路径回 404）。 */
+  state.companion = { present: false, granted: false, token: 'c'.repeat(64), ops: [], files: { '~/a.txt': '设备上的文件\n' } };
+  function companionFetch(path, init) {
+    const fake = state.companion;
+    if (!fake.present) return new Response('Not Found', { status: 404 });
+    const authed = fake.granted && headerOf(init, 'x-reader-ii-token') === fake.token;
+    const body = init.body ? JSON.parse(init.body) : {};
+    if (path === '/status') return jsonReply({ ok: true, name: 'reader-ii-companion', api: 1, version: 'smoke', mode: 'plugin', platform: 'SmokeOS x64', adminUrl: 'http://127.0.0.1:8790/', grant: authed ? { expiresAt: Date.now() + 2 * 3600 * 1000, persistent: false } : null });
+    if (path === '/pair') return jsonReply({ ok: true, id: 'smoke1', code: '4821', adminUrl: 'http://127.0.0.1:8790/', expiresInSec: 600 });
+    if (path === '/pair/smoke1') { fake.granted = true; return jsonReply({ ok: true, state: 'approved', token: fake.token, expiresAt: Date.now() + 2 * 3600 * 1000 }); }
+    if (path === '/release') { fake.granted = false; return jsonReply({ ok: true }); }
+    if (!path.startsWith('/op/')) return new Response('Not Found', { status: 404 });
+    if (!authed) return jsonReply({ ok: false, code: 'no_grant', error: '没有放行' }, 401);
+    const op = path.slice(4);
+    fake.ops.push({ op, body });
+    const key = (body.segs || []).join('/');
+    if (op === 'fs_list') return jsonReply({ ok: true, result: { items: [{ name: '~', dir: true }, { name: '@ws', dir: true }], total: 2 } });
+    if (op === 'fs_read') return jsonReply({ ok: true, result: key in fake.files ? { text: fake.files[key] } : { missing: true } });
+    if (op === 'exec') return jsonReply({ ok: true, result: { id: 'j1', running: false, exitCode: 0, durationMs: 50, output: 'ok\n', totalChars: 3, truncated: false } });
+    return jsonReply({ ok: false, code: 'unknown_op', error: '假伴侣不认识这个操作' });
+  }
+
   /* 静态服务器不认识酒馆的 /api/：在这里接住。 */
   const realFetch = window.fetch.bind(window);
   window.fetch = async (input, init) => {
     const url = typeof input === 'string' ? input : input.url;
+    if (url.startsWith('https://docs.smoke.test/')) { state.web.hits.push(url); return new Response(DOC_PAGE, { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } }); }
+    if (url === 'https://mcp.smoke.test/mcp') return mcpFetch(init || {});
+    if (url.startsWith('/api/plugins/reader-ii/')) return companionFetch(url.slice('/api/plugins/reader-ii'.length), init || {});
     if (url.startsWith('/api/')) {
       state.posts.push({ url, body: init && init.body ? JSON.parse(init.body) : null });
       const body = url === '/api/extensions/discover' ? [{ type: 'global', name: 'third-party/reader-II' }] : {};

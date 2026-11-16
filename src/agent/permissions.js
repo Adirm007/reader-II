@@ -14,8 +14,11 @@
    * 确认方式：ask 每次写入都问 ｜ auto 档位内直接做、危险操作仍问 ｜ yolo 全部直接做。
    * 规则：按路径通配的 allow / ask / deny，先于上面的判断；deny 永远生效，allow 不能越过档位。
    *
-   * 每次调用给出 { effect: read | note | write | danger, scope: workspace | chat | card | tavern | external | device, path, tool }。
+   * 每次调用给出 { effect: read | note | write | danger | net, scope: workspace | chat | card | tavern | external | device, path, tool, key }。
    * note 指她自己的记事（记忆、计划）：单卡及以上直接放行。
+   * net 指联网：向外发请求、但不改酒馆里的东西（抓一个没见过的网站、调用 MCP 工具）。它不受档位限制，但默认每次都问：
+   *   卡里、网页里的文字可能诱导她把聊天内容发到别处，所以「发往哪里」要让用户看一眼。
+   *   免问的办法：确认卡上的「本次对话都允许」（按 key 记，例如同一个主机）、权限规则里的免问、或「全部直接执行」。
    */
   var modules = root.__ReaderIIModules = root.__ReaderIIModules || {};
   var MODE_RANK = { readonly: 0, card: 1, tavern: 2, device: 3 };
@@ -65,7 +68,7 @@
       return hit;
     }
 
-    function sessionKey(request) { return String(request.tool || '') + '|' + String(request.scope || ''); }
+    function sessionKey(request) { return request.key ? 'key|' + String(request.key) : String(request.tool || '') + '|' + String(request.scope || ''); }
 
     function evaluate(request) {
       var current = settings();
@@ -77,6 +80,13 @@
       if (effect === 'read') {
         if (scope === 'device' && current.mode !== 'device') return { decision: 'deny', reason: '读取设备上的文件需要「设备全权」档位。请告诉用户可以在助手设置里调整。' };
         return { decision: rule && rule.effect === 'ask' ? 'ask' : 'allow' };
+      }
+      if (effect === 'net') {
+        if (scope === 'device' && current.mode !== 'device') return { decision: 'deny', reason: '这个操作要经过设备上的后端伴侣，需要「设备全权」档位。请告诉用户可以在助手设置里调整。' };
+        if (rule && rule.effect === 'allow') return { decision: 'allow' };
+        if (rule && rule.effect === 'ask') return { decision: 'ask' };
+        if (current.approval === 'yolo' || session[sessionKey(request)]) return { decision: 'allow' };
+        return { decision: 'ask' };
       }
       if (scope === 'workspace') return { decision: 'allow' };
       if (SCOPE_RANK[scope] > MODE_RANK[current.mode]) {
