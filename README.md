@@ -2,67 +2,31 @@
 
 Reader-II 是「九十九夜梦·读者」的通用版：可以附加到任意角色卡（用 MVU 的卡、小白X 变量的卡、纯文字卡都行），带来轻信（信纸）、读者大厅、命运抽卡，以及能直接查看和修改酒馆的夜梦助手与跨存档的记忆。
 
-当前版本 **4.0.0-alpha.2**（预览版）。许可见 [LICENSE](LICENSE)（与原版读者同一份协议）。
-
-## 由什么组成
-
-| 部分 | 是什么 | 怎么装 | 负责 |
-|---|---|---|---|
-| ① 酒馆扩展 | 仓库根目录本身：`manifest.json` + `index.js` + `dist/reader-ii.ext.js` | 酒馆「安装扩展」填本仓库链接；TauriTavern 同样可装 | 夜梦助手、记忆、联网与 GitHub、MCP、插件对接、检查更新 |
-| ② 卡内组件 | `dist/` 里的酒馆助手主脚本、世界书、三条正则 | 在夜梦助手面板里一键代装，或手动导入 | 七槽语义层、轻信、大厅、命运抽卡、条目模仿 |
-| ③ 后端伴侣（可选） | `companion/`：酒馆后端插件，也可以独立运行 | 克隆进酒馆的 `plugins/`，或 `node companion/standalone.mjs`；见 [companion/README.md](companion/README.md) | 「设备全权」：跑命令、读写设备文件、无头浏览器、命令类的 MCP 服务器 |
-
-① 不依赖酒馆助手与 MVU；② 需要酒馆助手，宿主卡没有 MVU 时会自己加载一份。没装 ① 时，② 会在需要夜梦助手时从 jsDelivr 加载同一份扩展包。③ 不装也不影响 ① ②。
-
-### 四类环境
-
-| 环境 | ① 扩展 | ② 卡内组件 | 联网 / GitHub / 网址类 MCP | ③ 后端伴侣 |
-|---|---|---|---|---|
-| 电脑 · 原生酒馆 | ✓ | ✓ | ✓ | ✓（酒馆后端插件） |
-| 手机 · 原生酒馆（Termux） | ✓ | ✓ | ✓ | 可装，不强求（多半没有无头浏览器） |
-| 电脑 · TauriTavern | ✓ | 要酒馆助手 | ✓（它自带的 MCP 也能带过来） | 只能独立运行 |
-| 手机 · TauriTavern | ✓ | 要酒馆助手 | ✓ | 不能 |
+当前版本 **4.1.0-alpha.1**（预览版）。许可见 [LICENSE](LICENSE)（与原版读者同一份协议）。
 
 ## 安装
 
-1. **先装好**：酒馆助手（JS-Slash-Runner）；提示词模板（ST-Prompt-Template，世界书里的 EJS 要用）。
-2. **装扩展 ①**：酒馆顶栏「扩展」（三个方块）→「安装扩展」，填 `https://github.com/Adirm007/reader-II`，装好后刷新。扩展菜单里出现「夜梦助手」就是装好了。
-   - 也可以手动装：把 `manifest.json`、`index.js`、`dist/`、`knowledge/` 拷到酒馆的 `data/<用户名>/extensions/reader-II/`。
-3. **用过 v3.3 的先停掉旧版**：在酒馆助手里停用或删掉「Reader-II主系统」与「Reader-II兼容检查」两个脚本，把世界书「世界书-Reader-II核心」从卡上解绑。两份核心同时在会重复注入。
-4. **装卡内组件 ②**：打开要用的角色卡的聊天，夜梦助手面板 →「设置」→「检查更新」→「检查卡内组件」→「安装 / 更新卡内组件」。它会：
-   - 把主脚本装进当前角色卡的脚本库（也可以选全局）；
-   - 把三条正则装进全局正则；
-   - 新建世界书 `reader-ii.worldbook` 并挂到卡上（挂不上时会提示你手动挂）。
+只装一个 Reader-II 扩展，语义层、轻信、大厅、抽卡、提示词、记忆与夜梦助手都在扩展里。不要求另装酒馆助手、MVU 或提示词模板；已有的宿主变量仍可接入。
 
-   也可以手动导入 `dist/` 里的文件，顺序随意：
-   - `reader-ii.script.json` → 酒馆助手脚本库；
-   - `reader-ii.worldbook.json` → 世界书（书名 `reader-ii.worldbook`），挂到卡上；
-   - `reader-ii.regex.event-prompt.json`、`reader-ii.regex.event-display.json`、`reader-ii.regex.dream-render.json` → 酒馆的正则。
+1. 酒馆顶栏「扩展」→「安装扩展」，填 `https://github.com/Adirm007/reader-II`，装好后刷新。
+2. 打开角色卡的聊天，从扩展菜单「Reader-II · 大厅」进入，或输入不带内容的 `/yume`。
+3. 这张卡还没启用时，会先问一次：选「启用并进入大厅」「只用夜梦助手」或「先不用」。启用按卡保存，之后可以在「彩蛋服务台 → 助手设置 → 这张卡」里关掉。
 
-   世界书里的 `[initvar]` 条目保持停用是正常的：MVU 按条目名读取它。
-5. **加载器（可选）**：`dist/reader-ii.loader.json` 给「没装扩展、聊天里也没有 ② 的卡」用，从 jsDelivr 加载夜梦助手。装了扩展就不需要它。
-6. **后端伴侣 ③（可选）**：见下面「后端伴侣」一节。
+也可以手动把 `manifest.json`、`index.js`、`dist/`、`knowledge/` 拷到酒馆的 `data/<用户名>/extensions/reader-II/`。后端伴侣可选，只在需要操作设备文件、跑命令或启动命令类 MCP 时安装，见下文与 [companion/README.md](companion/README.md)。
 
 ## 更新
 
-夜梦助手面板「设置 → 检查更新」：
+从大厅的「彩蛋服务台 → 助手设置 → 版本更新」点「检查更新」，比对更新源上的 `manifest.json` 版本。默认更新源为 GitHub 与 jsDelivr，可以修改；所有源都失败时显示检查失败。
 
-- **「检查更新」**：比对更新源上的 `manifest.json` 版本。更新源默认 GitHub 与 jsDelivr，可以改。
-  - 有新版时，到酒馆「扩展 → 管理扩展」里点 Reader-II 的更新（就是 git pull），然后刷新。
-  - 没装扩展、夜梦助手从 CDN 加载的，刷新页面就是新版。
-- **「检查卡内组件」**：把 ② 更新到与扩展相同的版本。
-  - 动手前，先把所有文件下载下来、按 `dist/reader-ii.manifest.json` 的 SHA-256 逐个校验；有一个不对就什么都不改。
-  - 写到一半出错，已写的会退回。
-  - 你改过的脚本、正则、世界书条目不会被覆盖。改过的世界书条目旁边会另放一份停用的新版供对照。
-  - 被替换的旧条目改名为 `[备份 v旧版本] …` 并停用。
-  - 你的开关、脚本变量、按钮显示、正则的作用范围都保留。
-- **后端伴侣**：在它的目录里 `git pull`，然后重启酒馆（或重启独立运行的伴侣）。伴侣与扩展要是同一版本；对不上时设置页会提示。
+有新版时，到酒馆「扩展 → 管理扩展」里更新 Reader-II，然后刷新页面。从 alpha 版升级时，扩展会自动接管并停用旧 Reader-II 主脚本、加载器与旧世界书条目；有正文格式化钩子的酒馆会清理未修改的旧正则，旧版酒馆继续用正则兜底。用户不用手动删除；接管后若提示刷新，刷新一次即可。
 
-你的设置、记忆、夜梦助手的工作区和对话记录都不在扩展目录里，更新不会动它们。**不要直接改扩展目录里的文件**（git pull 会因此失败，或者把改动冲掉）。自定义的东西放夜梦助手的工作区 `ws:/`，或者另写一个扩展。
+后端伴侣在它的目录里更新后，需要重启酒馆或独立运行的伴侣。伴侣与扩展版本对不上时，设置页会提示。
+
+设置、记忆、夜梦助手的工作区和对话记录不在扩展目录里。不要直接改扩展目录里的文件；自定义内容放工作区 `ws:/`，或另写一个扩展。
 
 ## 七个语义槽
 
-Reader 的功能读写的是七个语义槽。每一槽可以继续用 Reader 自带的后备变量，也可以在「Reader Core」面板里绑定到宿主卡已有的变量；绑定后宿主数据为准，Reader 不再保留副本。
+Reader 的功能读写的是七个语义槽。每一槽可以继续用 Reader 自带的后备变量，也可以在「语义适配」面板里绑定到宿主卡已有的变量；绑定后宿主数据为准，Reader 不再保留副本。
 
 | 槽位 | 没绑定时的后备 | 绑定宿主时要的语义 |
 |---|---|---|
@@ -82,7 +46,7 @@ Reader 的功能读写的是七个语义槽。每一槽可以继续用 Reader �
 
 ## 夜梦助手
 
-扩展菜单「夜梦助手」、命令 `/yume`、大厅里点夜梦的立绘都能打开她。她像编程助手那样工作：酒馆里的东西都有路径，她用 `ls / read / grep / edit / write` 检索、分段读、精确替换，不把整段大脚本塞进上下文。
+从大厅「彩蛋服务台」的「和夜梦说说话」打开她；服务台另有「助手设置」「语义适配」「记忆」三个入口。她像编程助手那样工作：酒馆里的东西都有路径，她用 `ls / read / grep / edit / write` 检索、分段读、精确替换，不把整段大脚本塞进上下文。
 
 - **能看能改的**：
   - 聊天正文、角色卡（当前卡与全部卡）、世界书、正则、酒馆助手脚本、预设；
@@ -97,6 +61,12 @@ Reader 的功能读写的是七个语义槽。每一槽可以继续用 Reader �
 - **撤销**：每一轮改过的东西（包括设备上的文件）都留有改动前的样子，可以在「设置 → 改动记录」里按轮撤销；之后又被别处改过的不会强行覆盖。命令、推送这类撤销不了的会标明。
 - **插件对接**：自动认出酒馆助手、MVU、小白X、柏宝书、shujuku、提示词模板、TauriTavern 等，按需打开对应的工具箱；也可以导入声明式的 `connector.json`。
 - **省 token**：工具箱与知识库按需加载（只聊天时不带一堆工具说明）；「轻聊」开关完全不带工具；「剧情察知」（默认开）可以关。
+
+助手窗口有「对话 / 记忆 / 设置」三页。标题栏左边「服务台」返回大厅的彩蛋服务台（这张卡启用了 Reader-II 时才显示），右上角关闭回到聊天。助手窗口与语义适配面板跟随大厅的咖啡馆 / 盛夏 / 水墨主题，在服务台换主题后下次打开生效。
+
+设置页有「这张卡 / 助手 / 工具调用 / 权限规则 / 记忆 / 模型 / 插件对接（含 MCP）/ 联网 / 后端伴侣 / 版本更新 / 改动记录」。桌面左边、手机顶部有目录。固定在底部的「保存设置」负责助手、工具调用、权限规则、记忆四块；其余各块的操作立即生效。
+
+助手只说不做时，先到「工具调用」点「测试工具调用」：它分别让模型用原生函数调用与文本协议调用一次假工具，显示两行结果与建议，结论当场生效。工具调用方式可选「自动（推荐）/ 只用原生函数调用 / 只用文本协议」，对话页底栏显示当前方式。
 
 扩展开发者看 [docs/开发者指南.md](docs/开发者指南.md)：注册工具、工具箱、知识、挂载点与插件对接。
 
@@ -173,7 +143,7 @@ git clone https://github.com/Adirm007/reader-II plugins/reader-ii
 
 ## 与上游同步
 
-② 的控制器、轻信、世界书核心取自原版读者（`upstream/reader/` 是逐字快照，记着提交与哈希），构建时按 `build/` 里的变换精确替换，每处都校验命中次数。
+扩展的控制器、轻信与提示词模板取自原版读者（`upstream/reader/` 是逐字快照，记着提交与哈希），构建时按 `build/` 里的变换精确替换，每处都校验命中次数。
 
 ```bash
 node tools/sync-upstream.mjs ../reader
@@ -191,7 +161,7 @@ node build.mjs
 只用 Node 标准库。产出 `dist/` 的全部文件和发布清单，并把版本号同步到两个 `package.json`。版本号只在 `manifest.json` 里改。后端伴侣不经打包，`companion/` 里的源码就是成品。
 
 ```bash
-node --test tests/card.test.mjs tests/build.test.mjs tests/core.test.mjs tests/shell.test.mjs tests/worldbook.test.mjs tests/agent.test.mjs tests/updates.test.mjs tests/net.test.mjs tests/companion.test.mjs
+node --test tests/bundle.test.mjs tests/build.test.mjs tests/core.test.mjs tests/shell.test.mjs tests/worldbook.test.mjs tests/agent.test.mjs tests/toolcall.test.mjs tests/net.test.mjs tests/companion.test.mjs
 ```
 
 ```bash
@@ -206,4 +176,8 @@ node tools/smoke/run.mjs
 node tools/smoke/run.mjs card
 ```
 
-最后两条是浏览器冒烟（无头 Chrome，`CHROME=` 可指定路径）：前一条测扩展，后一条测卡内组件。`tests/companion.test.mjs` 会真的起一个伴侣（数据目录在临时目录里），本机有 Chrome 时连无头浏览器一起测。
+最后两条是浏览器冒烟（无头 Chrome，`CHROME=` 可指定路径）：前一条测扩展，后一条测按卡启用（有酒馆助手/MVU，以及两者都没有的原生宿主）。`tests/companion.test.mjs` 会真的起一个伴侣（数据目录在临时目录里），本机有 Chrome 时连无头浏览器一起测。
+
+截图可加 `--shots <目录>`，例如 `node tools/smoke/run.mjs card --shots /tmp/reader-ii-shots`。每个套件在第一种宿主模式下保存三主题 × 桌面 1280×800 / 手机 375×812（2 倍像素）× 大厅 / 助手对话 / 记忆 / 设置顶部 / 语义适配共 30 张 PNG。文件名为 `<主题>-<desktop|mobile>-<lobby|chat|memory|settings|panel>.png`。不带参数时只跑冒烟。
+
+只检查构建、不写 `dist/` 时运行 `node build.mjs --check`。浏览器冒烟读取现有 `dist/`，改完源码后需要先构建再运行。

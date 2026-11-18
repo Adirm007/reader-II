@@ -27,28 +27,30 @@ test('legacy-reader.js：通用化跑通，新入口的函数与动作都在', (
   for (const name of ['dreamOpenAgent', 'dreamOpenPanel', 'dreamOpenGacha', 'openIndependentApiSettings', 'pToast', 'getReaderCoreApi']) {
     assert.equal(findFunctions(s, name).length, 1, name);
   }
-  for (const act of ['eggagent', 'eggmemory', 'eggpanel']) assert.ok(s.includes(`act==='${act}'`), act);
+  for (const act of ['eggagent', 'eggagentset', 'eggmemory', 'eggpanel']) assert.ok(s.includes(`act==='${act}'`), act);
+  /* 入口只在彩蛋页：悬浮菜单板、店猫、迎宾小人都不再通向助手。 */
+  for (const token of ['data-action="readerAgent"', 'data-action="readerMemory"', "act==='readerAgent'", '店猫 · 夜梦助手', 'class="sx-greeter hov" data-dlb']) assert.ok(!s.includes(token), token);
   assert.ok(s.includes('请读者写一则旁观札记'));
 });
 
-test('legacy-body.html：旁观札记、夜梦助手 / 记忆入口，小憩不动', () => {
+test('legacy-body.html：旁观札记，小憩不动；菜单板上不放助手的入口（入口只在彩蛋服务台）', () => {
   const s = C.transformLegacyBody(up('legacy-body.html'));
   for (const [token, n] of [
-    ["orderItem('请读者写一则旁观札记')", 1], ['<span>旁观札记</span>', 1], ["onclick=\"dreamOpenAgent('chat')\"", 1],
-    ["onclick=\"dreamOpenAgent('memory')\"", 1], ['条目模仿、命运抽卡与夜梦助手的请求可分别指定方案', 1], ["orderItem('使用间章:小憩')", 1],
+    ["orderItem('请读者写一则旁观札记')", 1], ['<span>旁观札记</span>', 1], ['dreamOpenAgent', 0],
+    ['条目模仿、命运抽卡与夜梦助手的请求可分别指定方案', 1], ["orderItem('使用间章:小憩')", 1],
   ]) assert.equal(countExact(s, token), n, token);
   for (const token of ['更新新闻', '新闻更新', '检查更新', 'openDreamWorldbookUpdate', '书海']) assert.ok(!s.includes(token), token);
 });
 
-test('reader-ui.js：彩蛋页入口换成夜梦助手 / 记忆 / 语义适配，三套主题的文案', () => {
+test('reader-ui.js：彩蛋页入口换成夜梦助手 / 助手设置 / 语义适配 / 记忆，三套主题的文案', () => {
   const s = ui();
   for (const [token, n] of [
-    ['i("eggagent")', 1], ['i("eggmemory")', 1], ['i("eggpanel")', 1], ['和夜梦说说话', 1],
+    ['i("eggagent")', 1], ['i("eggagentset")', 1], ['i("eggmemory")', 1], ['i("eggpanel")', 1], ['和夜梦说说话', 1], ['助手设置', 1],
     ['sea:"夜梦助手"', 3], ['{text:"请读者写一则旁观札记"}', 3], ['name:"旁观札记"', 3],
   ]) assert.equal(countExact(s, token), n, token);
   for (const token of ['eggbooksea', 'eggwb', '检查更新', '书海', '普罗泰利西翁', '更新新闻', '新闻更新']) assert.ok(!s.includes(token), token);
   /* 新版前端只渲染 data-dlb，动作由 legacy 的处理函数接；新动作在那边都有。 */
-  for (const act of ['eggagent', 'eggmemory', 'eggpanel']) assert.ok(legacy().includes(`act==='${act}'`), act);
+  for (const act of ['eggagent', 'eggagentset', 'eggmemory', 'eggpanel']) assert.ok(legacy().includes(`act==='${act}'`), act);
 });
 
 test('controller-adapter.js：去掉两个检查更新的 setTimeout，其余不动', () => {
@@ -59,7 +61,7 @@ test('controller-adapter.js：去掉两个检查更新的 setTimeout，其余不
   assert.ok(input.length - s.length < 600, '只删了末尾那几行');
 });
 
-test('通用钩子：补 openGacha / openIndependentApiSettings，点立绘打开夜梦助手', () => {
+test('通用钩子：补 openGacha / openIndependentApiSettings / openAgent / openPanel；立绘不再当入口', () => {
   const calls = [], listeners = [], appended = [];
   const ctx = vm.createContext({
     pD: {
@@ -71,6 +73,7 @@ test('通用钩子：补 openGacha / openIndependentApiSettings，点立绘打�
     openIndependentApiSettings: (event, toast) => { calls.push(['api', event, toast === ctx.pToast]); return 'api-opened'; },
     pToast() {},
     dreamOpenAgent: tab => { calls.push('agent:' + tab); return true; },
+    dreamOpenPanel: () => { calls.push('panel'); return true; },
   });
   ctx.window = ctx;
   ctx.__readerControllerAlive = true;
@@ -87,17 +90,13 @@ test('通用钩子：补 openGacha / openIndependentApiSettings，点立绘打�
   assert.equal(app.command('openGacha'), false);
   ctx.__readerControllerAlive = true;
 
-  const click = listeners.find(item => item.type === 'click');
-  assert.ok(click && click.capture === true, '捕获阶段委托在 pD 上');
-  let stopped = 0;
-  const event = target => ({ target, preventDefault() {}, stopPropagation() { stopped += 1; } });
   calls.length = 0;
-  click.fn(event({ closest: selector => (selector === '[data-u4-her]' ? {} : null) }));
-  click.fn(event({ closest: () => null }));
-  click.fn(event(null));
-  assert.deepEqual(calls, ['agent:chat']);
-  assert.equal(stopped, 1);
-  assert.match(appended[0].textContent, /\[data-u4-her\]\{cursor:pointer\}/);
+  assert.equal(app.command('openAgent', 'settings'), true);
+  assert.equal(app.command('openAgent'), true);
+  assert.equal(app.command('openPanel'), true);
+  assert.deepEqual(calls, ['agent:settings', 'refresh', 'agent:chat', 'refresh', 'panel', 'refresh']);
+  assert.equal(listeners.length, 0, '不再在酒馆主文档上拦点击');
+  assert.equal(appended.length, 0);
 });
 
 function loadShim(extra = {}) {

@@ -55,7 +55,8 @@ async function boot(t, options = {}) {
   };
   t.after(async () => {
     await companion.close();
-    fs.rmSync(home, { recursive: true, force: true });
+    /* Windows 上刚被结束的子进程（stdio MCP 服务器）要过一小会儿才松开它的工作目录，立刻删会报 EPERM：重试几次。 */
+    fs.rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   });
   return ctx;
 }

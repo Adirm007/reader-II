@@ -196,7 +196,7 @@
     var WI_ROLES = ['system', 'user', 'assistant'];
 
     function nativeToEntry(raw) {
-      return {
+      var entry = {
         uid: raw.uid, name: String(raw.comment || ''), enabled: raw.disable !== true, content: String(raw.content || ''),
         strategy: {
           type: raw.constant ? 'constant' : raw.vectorized ? 'vectorized' : 'selective',
@@ -204,8 +204,12 @@
           keys_secondary: { logic: WI_LOGIC[raw.selectiveLogic || 0] || 'and_any', keys: (raw.keysecondary || []).slice() }
         },
         position: { type: WI_POSITIONS[raw.position || 0] || WI_POSITIONS[0], order: Number(raw.order) || 0, depth: Number(raw.depth) || 0, role: WI_ROLES[raw.role || 0] || 'system' },
-        probability: raw.probability == null ? 100 : Number(raw.probability)
+        probability: raw.probability == null ? 100 : Number(raw.probability),
+        recursion: { prevent_incoming: raw.excludeRecursion === true, prevent_outgoing: raw.preventRecursion === true }
       };
+      /* extra 是酒馆助手给条目留的自由字段（抽卡用它给生成的角色条目做记号），原生结构里同名存放。 */
+      if (modules.isObject(raw.extra)) entry.extra = modules.clone(raw.extra);
+      return entry;
     }
 
     function entryToNative(entry, raw) {
@@ -232,6 +236,11 @@
         if (WI_ROLES.indexOf(entry.position.role) >= 0) target.role = WI_ROLES.indexOf(entry.position.role);
       }
       if (entry.probability !== undefined) target.probability = Number(entry.probability);
+      if (modules.isObject(entry.recursion)) {
+        if (entry.recursion.prevent_incoming !== undefined) target.excludeRecursion = entry.recursion.prevent_incoming === true;
+        if (entry.recursion.prevent_outgoing !== undefined) target.preventRecursion = entry.recursion.prevent_outgoing === true;
+      }
+      if (modules.isObject(entry.extra)) target.extra = modules.clone(entry.extra);
       return target;
     }
 

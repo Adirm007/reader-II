@@ -1,0 +1,464 @@
+/*
+ * 夜梦助手的工具调用：原生函数调用为主、文本协议兜底（2026-11-17；起因是 4.0.0-alpha.2 的真机故障）。
+ *   node --test tests/toolcall.test.mjs
+ *
+ * 故障原样：模型 kimi-k3.1-pro 经本机中转 http://127.0.0.1:7864/v1。助手用文本协议（<tool_call …> 写进正文），
+ * 响应的 reasoning_content 里写着「Then tool」，content 却停在「现在就做：先读取……」，finish_reason 是 stop——
+ * 工具块被上游当成原生调用的记号吞掉了。这里的 kimi() 就照这个行为造：请求没带 tools 时，只回那句开场白；带了就给 tool_calls。
+ *
+ * 覆盖：原生调用全流程（请求体、往来消息、确认、撤销所需的镜像照旧）、真机故障重放、接口不认 tools 时退回文本协议并记住、
+ *       模型无视 tools 时「提醒一次 → 换文本协议」、正文里夹带工具块、坏参数、步数上限、酒馆主 API 通道、自检、协议解析与各家响应的规整。
+ */
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import vm from 'node:vm';
+import { EXT_MODULES, bundle } from '../build.mjs';
+
+const CODE = bundle(EXT_MODULES);
+const clone = (value) => (value === undefined ? undefined : JSON.parse(JSON.stringify(value)));
+const same = (actual, expected) => assert.deepStrictEqual(clone(actual), expected);
+const BACKEND = '/api/backends/chat-completions/generate';
+const PRESET = { id: 'p1', name: 'kimi', apiurl: 'http://127.0.0.1:7864/v1', key: 'sk-test', model: 'kimi-k3.1-pro', source: 'openai' };
+
+/* 真机日志里的五句开场白（llm-api-2412～2416 与截图）。 */
+const REAL_STALLS = [
+  '好的，作家先生。我会先核对这张卡的变量结构与 Reader-II 的适配规则，再逐项转换并验证，最后给您一份清楚的结果清单；若涉及写入，会在每一步确认后再落笔。',
+  '抱歉，作家先生，刚才我只是应下了，还没有实际开始。现在就做：先读取 Reader-II 的适配说明并定位卡内变量，再逐项核对、转换与验证。',
+  '没有外部阻碍，是我前两次只作了口头回应，并未实际执行，耽误了您的时间，抱歉。现在直接开始，先读 Reader-II 的适配规则，再检查卡内变量。',
+  '可以调用，作家先生；问题不在权限或工具，而是我此前没有真正发起调用。现在立即执行，先读取 Reader-II 的适配规则。',
+  '您说得对，作家先生。前几轮我确实只作了回应，没有发出任何工具调用；这是我的失误。现在直接开始。',
+];
+
+const reply = (message, finish = 'stop') => ({ choices: [{ index: 0, finish_reason: finish, message: { role: 'assistant', ...message } }] });
+const nativeCall = (name, args, id = 'call_' + name) => ({ id, type: 'function', function: { name, arguments: typeof args === 'string' ? args : JSON.stringify(args) } });
+const textCall = (name, args) => `<action name="${name}">\n${Object.entries(args).map(([key, value]) => `<param name="${key}">${value}</param>`).join('\n')}\n</action>`;
+
+/*
+ * options:
+ *   preset    独立 API 方案（默认 PRESET）；null = 走酒馆主 API
+ *   backend   (body) => 响应对象 | { status, body }   酒馆后端的应答
+ *   text      (config) => 文本                        酒馆助手 generateRaw 的应答（文本协议的通道）
+ *   openai    (messages, data) => 响应对象            酒馆主 API（sendOpenAIRequest）的应答
+ *   settings  助手设置
+ */
+function makeHost(options = {}) {
+  const chat = [
+    { name: '我', is_user: true, mes: '我推开了酒馆的门。' },
+    { name: '艾琳', is_user: false, mes: '「欢迎回来。」艾琳放下了手里的杯子。' },
+  ];
+  const worldbooks = {
+    设定集: [{ uid: 0, name: '王都', enabled: true, content: '王都位于北方。\n人口十万。\n守卫队长是雷恩。', strategy: { type: 'selective', keys: ['王都'] }, position: {} }],
+  };
+  const storage = new Map();
+  const preset = options.preset === undefined ? PRESET : options.preset;
+  if (preset) storage.set('reader_ii_independent_api_v2', JSON.stringify({ version: 2, presets: [preset], defaultId: preset.id, routes: {} }));
+  const log = { backend: [], text: [], openai: [], events: [] };
+  const listeners = new Map();
+  const eventSource = {
+    on(name, handler) { if (!listeners.has(name)) listeners.set(name, []); listeners.get(name).push(handler); },
+    once() {},
+    removeListener(name, handler) { listeners.set(name, (listeners.get(name) || []).filter((item) => item !== handler)); },
+    async emit(name, ...args) { for (const handler of (listeners.get(name) || []).slice()) await handler(...args); },
+    count: (name) => (listeners.get(name) || []).length,
+  };
+  const ctx = {
+    chat, characterId: 0, name1: '我', name2: '艾琳', chatId: 'chat-1', mainApi: 'openai',
+    characters: [{ name: '艾琳', avatar: 'ailin.png', description: '老板娘', data: { description: '老板娘', extensions: {} } }],
+    chatMetadata: { variables: {} },
+    extensionSettings: { reader_ii: { agent: { plotContext: false, recall: false, ...(options.settings || {}) } } },
+    getCurrentChatId: () => 'chat-1', saveMetadata: async () => {}, saveSettingsDebounced: () => {}, saveChat: async () => {},
+    setExtensionPrompt: () => {}, getRequestHeaders: () => ({ 'Content-Type': 'application/json', 'X-CSRF-Token': 'csrf' }),
+    eventSource,
+    eventTypes: { GENERATION_ENDED: 'generation_ended', MESSAGE_RECEIVED: 'message_received', CHAT_CHANGED: 'chat_id_changed', GENERATION_AFTER_COMMANDS: 'GENERATION_AFTER_COMMANDS', CHAT_COMPLETION_SETTINGS_READY: 'chat_completion_settings_ready' },
+  };
+  const helper = {
+    getWorldbookNames: () => Object.keys(worldbooks),
+    getGlobalWorldbookNames: () => [],
+    getCharWorldbookNames: () => ({ primary: '设定集', additional: [] }),
+    getChatWorldbookName: () => null,
+    getWorldbook: async (name) => clone(worldbooks[name]),
+    updateWorldbookWith: async (name, updater) => { worldbooks[name] = clone(updater(clone(worldbooks[name]))); return clone(worldbooks[name]); },
+    getVariables: () => ({}),
+    replaceVariables: async () => {},
+    generateRaw: async (config) => {
+      log.text.push(clone({ prompts: config.ordered_prompts, custom_api: config.custom_api, tools: config.tools }));
+      if (!options.text) throw new Error('这个测试不该走到文本通道');
+      return options.text(config, log.text.length);
+    },
+  };
+  /* 酒馆主 API：模拟酒馆的 sendOpenAIRequest——组好请求、广播 CHAT_COMPLETION_SETTINGS_READY、再“发出去”。 */
+  const openaiModule = {
+    sendOpenAIRequest: async (type, messages) => {
+      const data = { type, messages: messages.filter(Boolean), model: 'main-model', stream: true, temperature: 1, chat_completion_source: 'openai' };
+      await eventSource.emit('chat_completion_settings_ready', data);
+      log.openai.push(clone(data));
+      if (!options.openai) throw new Error('这个测试不该走到酒馆主 API');
+      return options.openai(data, log.openai.length);
+    },
+  };
+  const hostFunction = function (...args) {
+    if (args.length === 2 && args[0] === 'p' && args[1] === 'return import(p)') {
+      return (path) => (path === '/scripts/openai.js' && options.openai !== null ? Promise.resolve(openaiModule) : Promise.reject(new Error('没有模块 ' + path)));
+    }
+    return Function(...args);
+  };
+  const host = {
+    SillyTavern: { getContext: () => ctx }, TavernHelper: helper,
+    localStorage: { getItem: (key) => (storage.has(key) ? storage.get(key) : null), setItem: (key, value) => storage.set(key, String(value)), removeItem: (key) => storage.delete(key) },
+    console: { log() {}, info() {}, warn() {}, error() {} },
+    document: { querySelectorAll: () => [], getElementById: () => null, createElement: () => ({ style: {}, setAttribute() {}, appendChild() {}, remove() {} }), body: { appendChild() {} }, head: { appendChild() {} } },
+    navigator: { userAgent: 'node-test' },
+    addEventListener() {}, removeEventListener() {}, dispatchEvent() {}, CustomEvent: class { constructor(type, init) { this.type = type; Object.assign(this, init); } },
+    fetch: async (url, init = {}) => {
+      if (url === BACKEND) {
+        const body = JSON.parse(init.body);
+        log.backend.push({ body, headers: init.headers });
+        if (!options.backend) throw new Error('这个测试不该请求酒馆后端');
+        const answer = options.backend(body, log.backend.length);
+        const status = answer && answer.status ? answer.status : 200;
+        const payload = answer && answer.status ? answer.body : answer;
+        return { ok: status < 400, status, headers: { get: () => 'application/json' }, text: async () => JSON.stringify(payload), json: async () => clone(payload) };
+      }
+      return { ok: true, status: 200, headers: { get: () => 'text/plain' }, text: async () => `---\nname: demo\ndescription: 演示\n---\n正文`, json: async () => [] };
+    },
+    Function: hostFunction, setTimeout, clearTimeout, AbortController, crypto: globalThis.crypto,
+  };
+  host.window = host;
+  host.parent = host;
+  vm.createContext(host);
+  vm.runInContext(CODE, host, { filename: 'reader-ii.ext.js' });
+  const agent = host.ReaderII.agent;
+  const run = (input, extra = {}) => agent.run(input, { onEvent: (event) => log.events.push(event), confirm: async () => 'allow', ...extra });
+  return { host, agent, run, log, worldbooks, ctx, eventSource, protocol: host.__ReaderIIModules.agentProtocol, llm: host.ReaderII.llm };
+}
+
+/* 照真机上的 kimi：请求里没有 tools 时，工具块被吞，只剩开场白；有 tools 时按 plan 给出原生调用。 */
+function kimi(plan) {
+  let stalls = 0;
+  return (body, turn) => {
+    if (!Array.isArray(body.tools) || !body.tools.length) return reply({ content: REAL_STALLS[Math.min(stalls++, REAL_STALLS.length - 1)], reasoning_content: 'I should tool call skill reader-ii and todo. Then tool.' });
+    return plan(body, turn);
+  };
+}
+
+test('原生函数调用：tools 随请求声明，调用取自 tool_calls，结果用 role: tool 交还；读 → 改（确认）→ 回答', async () => {
+  const asked = [];
+  const { run, log, worldbooks } = makeHost({
+    backend: kimi((body, turn) => {
+      if (turn === 1) return reply({ content: '我先看看这一条。', reasoning_content: '先读再改。', tool_calls: [nativeCall('read', { path: 'wb:/设定集/王都' })] }, 'tool_calls');
+      if (turn === 2) return reply({ content: '', tool_calls: [nativeCall('edit', { path: 'wb:/设定集/王都', old: '人口十万', new: '人口三十万' })] }, 'tool_calls');
+      return reply({ content: '改好了，作家先生：王都的人口现在是三十万。' });
+    }),
+  });
+  const result = await run('把王都的人口改成三十万', { confirm: async (request) => { asked.push(request); return 'allow'; } });
+
+  assert.equal(result.error, '');
+  assert.equal(result.protocol, 'native');
+  assert.equal(result.answer, '改好了，作家先生：王都的人口现在是三十万。');
+  same(result.steps.map((step) => [step.name, step.ok]), [['read', true], ['edit', true]]);
+  assert.match(worldbooks.设定集[0].content, /人口三十万/);
+  assert.equal(asked.length, 1, '写入照旧要确认');
+  assert.equal(result.changes, 1, '改动照旧记进运行日志（可撤销）');
+  assert.equal(log.text.length, 0, '原生调用成功时不该再碰文本通道');
+
+  /* 请求体：经酒馆后端代发到独立 API，工具是 JSON Schema。 */
+  const first = log.backend[0].body;
+  assert.equal(first.chat_completion_source, 'openai');
+  assert.equal(first.reverse_proxy, PRESET.apiurl);
+  assert.equal(first.proxy_password, PRESET.key);
+  assert.equal(first.model, PRESET.model);
+  assert.equal(first.stream, false);
+  assert.equal(first.tool_choice, 'auto');
+  assert.equal(log.backend[0].headers['X-CSRF-Token'], 'csrf', '带上酒馆的请求头');
+  const names = first.tools.map((tool) => tool.function.name);
+  for (const name of ['ls', 'read', 'grep', 'edit', 'write', 'remove', 'run_js', 'todo', 'skill', 'toolbox']) assert.ok(names.includes(name), `缺少工具 ${name}`);
+  assert.ok(!names.includes('slash_run'), '没打开的工具箱不声明');
+  const read = first.tools.find((tool) => tool.function.name === 'read').function;
+  same(read.parameters.required, ['path']);
+  assert.equal(read.parameters.properties.offset.type, 'number');
+  const todo = first.tools.find((tool) => tool.function.name === 'todo').function;
+  assert.equal(todo.parameters.properties.items.type, 'array', '给了 schema 的 json 参数按 schema 声明');
+  assert.match(first.tools.find((tool) => tool.function.name === 'edit').function.description, /^［写入］/);
+
+  /* 提示词：原生调用下不放格式说明与工具手册（省 token，也不诱导模型把调用写成文字）。 */
+  const system = first.messages[0].content;
+  assert.ok(!/【核心工具】/.test(system) && !/<action name=/.test(system) && !/tool_call/.test(system));
+  assert.match(system, /直接发起函数调用/);
+  assert.match(system, /【工具箱】/);
+  assert.match(system, /只回一句「我这就去做」/);
+
+  /* 第二轮请求：assistant 的 tool_calls 原样带回（思考型模型的 reasoning_content 也带回），紧跟对应的 tool 消息。 */
+  const second = log.backend[1].body.messages;
+  const assistant = second.at(-2);
+  assert.equal(assistant.role, 'assistant');
+  assert.equal(assistant.tool_calls[0].id, 'call_read');
+  assert.equal(assistant.reasoning_content, '先读再改。');
+  const tool = second.at(-1);
+  assert.equal(tool.role, 'tool');
+  assert.equal(tool.tool_call_id, 'call_read');
+  assert.match(tool.content, /守卫队长是雷恩/);
+  assert.equal(tool.name, undefined, 'tool 消息只带 tool_call_id 与 content');
+  const third = log.backend[2].body.messages;
+  assert.equal(third.at(-1).role, 'tool');
+  assert.match(third.at(-1).content, /已修改 wb:\/设定集\/王都/);
+  assert.equal(third.at(-2).reasoning_content, undefined, '对方没给思考时不带这个字段');
+});
+
+test('真机故障重放：文本协议下工具块被吞 → 提醒一次仍不行 → 如实说明；自动模式直接走原生，一次成功', async () => {
+  /* 一、强制文本协议（alpha.2 的行为）：模型两次都只剩开场白。 */
+  const stuck = makeHost({ settings: { toolProtocol: 'text' }, text: (config) => {
+    const body = { tools: config.tools };
+    return kimi(() => { throw new Error('文本协议不该带 tools'); })(body).choices[0].message.content;
+  } });
+  const failed = await stuck.run('帮我把这张卡的变量适配到 Reader-II，逐项告诉我结果。');
+  assert.equal(failed.protocol, 'text');
+  assert.equal(failed.steps.length, 0);
+  assert.equal(stuck.log.text.length, 2, '提醒一次，再问一次，不无限重试');
+  assert.match(stuck.log.text[1].prompts.at(-1).content, /没有发出任何工具调用/);
+  assert.match(failed.answer, /测试工具调用/, '告诉用户去哪里查原因，而不是又一句「我这就去做」');
+  assert.ok(stuck.log.events.some((event) => event.type === 'nudge'));
+  const system = stuck.log.text[0].prompts[0].content;
+  assert.match(system, /<action name="工具名">/);
+  assert.ok(!/<tool_call/.test(system), '文本协议不再用会撞上模型专用记号的 tool_call 标签');
+
+  /* 二、默认设置（自动）：同一个模型，原生调用一次就通。 */
+  const fixed = makeHost({ backend: kimi((body, turn) => (turn === 1
+    ? reply({ content: REAL_STALLS[1], tool_calls: [nativeCall('skill', { name: 'reader-ii' }), nativeCall('ls', { path: 'card:/' })] }, 'tool_calls')
+    : reply({ content: '已核对完毕：这张卡没有需要适配的变量。' }))) });
+  const ok = await fixed.run('帮我把这张卡的变量适配到 Reader-II，逐项告诉我结果。');
+  assert.equal(ok.protocol, 'native');
+  same(ok.steps.map((step) => step.name), ['skill', 'ls']);
+  assert.equal(ok.answer, '已核对完毕：这张卡没有需要适配的变量。');
+  assert.equal(fixed.log.backend.length, 2);
+  const messages = fixed.log.backend[1].body.messages;
+  same(messages.slice(-3).map((message) => message.role), ['assistant', 'tool', 'tool']);
+  same(messages.slice(-2).map((message) => message.tool_call_id), ['call_skill', 'call_ls']);
+});
+
+test('接口不认 tools：自动退回文本协议接着做，并记住这个接口；设置为只用原生时如实报错', async () => {
+  const refuse = (body) => (body.tools
+    ? { status: 400, body: { error: { message: 'Unrecognized request argument supplied: tools' } } }
+    : reply({ content: '不该走到这里' }));
+  const text = (config, turn) => (turn % 2 === 1 ? '我看一下。\n' + textCall('read', { path: 'wb:/设定集/王都' }) : '王都在北方，人口十万。');
+  const { run, log, agent } = makeHost({ backend: refuse, text });
+  const first = await run('王都在哪');
+  assert.equal(first.error, '');
+  assert.equal(first.protocol, 'text');
+  assert.equal(first.answer, '王都在北方，人口十万。');
+  same(first.steps.map((step) => step.name), ['read']);
+  assert.equal(log.backend.length, 1, '原生只试一次');
+  assert.ok(log.events.some((event) => event.type === 'protocol' && event.mode === 'text'));
+  assert.match(log.text[0].prompts[0].content, /【核心工具】/, '退回文本协议后，系统提示换成带格式说明与手册的那一版');
+  assert.equal(log.text[0].custom_api.model, PRESET.model);
+  assert.match(log.text[1].prompts.at(-1).content, /<action_result name="read" status="ok">/);
+  assert.equal(agent.toolStatus().mode, 'text');
+
+  await run('再说一遍');
+  assert.equal(log.backend.length, 1, '同一个接口记住了，不再每次先撞一回');
+  agent.saveSettings({ temperature: 0.5 });
+  assert.equal(agent.toolStatus().mode, 'native', '改过设置后重新试');
+
+  const strict = makeHost({ backend: refuse, settings: { toolProtocol: 'native' } });
+  const failed = await strict.run('王都在哪');
+  assert.match(failed.error, /不接受原生函数调用/);
+  assert.equal(strict.log.text.length, 0);
+});
+
+test('模型无视 tools、只说不做：提醒一次 → 仍不动 → 换文本协议；往来记录改写成文本的样子', async () => {
+  const { run, log } = makeHost({
+    backend: (body, turn) => reply({ content: REAL_STALLS[turn] }),
+    text: (config, turn) => (turn === 1 ? textCall('ls', { path: 'wb:/' }) : '世界书里只有「设定集」一本。'),
+  });
+  const result = await run('看看有哪些世界书');
+  assert.equal(result.error, '');
+  assert.equal(log.backend.length, 2);
+  assert.equal(log.backend[1].body.messages.at(-1).role, 'user');
+  assert.match(log.backend[1].body.messages.at(-1).content, /没有发出任何工具调用/);
+  assert.equal(result.protocol, 'text');
+  same(result.steps.map((step) => step.name), ['ls']);
+  assert.equal(result.answer, '世界书里只有「设定集」一本。');
+  assert.ok(!/测试工具调用/.test(result.answer));
+  same(log.events.filter((event) => ['nudge', 'protocol'].includes(event.type)).map((event) => event.type), ['nudge', 'protocol']);
+
+  /* 正常的回答、向用户提问、已经调用过工具之后的收尾，都不触发提醒。 */
+  const calm = makeHost({ backend: () => reply({ content: '需要我现在就开始修改吗？' }) });
+  const asked = await calm.run('你打算怎么改');
+  assert.equal(calm.log.backend.length, 1);
+  assert.equal(asked.answer, '需要我现在就开始修改吗？');
+  const done = makeHost({ backend: (body, turn) => (turn === 1
+    ? reply({ content: '', tool_calls: [nativeCall('ls', { path: 'wb:/' })] })
+    : reply({ content: '现在开始您可以直接使用了。' })) });
+  const finished = await done.run('列一下');
+  assert.equal(done.log.backend.length, 2);
+  assert.equal(finished.answer, '现在开始您可以直接使用了。');
+});
+
+test('原生调用下的边角：正文里夹带工具块、坏参数、未知工具、步数上限', async () => {
+  /* 正文里夹带文本块：这一步按文本协议处理，结果放进 user 消息。 */
+  const inline = makeHost({ backend: (body, turn) => (turn === 1
+    ? reply({ content: '我查一下。\n' + textCall('read', { path: 'wb:/设定集/王都' }) })
+    : reply({ content: '查到了。' })) });
+  const first = await inline.run('查王都');
+  same(first.steps.map((step) => step.name), ['read']);
+  const back = inline.log.backend[1].body.messages.at(-1);
+  assert.equal(back.role, 'user');
+  assert.match(back.content, /<action_result name="read" status="ok">/);
+  assert.equal(first.answer, '查到了。');
+
+  /* 坏参数与未知工具：每个 tool_call 都要有对应的 tool 消息，内容说明原因。 */
+  const broken = makeHost({ backend: (body, turn) => (turn === 1
+    ? reply({ content: '', tool_calls: [nativeCall('read', '{"path": "wb:/设定', 'c1'), nativeCall('nope', {}, 'c2'), nativeCall('read', {}, 'c3')] })
+    : reply({ content: '抱歉，刚才的调用有误。' })) });
+  const second = await broken.run('查王都');
+  same(second.steps.map((step) => step.ok), [false, false, false]);
+  const tools = broken.log.backend[1].body.messages.filter((message) => message.role === 'tool');
+  same(tools.map((message) => message.tool_call_id), ['c1', 'c2', 'c3']);
+  assert.match(tools[0].content, /^［失败］工具参数不是合法的 JSON/);
+  assert.match(tools[1].content, /没有名为 nope 的工具/);
+  assert.match(tools[2].content, /缺少必填参数 path/);
+
+  /* 步数上限：最后一次请求 tool_choice 为 none，说明并在最后一条工具结果里。 */
+  const limited = makeHost({ settings: { maxSteps: 2 }, backend: (body, turn) => (body.tool_choice === 'none'
+    ? reply({ content: '先到这里。' })
+    : reply({ content: '', tool_calls: [nativeCall('ls', { path: 'wb:/', offset: turn }, 'c' + turn)] })) });
+  const third = await limited.run('一直列');
+  assert.equal(third.answer, '先到这里。');
+  const last = limited.log.backend.at(-1).body;
+  assert.equal(last.tool_choice, 'none');
+  assert.match(last.messages.at(-1).content, /已到本次请求的工具步数上限/);
+  assert.equal(last.messages.at(-1).role, 'tool');
+});
+
+test('酒馆主 API：沿用酒馆的连接与预设，只在请求发出前补上 tools；别人的请求不动', async () => {
+  const { run, log, eventSource, agent } = makeHost({
+    preset: null,
+    openai: (data, turn) => (turn === 1
+      ? reply({ content: '', tool_calls: [nativeCall('read', { path: 'wb:/设定集/王都' })] })
+      : reply({ content: '王都在北方。' })),
+  });
+  assert.equal(agent.toolStatus().via, 'openai');
+  const result = await run('王都在哪');
+  assert.equal(result.error, '');
+  assert.equal(result.protocol, 'native');
+  assert.equal(result.answer, '王都在北方。');
+  assert.equal(log.backend.length, 0);
+  assert.equal(log.openai[0].type, 'quiet');
+  assert.equal(log.openai[0].stream, false);
+  assert.equal(log.openai[0].model, 'main-model', '模型与采样参数沿用酒馆的');
+  assert.equal(log.openai[0].temperature, 1);
+  assert.equal(log.openai[0].tool_choice, 'auto');
+  assert.ok(log.openai[0].tools.some((tool) => tool.function.name === 'read'));
+  same(log.openai[1].messages.slice(-2).map((message) => message.role), ['assistant', 'tool']);
+  assert.equal(eventSource.count('chat_completion_settings_ready'), 0, '用完就摘掉监听');
+
+  /* 同一时刻别处发出的请求（比如用户正在生成正文）：不是我们的那一份消息，就不碰。 */
+  const other = { messages: [{ role: 'user', content: '正文生成' }], stream: true };
+  let seen = null;
+  const racing = makeHost({ preset: null, openai: async (data) => { seen = data; return reply({ content: '好的。' }); } });
+  racing.eventSource.on('chat_completion_settings_ready', () => {});
+  const pending = racing.run('你好');
+  await racing.eventSource.emit('chat_completion_settings_ready', other);
+  await pending;
+  assert.equal(other.tools, undefined);
+  assert.equal(other.stream, true);
+  assert.ok(seen.tools.length > 0);
+
+  /* 文本补全类的主 API 没有原生调用：直接用文本协议，不白试。 */
+  const textApi = makeHost({ preset: null, openai: null, text: () => '你好，作家先生。' });
+  textApi.ctx.mainApi = 'textgenerationwebui';
+  assert.equal(textApi.agent.toolStatus().mode, 'text');
+  assert.match(textApi.agent.toolStatus().reason, /文本补全/);
+  assert.equal((await textApi.run('你好')).answer, '你好，作家先生。');
+});
+
+test('自检：两种方式各试一次，给出建议；真机那种模型的结论是「原生可用、文本被吞」', async () => {
+  const { agent, log } = makeHost({
+    backend: kimi(() => reply({ content: '', tool_calls: [nativeCall('ping', { text: 'ok' })] }, 'tool_calls')),
+    text: () => '好的，我现在就调用。',
+  });
+  const report = await agent.probeTools();
+  assert.equal(report.native.ok, true);
+  assert.equal(report.text.ok, false);
+  assert.match(report.text.detail, /没有写出工具块/);
+  assert.equal(report.recommend, 'native');
+  assert.equal(report.backend.model, PRESET.model);
+  same(log.backend[0].body.tools.map((tool) => tool.function.name), ['ping']);
+  assert.match(log.text[0].prompts[0].content, /<action name="工具名">/);
+
+  const old = makeHost({
+    backend: () => ({ status: 400, body: { error: { message: 'tools is not supported by this model' } } }),
+    text: () => textCall('ping', { text: 'ok' }),
+  });
+  const second = await old.agent.probeTools();
+  assert.equal(second.native.ok, false);
+  assert.match(second.native.detail, /不接受原生函数调用/);
+  assert.equal(second.text.ok, true);
+  assert.equal(second.recommend, 'text');
+  assert.equal(old.agent.toolStatus().mode, 'text', '自检的结论当场生效');
+});
+
+test('文本协议：新标签、CDATA、旧写法都认；「只说不做」的判断对得上真机的五句', () => {
+  const { protocol } = makeHost();
+  const parsed = protocol.parse('先说明一句。\n' + textCall('read', { path: 'wb:/a', limit: 20 }) + '\n' + textCall('ls', {}));
+  same(parsed.calls.map((call) => [call.name, call.args]), [['read', { path: 'wb:/a', limit: '20' }], ['ls', {}]]);
+  assert.equal(parsed.prose, '先说明一句。');
+  assert.equal(parsed.truncated, false);
+
+  /* 值里带结束标签：CDATA 里的 </param>、</action> 不算数。 */
+  const tricky = '<action name="write">\n<param name="path">ws:/a.html</param>\n<param name="content"><![CDATA[<b>文本</b></param></action> 仍是内容]]></param>\n</action>收尾';
+  const written = protocol.parse(tricky);
+  same(written.calls[0].args, { path: 'ws:/a.html', content: '<b>文本</b></param></action> 仍是内容' });
+  assert.equal(written.prose, '收尾');
+  assert.equal(protocol.parse(protocol.callBlock('write', written.calls[0].args)).calls[0].args.content, written.calls[0].args.content, 'callBlock 写出来的能原样读回');
+
+  /* 旧写法照样认（历史对话、别的模型的习惯）。 */
+  assert.equal(protocol.parse('<tool_call name="read">\n<arg name="path">a</arg>\n</tool_call>').calls[0].args.path, 'a');
+  assert.equal(protocol.parse('<invoke name="read"><parameter name="path">b</parameter></invoke>').calls[0].args.path, 'b');
+  assert.equal(protocol.parse('<tool_call>{"name":"read","arguments":{"path":"c"}}</tool_call>').calls[0].name, 'read');
+  const open = protocol.parse('先说一句\n<action name="write"><param name="path">ws:/a</param><param name="content">没写完');
+  assert.equal(open.truncated, true);
+  assert.equal(open.calls.length, 0);
+  assert.equal(open.prose, '先说一句');
+  assert.equal(protocol.parse('<action_result name="x" status="ok">泄漏的结果标签</action_result>正文').prose, '泄漏的结果标签正文');
+
+  for (const line of REAL_STALLS) assert.equal(protocol.stalled(line, ''), true, line);
+  assert.equal(protocol.stalled('好的。', 'I should call the tool. Then tool.'), true, '思考里说要调用、正文里却没有');
+  for (const line of ['改好了，作家先生：王都的人口现在是三十万。', '王都位于北方，守卫队长是雷恩。', '需要我现在就开始修改吗？', '晚安，作家先生。', '']) {
+    assert.equal(protocol.stalled(line, ''), false, line);
+  }
+  assert.equal(protocol.stalled('我会先核对。' + '很长的说明'.repeat(100), ''), false, '长篇的回答不算');
+});
+
+test('工具定义 → JSON Schema；各家的响应规整成同一种形状', () => {
+  const { protocol, llm } = makeHost();
+  const schema = protocol.toolSchema({
+    name: 'demo', summary: '演示', effect: 'danger',
+    params: [{ name: 'a', type: 'string', required: true, desc: '甲' }, { name: 'n', type: 'number' }, { name: 'on', type: 'boolean' }, { name: 'list', type: 'json', desc: '清单' },
+      { name: 'items', type: 'json', schema: { type: 'array', items: { type: 'string' } } }],
+  });
+  same(schema, { type: 'function', function: { name: 'demo', description: '［危险］演示', parameters: {
+    type: 'object',
+    properties: { a: { type: 'string', description: '甲' }, n: { type: 'number' }, on: { type: 'boolean' }, list: { type: 'string', description: '清单；写成 JSON 文本' }, items: { type: 'array', items: { type: 'string' } } },
+    required: ['a'],
+  } } });
+  same(protocol.nativeArgs('{"a":1}'), { args: { a: 1 } });
+  same(protocol.nativeArgs(''), { args: {} });
+  assert.match(protocol.nativeArgs('{"a":').error, /不是合法的 JSON/);
+  assert.match(protocol.nativeArgs('[1]').error, /JSON 对象/);
+
+  const openai = llm.parseToolResponse(reply({ content: '好', reasoning_content: '想', tool_calls: [{ id: 'x', type: 'function', function: { name: 'read', arguments: '{"path":"a"}' }, signature: 'sig' }] }, 'tool_calls'));
+  same(openai.toolCalls, [{ id: 'x', name: 'read', arguments: '{"path":"a"}' }]);
+  assert.equal(openai.finish, 'tool_calls');
+  same(openai.message, { role: 'assistant', content: '好', tool_calls: [{ id: 'x', type: 'function', function: { name: 'read', arguments: '{"path":"a"}' }, signature: 'sig' }], reasoning_content: '想' });
+  same(llm.parseToolResponse(reply({ content: '只有正文', reasoning_content: '想' })).message, { role: 'assistant', content: '只有正文' });
+  same(llm.parseToolResponse(reply({ content: null, function_call: { name: 'ls', arguments: '{}' } })).toolCalls.map((call) => call.name), ['ls']);
+  same(llm.parseToolResponse(reply({ content: [{ type: 'text', text: '分' }, { type: 'text', text: '段' }] })).text, '分段');
+
+  const claude = llm.parseToolResponse({ content: [{ type: 'text', text: '我查一下' }, { type: 'tool_use', id: 'toolu_1', name: 'read', input: { path: 'a' } }], stop_reason: 'tool_use' });
+  assert.equal(claude.text, '我查一下');
+  same(claude.toolCalls, [{ id: 'toolu_1', name: 'read', arguments: '{"path":"a"}' }]);
+  const gemini = llm.parseToolResponse({ choices: [{ message: { content: '' } }], responseContent: { parts: [{ functionCall: { name: 'ls', args: { path: 'wb:/' } }, thoughtSignature: 'ts' }] } });
+  assert.equal(gemini.toolCalls[0].name, 'ls');
+  assert.equal(gemini.message.tool_calls[0].signature, 'ts');
+  assert.match(gemini.toolCalls[0].id, /^call_/);
+});

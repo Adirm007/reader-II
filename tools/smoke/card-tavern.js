@@ -1,29 +1,15 @@
-/*
- * ② 卡内组件冒烟用的假酒馆（card.html 加载，普通脚本）。只模拟 ② 与 ① 会碰到的那部分接口：
- *   - 酒馆主窗口：SillyTavern.getContext()、事件源、/api/ 请求、聊天 DOM（.mes > .mes_block > .mes_text）、
- *     照酒馆显示规则跑的正则（dist 里的三条）、角色卡绑定的世界书（dist/reader-ii.worldbook.json + 一本小设定集）。
- *     第 2 楼放进同源的 srcdoc iframe，模拟酒馆助手的「正文美化」。
- *   - 酒馆助手：主窗口上的 TavernHelper（读到没实现的接口会记进 __mock.helperMissing）；像酒馆助手那样把
- *     dist/reader-ii.script.json 的 content 放进 srcdoc iframe 用 <script type="module"> 运行，iframe 里的全局见 card-predefine.js。
- *     脚本按钮画在 #th-buttons，点了发 getButtonEvent(名字) 事件。
- *   - MVU：Mvu.getMvuData / replaceMvuData / events，数据在楼层变量的 stat_data 里。
- * 模型回复来自 __mock.replies（空时回一句固定的话），调用记在 __mock.llmCalls。
+/* 只装扩展的假酒馆：保留酒馆助手/MVU 边界；?native=1 时两者都不提供。
+ * 正则来自 extensionSettings.regex，不导入旧脚本或世界书 JSON。
  */
 (() => {
   const params = new URLSearchParams(location.search);
   const clone = (value) => (value === undefined ? undefined : JSON.parse(JSON.stringify(value)));
-  const withExtension = params.get('ext') !== '0';
+  const native = params.get('native') === '1';
 
-  /* ---------- 本机存储：自动跑时先清空，再写几个原版读者 / v3.3 的旧键（交接 0.6 甲组第 6 项的迁移检查） ---------- */
-  const OLD_PREFS = {
-    dream_visual_theme: 'ink', dream_render_mode: 'float', dream_ui_v4: 'off', dream_font_size: '18', dream_letter_unfold: '1',
-    dream_independent_api_v2: JSON.stringify({ version: 2, presets: [{ id: 'smoke1', name: '冒烟方案', apiurl: 'http://127.0.0.1:9/v1', key: '', model: 'smoke-model', source: 'openai' }], defaultId: '', routes: { adapt: 'smoke1' } }),
-  };
-  if (params.get('auto') === '1' && params.get('phase') !== '2') {
+  /* 自动场景每次从空的扩展偏好开始；不注入旧脚本、API 方案或界面偏好。 */
+  if (params.get('auto') === '1') {
     try {
       Object.keys(localStorage).filter((key) => /^(reader_ii_|dream_)/.test(key)).forEach((key) => localStorage.removeItem(key));
-      Object.entries(OLD_PREFS).forEach(([key, value]) => localStorage.setItem(key, value));
-      sessionStorage.removeItem('reader-ii-card-smoke');
     } catch (error) { console.error('[smoke] 准备本机存储失败', error); }
   }
 
@@ -34,8 +20,6 @@
   });
 
   const state = window.__mock = {
-    withExtension,
-    oldPrefs: OLD_PREFS,
     chatId: 'card-smoke-1',
     chat: [
       { name: '夜梦', is_user: false, mes: '夜色里，旧书店的门铃响了一声。\n<dream>「欢迎回来，作家先生。今晚也写一点吧。」</dream>', swipe_id: 0, variables: [{ stat_data: statData() }] },
@@ -46,14 +30,14 @@
     worldbooks: {
       设定集: [{ uid: 0, name: '王都', enabled: true, content: '王都位于北方。\n人口十万。\n守卫队长是雷恩。', strategy: { type: 'selective', keys: ['王都'], keys_secondary: { logic: 'and_any', keys: [] }, scan_depth: 'same_as_global' }, position: { type: 'before_character_definition', role: 'system', depth: 4, order: 100 }, probability: 100, extra: {} }],
     },
-    charBooks: { primary: 'reader-ii.worldbook', additional: ['设定集'] },
+    charBooks: { primary: '设定集', additional: ['设定集'] },
     globalBooks: [], chatBook: null,
     regexScripts: { global: [], character: [] },
     scripts: { global: [], character: [], preset: [] },
     preset: { settings: {}, prompts: [{ id: 'main', name: '主提示词', enabled: true, role: 'system', content: '写一段故事。' }], prompts_unused: [], extensions: {} },
     replies: [], llmCalls: [], prompts: {}, slash: [], slashRuns: [], toasts: [], posts: [], saves: 0,
     helperMissing: new Set(), mvuMissing: new Set(), globals: {},
-    appReady: false, scriptJson: null, scriptFrame: null,
+    appReady: false, native,
   };
 
   /* ---------- 事件源（酒馆的 eventSource：逐个 await，单个监听出错只记 console.error） ---------- */
@@ -151,8 +135,8 @@
   }
   function displayRegex(text, isUser, depth) {
     let out = String(text || '');
-    [...state.regexScripts.global, ...state.regexScripts.character].forEach((script) => {
-      if (script.disabled || script.promptOnly) return;
+    [...ctx.extensionSettings.regex, ...state.regexScripts.character].forEach((script) => {
+      if (script.disabled || (script.promptOnly && !script.markdownOnly)) return;
       if (!(script.placement || []).includes(isUser ? 1 : 2)) return;
       if (script.minDepth != null && depth < script.minDepth) return;
       if (script.maxDepth != null && depth > script.maxDepth) return;
@@ -375,7 +359,7 @@
       return object[key];
     },
   });
-  window.TavernHelper = recorder(H, state.helperMissing);
+  if (!native) window.TavernHelper = recorder(H, state.helperMissing);
 
   /* ---------- MVU ---------- */
   const MVU_EVENTS = {
@@ -383,7 +367,7 @@
     COMMAND_PARSED: 'mag_command_parsed', BEFORE_MESSAGE_UPDATE: 'mag_before_message_update',
   };
   const readPath = (data, path) => String(path).split('.').reduce((value, key) => (value == null ? undefined : value[key]), data);
-  window.Mvu = recorder({
+  if (!native) window.Mvu = recorder({
     events: MVU_EVENTS,
     getMvuData: (option) => clone(varsOf({ type: 'message', ...(option || {}) })),
     replaceMvuData: async (data, option) => { setVars({ type: 'message', ...(option || {}) }, clone(data)); },
@@ -406,10 +390,10 @@
     chat: state.chat, characterId: 0, groupId: null, name1: '作家', name2: '夜梦', chatId: state.chatId,
     characters: [{
       name: '夜梦', avatar: 'yume.png', description: '旧书店的店主，总在柜台后面看书。', personality: '安静', scenario: '深夜的旧书店', first_mes: state.chat[0].mes, mes_example: '',
-      data: { name: '夜梦', description: '旧书店的店主，总在柜台后面看书。', first_mes: state.chat[0].mes, alternate_greetings: [], extensions: { world: 'reader-ii.worldbook', regex_scripts: [] } },
+      data: { name: '夜梦', description: '旧书店的店主，总在柜台后面看书。', first_mes: state.chat[0].mes, alternate_greetings: [], extensions: { world: '设定集', regex_scripts: [] } },
     }],
     chatMetadata: { variables: state.chatVars },
-    extensionSettings: { variables: { global: state.globalVars } },
+    extensionSettings: { variables: { global: state.globalVars }, regex: [] },
     eventSource, eventTypes, event_types: eventTypes,
     onlineStatus: 'connected', mainApi: 'openai', maxContext: 8192,
     getCurrentChatId: () => ctx.chatId,
@@ -417,6 +401,7 @@
     saveSettingsDebounced: () => {}, saveChat: async () => {}, saveChatConditional: async () => {},
     reloadCurrentChat: async () => renderChat(),
     updateMessageBlock: (id) => renderMessage(Number(id)),
+    writeExtensionField: async (_id, key, value) => { ctx.characters[0].data.extensions[key] = clone(value); },
     setExtensionPrompt: (id, text, position, depth) => { state.prompts[id] = { text, position, depth }; },
     extensionPrompts: {},
     getRequestHeaders: () => ({ 'Content-Type': 'application/json' }),
@@ -445,7 +430,7 @@
       let body = null;
       try { body = init && init.body ? JSON.parse(init.body) : null; } catch (error) { body = String(init.body); }
       state.posts.push({ url, body });
-      const reply = /\/api\/extensions\/discover$/.test(url) ? (withExtension ? [{ type: 'local', name: 'third-party/reader-II' }] : []) : {};
+      const reply = /\/api\/extensions\/discover$/.test(url) ? [{ type: 'local', name: 'third-party/reader-II' }] : {};
       return new Response(JSON.stringify(reply), { status: 200, headers: { 'Content-Type': 'application/json' } });
     }
     return realFetch(input, init);
@@ -495,34 +480,6 @@
     state.chat.forEach((_, index) => chat.appendChild(buildMessage(index)));
   }
 
-  /* ---------- 酒馆助手脚本：按钮与 iframe ---------- */
-  state.buttonEvent = (name) => `smoke_script_button:${state.scriptJson ? state.scriptJson.id : ''}:${name}`;
-  function renderButtons() {
-    const bar = document.getElementById('th-buttons');
-    bar.replaceChildren();
-    const buttons = state.scriptJson.button && state.scriptJson.button.enabled !== false ? state.scriptJson.button.buttons || [] : [];
-    buttons.filter((item) => item.visible !== false).forEach((item) => {
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.className = 'th-button';
-      button.dataset.thButton = item.name;
-      button.textContent = item.name;
-      button.addEventListener('click', () => eventSource.emit(state.buttonEvent(item.name)));
-      bar.appendChild(button);
-    });
-  }
-  function startScript() {
-    const frame = document.createElement('iframe');
-    frame.id = 'th-script-' + state.scriptJson.id;
-    frame.title = state.scriptJson.name;
-    frame.style.display = 'none';
-    const predefine = new URL('card-predefine.js', location.href).href;
-    frame.srcdoc = '<!doctype html><html><head><meta charset="utf-8"><script src="' + predefine + '"><\/script></head><body><script type="module">'
-      + state.scriptJson.content + '\n<\/script></body></html>';
-    document.body.appendChild(frame);
-    state.scriptFrame = frame;
-  }
-
   /* 换一个聊天（同一张卡）：酒馆助手的角色脚本不重启，只发 CHAT_CHANGED。 */
   state.switchChat = async (id, messages) => {
     ctx.chatId = id;
@@ -567,32 +524,10 @@
   state.ctx = ctx;
   state.eventSource = eventSource;
 
-  async function loadJson(path) {
-    const response = await realFetch(new URL(path, location.href), { cache: 'no-store' });
-    if (!response.ok) throw new Error(`读不到 ${path}（${response.status}），先跑 node build.mjs`);
-    return response.json();
-  }
-
   state.booted = (async () => {
-    const [script, worldbook, prompt, display, render] = await Promise.all([
-      loadJson('../../dist/reader-ii.script.json'), loadJson('../../dist/reader-ii.worldbook.json'),
-      loadJson('../../dist/reader-ii.regex.event-prompt.json'), loadJson('../../dist/reader-ii.regex.event-display.json'), loadJson('../../dist/reader-ii.regex.dream-render.json'),
-    ]);
-    state.scriptJson = script;
-    state.worldbooks['reader-ii.worldbook'] = Object.values(worldbook.entries).map(entryFromNative);
-    state.regexScripts.character = [prompt, display, render];
-    ctx.characters[0].data.extensions.regex_scripts = clone(state.regexScripts.character);
-    state.scripts.character = [{ type: 'script', id: script.id, name: script.name, enabled: true, content: '（略）', info: script.info || '', button: clone(script.button), data: {} }];
     renderChat();
     state.appReady = true;
     await eventSource.emit(eventTypes.APP_READY);
-    await eventSource.emit(eventTypes.CHAT_CHANGED, ctx.chatId);
-    renderButtons();
-    startScript();
     return true;
-  })().catch((error) => {
-    console.error('[假酒馆] 启动失败', error);
-    document.title = 'SMOKE FAIL 假酒馆没有启动：' + error.message;
-    throw error;
-  });
+  })();
 })();

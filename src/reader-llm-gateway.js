@@ -315,8 +315,15 @@
         try {
           var result = await raceOnce(function () {
             if (!generateRaw) {
-              /* 没有酒馆助手：独立 API 由浏览器直连（需要对方允许跨域），否则走酒馆原生的 generateRaw。 */
-              if (api) return directChat(api, messages, request);
+              /* 没有酒馆助手：独立 API 经酒馆后端代发（同源，不受跨域限制）；没有酒馆后端时才由浏览器直连。否则走酒馆原生的 generateRaw。 */
+              if (api) {
+                var plain = { maxTokens: request.maxTokens, temperature: request.temperature, signal: request.signal };
+                var backendCtx = nativeContext();
+                if (backendCtx && typeof backendCtx.getRequestHeaders === 'function' && hostFetch()) {
+                  return backendRequest(api, messages, plain).then(function (data) { return parseToolResponse(data).text; });
+                }
+                return directChat(api, messages, request);
+              }
               var native = nativeContext();
               if (native && typeof native.generateRaw === 'function') {
                 return native.generateRaw({ prompt: messages, responseLength: Number(request.maxTokens) > 0 ? Math.trunc(Number(request.maxTokens)) : undefined });
@@ -348,6 +355,283 @@
         } catch (error) {
           lastError = error;
           if (error && error.name === 'AbortError') throw error;
+          var message = String(error && error.message || error);
+          if (attempt >= retries || !TRANSIENT.test(message)) throw error;
+          await delay(1200 * (attempt + 1), request.signal);
+        }
+      }
+      throw lastError || new Error('LLM 调用失败');
+    }
+
+    /* ---------- 原生函数调用（夜梦助手用） ---------- */
+    /*
+     * 为什么要有这一条路：文本协议的工具块要靠模型把一段 XML 原样写进正文。可不少模型（Kimi、Qwen、DeepSeek 等）把
+     * 「开始调用工具」训练成一个专用记号，服务端见到它就按原生工具调用处理；请求里没声明 tools 时，这段输出直接被丢掉，
+     * 正文停在「我现在就去做」那一句（2026-11-16 的真机日志：finish_reason 是 stop，思考里写着「然后输出工具块」，正文里没有）。
+     * 所以助手优先走原生函数调用：tools 随请求声明，tool_calls 从响应里取；不支持的通道与模型再退回文本协议。
+     *
+     * 三条通道，都不依赖酒馆助手：
+     *   backend  独立 API 方案：经酒馆后端 /api/backends/chat-completions/generate 代发（同源，不受跨域限制；TauriTavern 同样实现了它）
+     *   openai   酒馆主 API（聊天补全）：用酒馆自己的 sendOpenAIRequest，沿用当前连接与预设，只在请求发出前补上 tools
+     *   direct   没有酒馆后端（测试、独立页面）：浏览器直连独立 API
+     */
+    function hostFetch() {
+      try { if (env && env.host && typeof env.host.fetch === 'function') return env.host.fetch.bind(env.host); } catch (error) { /* ignore */ }
+      return typeof root.fetch === 'function' ? root.fetch.bind(root) : null;
+    }
+
+    function toolSupport(route) {
+      var api = resolveApi(route);
+      var ctx = nativeContext();
+      if (api) {
+        if (!hostFetch()) return { native: false, via: '', reason: '当前环境发不出网络请求' };
+        return ctx && typeof ctx.getRequestHeaders === 'function' ? { native: true, via: 'backend', model: api.model } : { native: true, via: 'direct', model: api.model };
+      }
+      if (!ctx) return { native: false, via: '', reason: '没有酒馆环境' };
+      var main = String(ctx.mainApi || '');
+      if (main && main !== 'openai') return { native: false, via: '', reason: '酒馆主 API 是文本补全类型（' + main + '），没有原生函数调用' };
+      if (!env || typeof env.hostImport !== 'function') return { native: false, via: '', reason: '当前载体不能调用酒馆的聊天补全接口' };
+      return { native: true, via: 'openai', model: '' };
+    }
+
+    function unsupportedError(message) {
+      var error = new Error(message);
+      error.code = 'no_native_tools';
+      return error;
+    }
+
+    /* 对方明确说不认 tools / function 的那类报错：换文本协议能解决，重试解决不了。 */
+    function looksUnsupported(status, text) {
+      if ([400, 404, 405, 415, 422, 501].indexOf(Number(status)) < 0) return false;
+      return /tool|function[_ ]?call|functions?\b|not\s+support|unsupported|unknown (?:field|parameter|argument)|unrecognized|extra[_ ]?(?:fields|inputs)|additional properties|不支持|无法识别/i.test(String(text || ''));
+    }
+
+    function contentText(content) {
+      if (typeof content === 'string') return content;
+      if (!Array.isArray(content)) return '';
+      return content.map(function (part) {
+        if (typeof part === 'string') return part;
+        if (part && (part.type === 'text' || part.type === 'output_text') && typeof part.text === 'string') return part.text;
+        return '';
+      }).join('');
+    }
+
+    function argumentText(value) {
+      if (typeof value === 'string') return value;
+      try { return JSON.stringify(value == null ? {} : value); } catch (error) { return '{}'; }
+    }
+
+    /*
+     * 把各家的响应规整成 { text, toolCalls: [{ id, name, arguments(JSON 文本) }], reasoning, finish, message }。
+     * message 是下一轮要原样带回去的 assistant 消息（OpenAI 形状；酒馆后端会替 Claude、Gemini 转换）。
+     */
+    function parseToolResponse(data) {
+      var out = { text: '', toolCalls: [], reasoning: '', finish: '', message: null };
+      if (!modules.isObject(data)) { out.text = typeof data === 'string' ? data : ''; return out; }
+      var choice = Array.isArray(data.choices) ? data.choices[0] : null;
+      var message = choice && modules.isObject(choice.message) ? choice.message : null;
+      var wire = [];
+      function push(id, name, args, extra) {
+        if (!name) return;
+        var call = { id: String(id || 'call_' + (++sequence).toString(36) + Date.now().toString(36)), name: String(name), arguments: argumentText(args) };
+        out.toolCalls.push(call);
+        wire.push(Object.assign({ id: call.id, type: 'function', function: { name: call.name, arguments: call.arguments } }, extra || {}));
+      }
+      if (message) {
+        out.text = contentText(message.content);
+        out.reasoning = String(message.reasoning_content || message.reasoning || '');
+        out.finish = String(choice.finish_reason || '');
+        (Array.isArray(message.tool_calls) ? message.tool_calls : []).forEach(function (item) {
+          if (!item) return;
+          var fn = modules.isObject(item.function) ? item.function : item;
+          var extra = {};
+          /* Gemini 的思考签名等附带字段要原样带回，否则下一轮会被拒。 */
+          ['signature', 'thought_signature', 'thoughtSignature', 'extra_content'].forEach(function (key) { if (item[key] !== undefined) extra[key] = item[key]; });
+          push(item.id, fn.name, fn.arguments, extra);
+        });
+        /* 更早的 function_call 写法（一次只有一个）。 */
+        if (!out.toolCalls.length && modules.isObject(message.function_call)) push('', message.function_call.name, message.function_call.arguments);
+      }
+      /* Claude：content 是块数组，tool_use 块就是调用。 */
+      var blocks = Array.isArray(data.content) ? data.content : null;
+      if (blocks && !out.toolCalls.length) {
+        if (!out.text) out.text = blocks.filter(function (block) { return block && block.type === 'text'; }).map(function (block) { return String(block.text || ''); }).join('');
+        blocks.forEach(function (block) { if (block && block.type === 'tool_use') push(block.id, block.name, block.input); });
+        if (!out.finish) out.finish = String(data.stop_reason || '');
+      }
+      /* Gemini：酒馆后端同时给出 choices 与 responseContent；functionCall 在 parts 里。 */
+      var candidate = Array.isArray(data.candidates) && data.candidates[0] && data.candidates[0].content;
+      var parts = modules.isObject(data.responseContent) && Array.isArray(data.responseContent.parts) ? data.responseContent.parts
+        : candidate && Array.isArray(candidate.parts) ? candidate.parts : null;
+      if (parts && !out.toolCalls.length) {
+        if (!out.text) out.text = parts.filter(function (part) { return part && typeof part.text === 'string' && !part.thought; }).map(function (part) { return part.text; }).join('');
+        parts.forEach(function (part) {
+          if (!part || !modules.isObject(part.functionCall)) return;
+          var signature = part.thoughtSignature || part.thought_signature || part.functionCall.thoughtSignature;
+          push('', part.functionCall.name, part.functionCall.args, signature ? { signature: signature } : null);
+        });
+      }
+      if (!out.text && !out.toolCalls.length) out.text = responseText(data);
+      out.message = { role: 'assistant', content: out.text };
+      if (wire.length) out.message.tool_calls = wire;
+      /* 思考型模型在同一轮的多步调用里要把思考原样带回（DeepSeek、Kimi 等）；对方没给这个字段时不带，免得严格的接口拒收。 */
+      if (wire.length && message && typeof message.reasoning_content === 'string' && message.reasoning_content) out.message.reasoning_content = message.reasoning_content;
+      return out;
+    }
+
+    function wireMessages(input) {
+      var output = [];
+      (Array.isArray(input) ? input : []).forEach(function (item) {
+        if (!item || typeof item.role !== 'string') return;
+        var role = ['system', 'assistant', 'tool'].indexOf(item.role) >= 0 ? item.role : 'user';
+        var message = { role: role, content: typeof item.content === 'string' ? item.content : contentText(item.content) };
+        if (role === 'assistant' && Array.isArray(item.tool_calls) && item.tool_calls.length) {
+          message.tool_calls = modules.clone(item.tool_calls);
+          if (typeof item.reasoning_content === 'string' && item.reasoning_content) message.reasoning_content = item.reasoning_content;
+        } else if (role === 'tool') {
+          message.tool_call_id = String(item.tool_call_id || '');
+        } else if (!message.content.trim()) return;
+        output.push(message);
+      });
+      return output;
+    }
+
+    async function readFailure(response) {
+      var text = '';
+      try { text = String(await response.text()); } catch (error) { text = ''; }
+      var detail = text;
+      try {
+        var parsed = JSON.parse(text);
+        detail = String(parsed && (parsed.error && (parsed.error.message || parsed.error) || parsed.message) || text);
+      } catch (error) { /* 不是 JSON 就原样给出 */ }
+      return detail.replace(/\s+/g, ' ').slice(0, 400);
+    }
+
+    function requestBody(api, messages, request) {
+      var body = { model: api.model, messages: messages, stream: false };
+      if (Number(request.maxTokens) > 0) body.max_tokens = Math.trunc(Number(request.maxTokens));
+      if (typeof request.temperature === 'number' && Number.isFinite(request.temperature)) body.temperature = request.temperature;
+      if (Array.isArray(request.tools) && request.tools.length) {
+        body.tools = request.tools;
+        body.tool_choice = request.toolChoice || 'auto';
+      }
+      return body;
+    }
+
+    /* 独立 API 经酒馆后端代发：与酒馆助手的 custom_api 同一种写法（reverse_proxy + proxy_password）。 */
+    async function backendRequest(api, messages, request) {
+      var ctx = nativeContext();
+      var fetcher = hostFetch();
+      var source = String(api.source || 'openai');
+      var body = Object.assign(requestBody(api, messages, request), {
+        type: 'quiet', chat_completion_source: source, reverse_proxy: api.apiurl, proxy_password: api.key || '', include_reasoning: true
+      });
+      if (source === 'custom') {
+        body.custom_url = api.apiurl;
+        if (api.key) body.custom_include_headers = 'Authorization: ' + JSON.stringify('Bearer ' + api.key);
+      }
+      var headers = Object.assign({ 'Content-Type': 'application/json' }, ctx.getRequestHeaders() || {});
+      var response = await fetcher('/api/backends/chat-completions/generate', { method: 'POST', headers: headers, body: JSON.stringify(body), signal: request.signal, cache: 'no-cache' });
+      if (!response.ok) {
+        var detail = await readFailure(response);
+        if (body.tools && looksUnsupported(response.status, detail)) throw unsupportedError('这个接口不接受原生函数调用（HTTP ' + response.status + '：' + detail + '）');
+        throw new Error('独立 API 返回 HTTP ' + response.status + '：' + detail);
+      }
+      var data = await response.json();
+      if (data && data.error) {
+        var message = String(modules.isObject(data.error) ? data.error.message || JSON.stringify(data.error) : data.message || data.response || '接口报错').slice(0, 400);
+        if (body.tools && looksUnsupported(400, message)) throw unsupportedError('这个接口不接受原生函数调用（' + message + '）');
+        throw new Error('独立 API 报错：' + message);
+      }
+      return data;
+    }
+
+    async function directRequest(api, messages, request) {
+      var fetcher = hostFetch();
+      if (!fetcher) throw new Error('当前环境不能直连独立 API');
+      var headers = { 'Content-Type': 'application/json' };
+      if (api.key) headers.Authorization = 'Bearer ' + api.key;
+      var body = requestBody(api, messages, request);
+      var response = await fetcher(String(api.apiurl).replace(/\/+$/, '') + '/chat/completions', { method: 'POST', headers: headers, body: JSON.stringify(body), signal: request.signal });
+      if (!response.ok) {
+        var detail = await readFailure(response);
+        if (body.tools && looksUnsupported(response.status, detail)) throw unsupportedError('这个接口不接受原生函数调用（HTTP ' + response.status + '：' + detail + '）');
+        throw new Error('独立 API 返回 HTTP ' + response.status + '：' + detail);
+      }
+      return response.json();
+    }
+
+    /* 酒馆主 API：酒馆在请求发出前会广播一次 CHAT_COMPLETION_SETTINGS_READY，我们只认自己的那一次，把 tools 补进去。 */
+    var openaiModule = null;
+    async function mainRequest(messages, request) {
+      var ctx = nativeContext();
+      if (!ctx || !ctx.eventSource) throw unsupportedError('拿不到酒馆的事件源');
+      if (!openaiModule) openaiModule = env.hostImport('/scripts/openai.js').catch(function (error) { openaiModule = null; throw error; });
+      var api;
+      try { api = await openaiModule; } catch (error) { throw unsupportedError('载入酒馆的聊天补全模块失败：' + String(error && error.message || error).slice(0, 160)); }
+      if (!api || typeof api.sendOpenAIRequest !== 'function') throw unsupportedError('这个版本的酒馆没有可用的聊天补全接口');
+      var types = ctx.eventTypes || ctx.event_types || {};
+      var eventName = types.CHAT_COMPLETION_SETTINGS_READY || 'chat_completion_settings_ready';
+      var first = messages[0];
+      var injected = false;
+      var inject = function (data) {
+        if (injected || !data || !Array.isArray(data.messages) || data.messages[0] !== first) return;
+        injected = true;
+        data.messages = messages;
+        data.stream = false;
+        data.include_reasoning = true;
+        if (Array.isArray(request.tools) && request.tools.length) {
+          data.tools = request.tools;
+          data.tool_choice = request.toolChoice || 'auto';
+        }
+      };
+      ctx.eventSource.on(eventName, inject);
+      try {
+        var data = await api.sendOpenAIRequest('quiet', messages, request.signal);
+        if (!injected && Array.isArray(request.tools) && request.tools.length) throw unsupportedError('酒馆没有给出补充请求参数的机会，工具没能带上');
+        return data;
+      } catch (error) {
+        if (error && (error.code === 'no_native_tools' || error.name === 'AbortError')) throw error;
+        var message = String(error && error.message || error);
+        if (looksUnsupported(400, message)) throw unsupportedError('当前连接不接受原生函数调用（' + message.slice(0, 300) + '）');
+        throw error;
+      } finally {
+        try { ctx.eventSource.removeListener(eventName, inject); } catch (error) { /* ignore */ }
+      }
+    }
+
+    /*
+     * 带工具的一次请求。request:
+     *   messages  OpenAI 形状，可含 assistant.tool_calls 与 role: 'tool'
+     *   tools     [{ type: 'function', function: { name, description, parameters } }]；toolChoice: 'auto' | 'required' | 'none'
+     *   route  maxTokens  temperature  timeoutMs  retries  signal
+     * 返回 parseToolResponse 的结果，另带 via（走了哪条通道）。通道或接口不支持时抛 code === 'no_native_tools' 的错误。
+     */
+    async function chatTools(input) {
+      var request = modules.isObject(input) ? input : {};
+      var messages = wireMessages(request.messages);
+      if (!messages.length) throw new Error('Reader LLM 调用缺少消息');
+      var support = toolSupport(request.route);
+      if (!support.native) throw unsupportedError(support.reason || '当前通道没有原生函数调用');
+      var api = resolveApi(request.route);
+      var retries = Math.max(0, Math.min(5, request.retries === undefined ? 2 : Math.trunc(Number(request.retries) || 0)));
+      var timeoutMs = Math.max(0, Number(request.timeoutMs === undefined ? 180000 : request.timeoutMs) || 0);
+      var lastError = null;
+      for (var attempt = 0; attempt <= retries; attempt += 1) {
+        if (request.signal && request.signal.aborted) throw abortError();
+        try {
+          var data = await raceOnce(function () {
+            if (support.via === 'backend') return backendRequest(api, messages, request);
+            if (support.via === 'direct') return directRequest(api, messages, request);
+            return mainRequest(messages, request);
+          }, '', timeoutMs, request.signal);
+          var parsed = parseToolResponse(data);
+          if (!parsed.text.trim() && !parsed.toolCalls.length) throw new Error('LLM 未返回可用文本');
+          parsed.via = support.via;
+          return parsed;
+        } catch (error) {
+          lastError = error;
+          if (error && (error.name === 'AbortError' || error.code === 'no_native_tools')) throw error;
           var message = String(error && error.message || error);
           if (attempt >= retries || !TRANSIENT.test(message)) throw error;
           await delay(1200 * (attempt + 1), request.signal);
@@ -407,6 +691,9 @@
       listModels: listModels,
       generate: generate,
       chat: chat,
+      chatTools: chatTools,
+      toolSupport: toolSupport,
+      parseToolResponse: parseToolResponse,
       stop: stop,
       responseText: responseText
     };

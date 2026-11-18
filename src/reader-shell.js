@@ -86,7 +86,7 @@
     var kit = api && api.kit || (typeof modules.createHostKit === 'function' ? modules.createHostKit(env) : null);
     var log = env.console || console;
     var inert = !doc || typeof doc.createElement !== 'function' || typeof doc.querySelectorAll !== 'function' || !doc.body;
-    var state = { stopped: false, generation: 0, key: '', frame: null, ready: null, letters: new Set(), stops: [] };
+    var state = { stopped: false, generation: 0, key: '', frame: null, ready: null, letters: new Set(), stops: [], listeners: [] };
     var resolveReady = null;
     var assetsPromise = null;
     var assetsVersion = '';
@@ -132,6 +132,7 @@
       return value !== undefined ? value : safeGet(host, name);
     }
 
+    /* 控制器找函数的顺序：酒馆助手 → 酒馆主窗口 → 原生实现（reader-native-host.js，没装酒馆助手时用）。 */
     function helperProxy() {
       return new Proxy({}, {
         get: function (_target, name) {
@@ -141,9 +142,59 @@
             var value = safeGet(owner, name);
             if (value !== undefined) return typeof value === 'function' ? value.bind(owner) : value;
           }
-          return undefined;
+          var fallback = typeof env.nativeHost === 'function' ? env.nativeHost() : null;
+          return fallback ? safeGet(fallback, name) : undefined;
         }
       });
+    }
+
+    /*
+     * 控制器用的几个全局函数。酒馆助手只把它们给自己的脚本 iframe；扩展里由我们直接对着酒馆的事件源实现，
+     * 并记下这一个控制器订过的监听，控制器销毁时一并摘掉（酒馆助手是在 iframe 卸载时替脚本摘）。
+     */
+    function controllerGlobals(listeners) {
+      function source() { var ctx = context(); return ctx && ctx.eventSource || null; }
+      function subscribe(method) {
+        return function (event, listener) {
+          var target = source();
+          if (!target || typeof target[method] !== 'function' || typeof listener !== 'function') return { stop: function () {} };
+          target[method](event, listener);
+          var record = { event: event, listener: listener };
+          listeners.push(record);
+          return { stop: function () {
+            var at = listeners.indexOf(record);
+            if (at >= 0) listeners.splice(at, 1);
+            try { target.removeListener(event, listener); } catch (error) { /* ignore */ }
+          } };
+        };
+      }
+      return {
+        eventOn: subscribe('on'),
+        eventMakeFirst: subscribe('makeFirst'),
+        eventEmit: function (event) {
+          var target = source();
+          return target ? target.emit.apply(target, arguments) : undefined;
+        },
+        tavern_events: env.tavern_events || {},
+        getCurrentMessageId: latestMessageId,
+        getAllVariables: function () {
+          var read = function (type) { try { return env.getVariables({ type: type }) || {}; } catch (error) { return {}; } };
+          return Object.assign({}, read('global'), read('chat'));
+        }
+      };
+    }
+
+    function releaseListeners(listeners) {
+      var ctx = context();
+      var target = ctx && ctx.eventSource;
+      (listeners || []).splice(0).forEach(function (record) {
+        try { if (target) target.removeListener(record.event, record.listener); } catch (error) { /* ignore */ }
+      });
+    }
+
+    /* 这个聊天用不用 Reader（reader-core.js 的 isEnabled）。没有这个接口的宿主（旧测试）按启用算。 */
+    function enabled() {
+      try { return !api || typeof api.isEnabled !== 'function' || api.isEnabled() === true; } catch (error) { return false; }
     }
 
     function latestMessageId() {
@@ -224,12 +275,13 @@
         } catch (error) { log.warn('[ReaderShell] 清理界面', error); }
         try { frame.remove(); } catch (error) { /* ignore */ }
       }
+      releaseListeners(state.listeners);
       finishReady(null);
       state.ready = null;
     }
 
     function ensure() {
-      if (state.stopped || inert) return Promise.resolve(null);
+      if (state.stopped || inert || !enabled()) return Promise.resolve(null);
       if (state.ready) return state.ready;
       var generation = ++state.generation;
       var ready = new Promise(function (resolve) { resolveReady = resolve; });
@@ -265,7 +317,12 @@
         target.SillyTavern = safeGet(host, 'SillyTavern');
         target.Mvu = rawGlobal('Mvu');
         target._ = rawGlobal('_');
-        CONTROLLER_GLOBALS.forEach(function (name) { target[name] = rawGlobal(name); });
+        /* 脚本载体（酒馆助手的脚本 iframe）里这几个全局现成就有；扩展里用我们自己的实现。 */
+        var shims = controllerGlobals(state.listeners);
+        CONTROLLER_GLOBALS.forEach(function (name) {
+          var given = env.carrier === 'script' ? rawGlobal(name) : undefined;
+          target[name] = given !== undefined ? given : shims[name];
+        });
         var script = frame.contentDocument.createElement('script');
         script.textContent = macroText(assets.controller, true);
         frame.contentDocument.body.appendChild(script);
@@ -474,7 +531,7 @@
     }
 
     function scanDocument(document, force, depth) {
-      if (state.stopped || inert || !document || depth > MAX_DEPTH || typeof document.querySelectorAll !== 'function') return 0;
+      if (state.stopped || inert || !enabled() || !document || depth > MAX_DEPTH || typeof document.querySelectorAll !== 'function') return 0;
       observeDocument(document);
       var count = 0;
       var now = Date.now();
@@ -524,9 +581,12 @@
     }
 
     /* ---------- 聊天切换与生命周期 ---------- */
+    /* 控制器按「聊天 + 这个聊天用不用 Reader」重建：换聊天、或在这张卡上开关 Reader 时都换一个。 */
+    function stateKey() { return chatKey() + (enabled() ? '' : '|off'); }
+
     function changed() {
       if (state.stopped || inert) return;
-      var next = chatKey();
+      var next = stateKey();
       if (next === state.key) { notifyLetters(); return; }
       disposeController();
       state.key = next;
@@ -608,7 +668,7 @@
       command: async function (name) {
         var args = Array.prototype.slice.call(arguments, 1);
         var app = await ensure();
-        if (!app || state.stopped || chatKey() !== state.key || controllerApp() !== app) return false;
+        if (!app || state.stopped || stateKey() !== state.key || controllerApp() !== app) return false;
         return app.command.apply(app, [name].concat(args));
       },
       settings: function () { return currentSettings() || {}; },
@@ -629,7 +689,7 @@
     }
 
     retireLegacy();
-    state.key = chatKey();
+    state.key = stateKey();
     host.ReaderShell = shell;
 
     var subscribed = false;
@@ -658,6 +718,15 @@
       source.makeFirst(nativeEvents.GENERATION_AFTER_COMMANDS, prepare);
       state.stops.push(function () { source.removeListener(nativeEvents.GENERATION_AFTER_COMMANDS, prepare); });
     }
+
+    /* 在这张卡上开关 Reader（reader-core.js 的 setEnabled）：控制器跟着建或拆。 */
+    var onCoreChanged = function (event) {
+      if (event && event.detail && event.detail.reason === 'enabled_changed') onTavernEvent();
+    };
+    try {
+      host.addEventListener('reader-core-changed', onCoreChanged);
+      state.stops.push(function () { host.removeEventListener('reader-core-changed', onCoreChanged); });
+    } catch (error) { /* ignore */ }
 
     ensure();
     scheduleScan(doc, 0);

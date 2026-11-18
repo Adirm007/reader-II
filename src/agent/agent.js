@@ -32,6 +32,7 @@
     plotContext: true,     /* 让助手了解当前剧情 */
     plotBudget: 1800,      /* 剧情摘要的字数预算 */
     lite: false,           /* 轻聊：完全不带工具 */
+    toolProtocol: 'auto',  /* 工具调用方式：auto 能用原生函数调用就用，不行退回文本协议 | native 只用原生 | text 只用文本协议 */
     connectors: [],        /* 用户导入的插件对接描述 */
     web: {},               /* 联网：免问的主机、阅读代理（net.js 的 normalizeWebSettings；密钥不在这里，在本机的 secrets） */
     mcp: {},               /* MCP 服务器（mcp.js 的 normalizeMcpSettings） */
@@ -70,6 +71,7 @@
       plotContext: source.plotContext !== false,
       plotBudget: clampInt(source.plotBudget, 200, 20000, DEFAULTS.plotBudget),
       lite: source.lite === true,
+      toolProtocol: ['auto', 'native', 'text'].indexOf(source.toolProtocol) >= 0 ? source.toolProtocol : DEFAULTS.toolProtocol,
       connectors: (Array.isArray(source.connectors) ? source.connectors : []).filter(modules.isObject).slice(0, 40),
       web: section('normalizeWebSettings', source.web),
       mcp: section('normalizeMcpSettings', source.mcp),
@@ -89,12 +91,15 @@
     var openSets = Object.create(null);
     var listeners = [];
     var extracting = false;
+    /* 自动模式下试过、确认不认原生函数调用的后端（按 地址|模型 记，只在本次页面会话里有效；改设置或自检后清掉）。 */
+    var textOnly = Object.create(null);
 
     function getSettings() { return modules.clone(settings); }
 
     function saveSettings(patch) {
       settings = normalizeSettings(Object.assign({}, settings, modules.isObject(patch) ? patch : {}));
       io.write(modules.clone(settings));
+      textOnly = Object.create(null);
       emitChange('settings');
       return getSettings();
     }
@@ -243,7 +248,15 @@
       return registry.toolsets().filter(function (set) { return openSets[set.name] || (set.auto && set.name !== 'memory') || (set.name === 'memory' && memory && memory.getSettings().enabled); });
     }
 
-    function buildSystem(persona, recalled, plot, lite) {
+    /* 这一步能用的工具：核心工具 + 已打开的工具箱。 */
+    function availableTools() {
+      var list = registry.tools('core');
+      activeToolsets().forEach(function (set) { list = list.concat(registry.tools(set.name)); });
+      return list;
+    }
+
+    /* mode：'native' 原生函数调用（工具随请求声明，提示词里不放工具手册）| 'text' 文本协议（格式说明与手册都在提示词里）。 */
+    function buildSystem(persona, recalled, plot, lite, mode) {
       var address = persona.address ? '称呼用户为「' + persona.address + '」。' : '称呼用户为“作家先生”或“作家小姐”（不确定时用“作家先生”），或沿用对话里已有的称呼。';
       var parts = [
         '你是九十九夜梦，一位在故事之外阅读着用户这部作品的“读者”。此刻你以「' + persona.name + '」的一面，作为住在酒馆（SillyTavern）里的随身助手与用户交谈。',
@@ -257,6 +270,7 @@
         parts.push([
           '【规矩】',
           '- 始终用上面的人格口吻说话。问候、闲聊、谈心时直接回答，不要调用工具。',
+          '- 用户让你办事时，在同一条回复里就调用工具去办。只回一句「我这就去做」「我会先……」而不调用工具，等于什么都没做——不要这样。',
           '- 酒馆里的东西都是「文件」：先 ls / grep 定位，再 read 需要的那一段，改动用 edit 做最小替换。不要为了找一处问题把整个大文件读进来，也不要整篇重写只改了一行的文件。',
           '- 排查问题先看现场：page:/errors 是最近的报错；渲染、脚本、变量出问题时，在 script:/ regex:/ wb:/ 里 grep 相关的名字，必要时用 run_js（target=page）检查正在运行的对象。',
           '- 工具返回的才是事实：没查过的不要凭印象断言；工具失败就如实说明，绝不能把没做成的事说成已经办好。',
@@ -266,19 +280,17 @@
           '- 你的改动都有记录，用户可以在面板里按轮撤销；斜杠命令、页面脚本这类撤销不了的操作，动手前先说明。',
           '- 回答先说结论，再给必要的细节；不要把工具返回的原始内容整段贴给用户。'
         ].join('\n'));
-        parts.push([
-          '【工具调用格式】',
-          '需要用工具时，在回复里写出这样的块（之前可以先用一句话说明要做什么；一次回复里可以放多个块）：',
-          '<tool_call name="工具名">',
-          '<arg name="参数名">参数值</arg>',
-          '</tool_call>',
-          '- 参数值原样书写，不要加引号、不要转义；多行文本直接换行。类型为 json 的参数写 JSON。',
-          '- 写完工具块就停下。系统会把结果放在 <tool_result> 里交还给你，再继续下一步。',
-          '- 不需要工具时直接写给用户的话，其中不要出现 tool_call。'
-        ].join('\n'));
-        parts.push('【核心工具】\n' + modules.agentToolManual(registry.tools('core')));
-        open.forEach(function (set) { parts.push('【已打开的工具箱：' + set.name + '】\n' + modules.agentToolManual(registry.tools(set.name))); });
-        if (closed.length) parts.push('【工具箱】（需要时用 toolbox 打开，打开后才看得到里面的工具）\n' + closed.map(function (set) { return '- ' + set.name + '：' + set.summary; }).join('\n'));
+        if (mode === 'native') {
+          parts.push('【工具】\n工具已经随这次请求声明给你，直接发起函数调用即可，一次可以调用多个；结果会交还给你，再继续下一步。\n调用时不要把工具名和参数写成文字贴在回复里。');
+        } else {
+          parts.push(protocol.TEXT_FORMAT);
+          parts.push('【核心工具】\n' + modules.agentToolManual(registry.tools('core')));
+          open.forEach(function (set) { parts.push('【已打开的工具箱：' + set.name + '】\n' + modules.agentToolManual(registry.tools(set.name))); });
+        }
+        if (closed.length) {
+          parts.push('【工具箱】（需要时用 toolbox 打开，' + (mode === 'native' ? '打开后里面的工具就可以直接调用' : '打开后才看得到里面的工具') + '）\n'
+            + closed.map(function (set) { return '- ' + set.name + '：' + set.summary; }).join('\n'));
+        }
         var skills = registry.skills();
         if (skills.length) parts.push('【知识】（做相关的事之前先用 skill 读取）\n' + skills.map(function (skill) { return '- ' + skill.name + '：' + skill.summary; }).join('\n'));
         parts.push('【挂载点】\n' + vfs.mounts().map(function (mount) { return '- ' + mount.id + ':/  ' + mount.title; }).join('\n'));
@@ -295,7 +307,7 @@
 
     /* 上下文过长时把较早的工具结果压成一行，最近两轮保持原样。 */
     function compact(messages, budget) {
-      var total = messages.reduce(function (sum, message) { return sum + message.content.length; }, 0);
+      var total = messages.reduce(function (sum, message) { return sum + String(message.content || '').length; }, 0);
       if (total <= budget) return;
       var resultIndexes = [];
       messages.forEach(function (message, index) { if (message.toolResult) resultIndexes.push(index); });
@@ -303,12 +315,36 @@
         var message = messages[resultIndexes[index]];
         if (message.compacted) continue;
         var before = message.content.length;
-        message.content = message.content.replace(/(<tool_result\b[^>]*>)([\s\S]*?)(<\/tool_result>)/g, function (match, open, body, close) {
-          return body.length > 400 ? open + '\n' + body.slice(0, 300) + '\n…（较早的结果已压缩，需要时重新调用工具）\n' + close : match;
-        });
+        if (message.role === 'tool') {
+          if (message.content.length > 400) message.content = message.content.slice(0, 300) + '\n…（较早的结果已压缩，需要时重新调用工具）';
+        } else {
+          message.content = message.content.replace(/(<(?:action_result|tool_result)\b[^>]*>)([\s\S]*?)(<\/(?:action_result|tool_result)>)/g, function (match, open, body, close) {
+            return body.length > 400 ? open + '\n' + body.slice(0, 300) + '\n…（较早的结果已压缩，需要时重新调用工具）\n' + close : match;
+          });
+        }
         message.compacted = true;
         total -= before - message.content.length;
       }
+    }
+
+    /* 原生函数调用的往来记录改写成文本协议的样子（运行中途从原生退回文本协议时用）。 */
+    function flattenForText(messages) {
+      var output = [];
+      messages.forEach(function (message) {
+        if (message.role === 'assistant' && Array.isArray(message.tool_calls) && message.tool_calls.length) {
+          var blocks = message.tool_calls.map(function (call) {
+            var parsed = protocol.nativeArgs(call.function && call.function.arguments);
+            return protocol.callBlock(call.function && call.function.name || '?', parsed.args || {});
+          });
+          output.push({ role: 'assistant', content: (message.content ? message.content + '\n' : '') + blocks.join('\n') });
+        } else if (message.role === 'tool') {
+          var block = protocol.resultBlock(message.toolName || 'tool', message.toolStatus || 'ok', message.content);
+          var last = output[output.length - 1];
+          if (last && last.role === 'user' && last.toolResult) last.content += '\n' + block;
+          else output.push({ role: 'user', content: block, toolResult: true });
+        } else output.push(message);
+      });
+      return output;
     }
 
     function planText(todos) {
@@ -318,7 +354,7 @@
 
     function basePath(path) { return String(path).split('#')[0]; }
 
-    /* 执行一次工具调用，返回 { block: 交还给模型的结果块, step: 给界面的记录, name? } */
+    /* 执行一次工具调用，返回 { status: ok | error | denied, body: 交还给模型的结果正文, step: 给界面的记录 } */
     async function execute(def, args, id, state) {
       var effect = modules.resolveToolField(def.effect, args, 'write', state.toolCtx);
       var scope = modules.resolveToolField(def.scope, args, 'tavern', state.toolCtx);
@@ -336,7 +372,7 @@
       state.emit({ type: 'tool_start', id: id, name: def.name, args: args, tier: effect, description: description });
       function finish(status, body, step) {
         state.emit(Object.assign({ type: 'tool_end', id: id, name: def.name }, step));
-        return { block: protocol.resultBlock(def.name, status, body), step: Object.assign({ name: def.name, args: args }, step) };
+        return { status: status, body: body, step: Object.assign({ name: def.name, args: args }, step) };
       }
       /* 只读调用重复时直接复用结果，避免模型原地打转。 */
       if (effect === 'read' && state.seen[signature]) {
@@ -380,9 +416,117 @@
       }
     }
 
+    /* ---------- 工具调用方式：原生函数调用 / 文本协议 ---------- */
+    var NUDGE = '（系统提示：你上一条回复只说了打算做什么，却没有发出任何工具调用，所以实际上什么都没有执行。如果用户是要你现在动手，请立刻调用工具，不要再只做口头说明；如果用户只是在闲聊或询问你的打算，把刚才的回答再说一遍即可。）';
+
+    function plainMessages(messages) {
+      return messages.map(function (message) { return { role: message.role === 'tool' ? 'user' : message.role, content: String(message.content || '') }; });
+    }
+
+    function backendKey() {
+      try {
+        var summary = llm.getBackendSummary('agent');
+        return summary && summary.mode === 'custom' ? summary.apiurl + '|' + summary.model : 'main';
+      } catch (error) { return 'main'; }
+    }
+
+    /* 返回 { mode: native | text, via, key, reason }。设置为只用原生、而通道不支持时抛错。 */
+    function pickProtocol() {
+      var want = settings.toolProtocol;
+      var key = backendKey();
+      var support = typeof llm.toolSupport === 'function' && typeof llm.chatTools === 'function'
+        ? llm.toolSupport('agent') : { native: false, via: '', reason: '当前的模型网关没有原生函数调用' };
+      if (want === 'text') return { mode: 'text', via: '', key: key, reason: '设置为只用文本协议' };
+      if (support.native && !(want === 'auto' && textOnly[key])) return { mode: 'native', via: support.via, key: key, reason: '' };
+      if (want === 'native') throw new Error('设置为只用原生函数调用，但' + (support.reason || '当前通道不支持') + '。请到设置里把「工具调用方式」改回「自动」。');
+      return { mode: 'text', via: '', key: key, reason: support.native ? '这个接口试过，不认原生函数调用' : support.reason || '' };
+    }
+
+    function toolStatus() {
+      try {
+        var picked = pickProtocol();
+        return { mode: picked.mode, via: picked.via, reason: picked.reason, setting: settings.toolProtocol };
+      } catch (error) {
+        return { mode: 'none', via: '', reason: String(error && error.message || error), setting: settings.toolProtocol };
+      }
+    }
+
+    /*
+     * 问模型一次，返回 { style, text, prose, calls: [{ id?, name, args, malformed? }], truncated, message?, reasoning }。
+     * style 是这一步的调用写法：native 的结果用 role: 'tool' 交还，text 的结果写成 <action_result> 放进下一条 user 消息。
+     */
+    async function ask(proto, messages, forced, signal) {
+      var base = {
+        route: 'agent', maxTokens: settings.maxTokens, temperature: settings.temperature,
+        timeoutMs: settings.timeoutSec * 1000, retries: 2, signal: signal
+      };
+      if (proto.mode === 'native') {
+        var reply = await llm.chatTools(Object.assign({
+          messages: messages, tools: availableTools().map(protocol.toolSchema), toolChoice: forced ? 'none' : 'auto'
+        }, base));
+        var calls = reply.toolCalls.map(function (item) {
+          var parsed = protocol.nativeArgs(item.arguments);
+          return { id: item.id, name: item.name, args: parsed.args || {}, malformed: parsed.error || '' };
+        });
+        if (calls.length) return { style: 'native', text: reply.text, prose: String(reply.text || '').trim(), calls: calls, truncated: false, message: reply.message, reasoning: reply.reasoning };
+        /* 有的模型仍会把工具块写进正文：这一步照文本协议处理。 */
+        var inline = protocol.parse(reply.text);
+        return { style: 'text', text: reply.text, prose: inline.prose, calls: inline.calls, truncated: inline.truncated, reasoning: reply.reasoning };
+      }
+      var raw = String(await llm.chat(Object.assign({ messages: plainMessages(messages), generationId: 'reader-agent' }, base)));
+      var parsed = protocol.parse(raw);
+      return { style: 'text', text: raw, prose: parsed.prose, calls: parsed.calls, truncated: parsed.truncated, reasoning: '' };
+    }
+
+    /*
+     * 自检：让模型各用一种方式调用一次假工具 ping，看哪种走得通。不写任何东西，只花两次很短的请求。
+     * 返回 { backend, native: { ok, detail }, text: { ok, detail }, recommend: native | text | none }。
+     */
+    async function probeTools() {
+      if (current) throw new Error('助手正在运行，请等它结束再测试');
+      var ask1 = '请调用 ping 工具，参数 text 填 ok。除了调用之外不需要说别的。';
+      var base = { route: 'agent', maxTokens: 600, temperature: 0, timeoutMs: 90000, retries: 0 };
+      var report = { backend: llm.getBackendSummary('agent'), native: { ok: false, detail: '' }, text: { ok: false, detail: '' }, recommend: 'none' };
+      var key = backendKey();
+      var support = typeof llm.toolSupport === 'function' && typeof llm.chatTools === 'function'
+        ? llm.toolSupport('agent') : { native: false, reason: '当前的模型网关没有原生函数调用' };
+      if (!support.native) report.native.detail = support.reason || '当前通道不支持';
+      else {
+        try {
+          var reply = await llm.chatTools(Object.assign({
+            messages: [{ role: 'system', content: '这是一次工具调用自检。请严格按用户的要求调用工具。' }, { role: 'user', content: ask1 }],
+            tools: [{ type: 'function', function: { name: 'ping', description: '自检用：原样返回 text。', parameters: { type: 'object', properties: { text: { type: 'string', description: '填 ok' } }, required: ['text'] } } }],
+            toolChoice: 'auto'
+          }, base));
+          report.native.ok = reply.toolCalls.some(function (item) { return item.name === 'ping'; });
+          report.native.detail = report.native.ok ? '模型发出了原生调用'
+            : '请求成功，但模型没有发出调用' + (reply.text ? '（它说：' + shorten(reply.text.replace(/\s+/g, ' '), 60) + '）' : '');
+        } catch (error) { report.native.detail = shorten(String(error && error.message || error), 200); }
+      }
+      try {
+        var raw = String(await llm.chat(Object.assign({
+          messages: [
+            { role: 'system', content: '这是一次工具调用自检。请严格按用户的要求调用工具。\n\n' + protocol.TEXT_FORMAT + '\n\n【工具】\n● ping\n  自检用：原样返回 text。\n  - text（string，必填）：填 ok' },
+            { role: 'user', content: ask1 }
+          ],
+          generationId: 'reader-agent-probe'
+        }, base)));
+        var parsed = protocol.parse(raw);
+        report.text.ok = parsed.calls.some(function (item) { return item.name === 'ping'; });
+        report.text.detail = report.text.ok ? '模型按文本格式写出了调用'
+          : parsed.truncated ? '工具块没有写完（多半被上游截断或吞掉了）'
+            : '模型没有写出工具块' + (parsed.prose ? '（它说：' + shorten(parsed.prose.replace(/\s+/g, ' '), 60) + '）' : '（正文是空的：多半被上游吞掉了）');
+      } catch (error) { report.text.detail = shorten(String(error && error.message || error), 200); }
+      report.recommend = report.native.ok ? 'native' : report.text.ok ? 'text' : 'none';
+      if (report.native.ok) delete textOnly[key];
+      else if (report.text.ok) textOnly[key] = true;
+      emitChange('probe');
+      return report;
+    }
+
     /*
      * options: { persona, onEvent(event), confirm(request) → 'allow' | 'always' | 'deny', signal, remember = true, lite, plotContext }
-     * 返回 { answer, steps: [{ name, args, ok, summary }], aborted, error, runId }
+     * 返回 { answer, steps: [{ name, args, ok, summary }], aborted, error, runId, protocol }
      */
     async function run(userInput, options) {
       var opts = options || {};
@@ -410,13 +554,14 @@
           try { recalled = await memory.search(input, { limit: 5 }); } catch (error) { recalled = []; }
         }
         var plot = settings.plotContext && opts.plotContext !== false ? await plotBrief() : '';
-        var messages = [{ role: 'system', content: buildSystem(persona, recalled, plot, lite) }];
+        var proto = lite ? { mode: 'text', via: '', key: '', reason: '轻聊' } : pickProtocol();
+        var messages = [{ role: 'system', content: buildSystem(persona, recalled, plot, lite, proto.mode) }];
         var history = readHistory();
         history.turns.slice(-settings.historyTurns * 2).forEach(function (turn) {
           messages.push({ role: turn.role, content: turn.text + (turn.tools ? '\n（当时用过的工具：' + turn.tools.join('、') + '）' : '') });
         });
         messages.push({ role: 'user', content: input });
-        emit({ type: 'start', persona: persona.name, recalled: recalled.length, runId: result.runId });
+        emit({ type: 'start', persona: persona.name, recalled: recalled.length, runId: result.runId, protocol: proto.mode });
         await registry.emit('run:start', { input: input, runId: result.runId });
 
         /* 用户亲口说过的话（这一句与历史里的用户发言）：联网工具据此判断某个网址是不是用户自己给的。 */
@@ -433,50 +578,113 @@
         var usedTools = [];
         var answer = '';
         var forced = false;
+        var nudged = false;
+        var stallNote = false;
+
+        /* 运行中途从原生函数调用退回文本协议：往来记录改写成文本的样子，系统提示换成带格式说明与工具手册的那一版。 */
+        var useText = function (reason, remember) {
+          if (remember && proto.key) textOnly[proto.key] = true;
+          proto = { mode: 'text', via: '', key: proto.key, reason: reason, fallback: true };
+          messages = flattenForText(messages);
+          messages[0] = { role: 'system', content: buildSystem(persona, recalled, plot, false, 'text') };
+          emit({ type: 'protocol', mode: 'text', reason: reason });
+        };
+
         for (var step = 0; step <= settings.maxSteps; step += 1) {
           compact(messages, 60000);
           emit({ type: 'thinking', step: step });
-          var reply = await llm.chat({
-            messages: messages.map(function (message) { return { role: message.role, content: message.content }; }),
-            route: 'agent', maxTokens: settings.maxTokens, temperature: settings.temperature,
-            timeoutMs: settings.timeoutSec * 1000, retries: 2, signal: signal, generationId: 'reader-agent'
-          });
-          if (lite) { answer = String(reply).trim(); break; }
-          var parsed = protocol.parse(reply);
-          if (!parsed.calls.length && !parsed.truncated) { answer = parsed.prose || String(reply).trim(); break; }
-          if (forced || step >= settings.maxSteps) {
-            answer = parsed.prose || '（这次需要的步骤超出了上限，我先停在这里。已经完成的部分见上面的记录；可以让我接着做。）';
+          if (lite) {
+            answer = String(await llm.chat({
+              messages: plainMessages(messages), route: 'agent', maxTokens: settings.maxTokens, temperature: settings.temperature,
+              timeoutMs: settings.timeoutSec * 1000, retries: 2, signal: signal, generationId: 'reader-agent'
+            })).trim();
             break;
           }
-          messages.push({ role: 'assistant', content: reply });
-          if (parsed.prose) emit({ type: 'thought', text: parsed.prose });
+          var turn;
+          try { turn = await ask(proto, messages, forced, signal); }
+          catch (error) {
+            if (error && error.name === 'AbortError') throw error;
+            /* 自动模式下，原生调用这条路走不通（接口不认 tools，或带着调用记录的请求被拒）就改走文本协议接着做。 */
+            if (proto.mode === 'native' && settings.toolProtocol === 'auto') {
+              useText(String(error && error.message || error).slice(0, 200), !!(error && error.code === 'no_native_tools'));
+              step -= 1;
+              continue;
+            }
+            throw error;
+          }
+          if (!turn.calls.length && !turn.truncated) {
+            var said = turn.prose || String(turn.text || '').trim();
+            /* 只说不做（这一轮还没有调用过任何工具，回复却是一句「我这就去做」）：先提醒一次；原生调用下仍然如此就换文本协议再试一次。 */
+            if (!steps.length && protocol.stalled(said, turn.reasoning)) {
+              if (!nudged) {
+                nudged = true;
+                messages.push({ role: 'assistant', content: said });
+                messages.push({ role: 'user', content: NUDGE });
+                emit({ type: 'thought', text: said });
+                emit({ type: 'nudge' });
+                continue;
+              }
+              if (proto.mode === 'native' && settings.toolProtocol === 'auto') {
+                useText('模型没有响应原生函数调用', false);
+                continue;
+              }
+              stallNote = true;
+            }
+            answer = said;
+            break;
+          }
+          if (forced || step >= settings.maxSteps) {
+            answer = turn.prose || '（这次需要的步骤超出了上限，我先停在这里。已经完成的部分见上面的记录；可以让我接着做。）';
+            break;
+          }
+          var native = turn.style === 'native';
+          messages.push(native ? turn.message : { role: 'assistant', content: turn.text });
+          if (turn.prose) emit({ type: 'thought', text: turn.prose });
           var feedback = [];
-          for (var index = 0; index < parsed.calls.length; index += 1) {
+          var lastTool = null;
+          for (var index = 0; index < turn.calls.length; index += 1) {
             if (signal && signal.aborted) { var aborted = new Error('已取消'); aborted.name = 'AbortError'; throw aborted; }
-            var call = parsed.calls[index];
+            var call = turn.calls[index];
             var id = step + '-' + index;
             var def = call.malformed ? null : registry.find(call.name);
             var problem = !def ? (call.malformed || '没有名为 ' + call.name + ' 的工具。请只使用已列出的工具；工具箱里的工具要先用 toolbox 打开。') : '';
             var coerced = def ? protocol.coerce(def, call.args) : null;
             if (coerced && coerced.error) problem = coerced.error;
+            var status, body;
             if (problem) {
-              feedback.push(protocol.resultBlock(call.name || '?', 'error', problem));
+              status = 'error';
+              body = problem;
               steps.push({ name: call.name || '?', args: call.args || {}, ok: false, summary: problem });
               emit({ type: 'tool_end', id: id, name: call.name || '?', ok: false, summary: problem });
-              continue;
+            } else {
+              var outcome = await execute(def, coerced.args, id, state);
+              status = outcome.status;
+              body = outcome.body;
+              steps.push(outcome.step);
+              if (outcome.step.ok && usedTools.indexOf(def.name) < 0) usedTools.push(def.name);
             }
-            var outcome = await execute(def, coerced.args, id, state);
-            feedback.push(outcome.block);
-            steps.push(outcome.step);
-            if (outcome.step.ok && usedTools.indexOf(def.name) < 0) usedTools.push(def.name);
+            if (native) {
+              lastTool = {
+                role: 'tool', tool_call_id: call.id, toolResult: true, toolName: call.name || '?', toolStatus: status,
+                content: (status === 'ok' ? '' : status === 'denied' ? '［未执行］' : '［失败］') + body
+              };
+              messages.push(lastTool);
+            } else feedback.push(protocol.resultBlock(call.name || '?', status, body));
           }
-          var tail;
-          if (parsed.truncated) tail = '（你上一条回复里有一个工具块没有写完，多半是被长度截断了，那个调用没有执行。请重新发送它；内容很长时拆成几次，例如先 write 开头，再用 edit 追加。）';
+          var tail = '';
+          if (turn.truncated) tail = '（你上一条回复里有一个工具块没有写完，多半是被长度截断了，那个调用没有执行。请重新发送它；内容很长时拆成几次，例如先 write 开头，再用 edit 追加。）';
           else if (step + 1 >= settings.maxSteps) { tail = '（已到本次请求的工具步数上限。请根据以上结果直接回答用户，不要再调用工具；没做完的部分如实说明。）'; forced = true; }
-          else tail = '（以上是工具结果。继续处理用户的请求：还需要信息就再调用工具，否则直接用你的口吻回答用户。）';
-          if (job.todos.length) tail = planText(job.todos) + '\n' + tail;
-          messages.push({ role: 'user', content: (feedback.length ? feedback.join('\n') + '\n' : '') + tail, toolResult: true });
+          else if (!native) tail = '（以上是工具结果。继续处理用户的请求：还需要信息就再调用工具，否则直接用你的口吻回答用户。）';
+          if (job.todos.length) tail = planText(job.todos) + (tail ? '\n' + tail : '');
+          if (native) {
+            /* 原生调用下，附带的说明并进最后一条工具结果里：assistant 的调用后面必须紧跟对应的 tool 消息。 */
+            if (tail && lastTool) lastTool.content += '\n\n' + tail;
+          } else messages.push({ role: 'user', content: (feedback.length ? feedback.join('\n') + '\n' : '') + tail, toolResult: true });
         }
+        if (stallNote) {
+          answer += '\n\n（提示：模型接连两次只说要做、却没有发出工具调用，所以这次什么都没执行。可以到「设置 → 模型与工具」里点「测试工具调用」，看看这个模型与接口支持哪种调用方式。）';
+        }
+        result.protocol = proto.mode;
         result.answer = answer || '（模型没有给出回答，请再试一次。）';
         if (opts.remember !== false && kit.chatKey() === job.key) {
           var latest = readHistory();
@@ -545,6 +753,8 @@
       saveSettings: saveSettings,
       run: run,
       stop: stop,
+      toolStatus: toolStatus,
+      probeTools: probeTools,
       isBusy: function () { return !!current; },
       getHistory: getHistory,
       clearHistory: clearHistory,

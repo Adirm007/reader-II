@@ -2,97 +2,23 @@
   'use strict';
 
   /*
-   * 夜梦助手面板：对话 / 记忆 / 设置 三页，画在酒馆主文档里。
-   * 用 <dialog>.showModal() 进入浏览器顶层，大厅与抽卡面板的 z-index 盖不住它；配色跟随读者当前主题。
+   * 夜梦助手窗口：对话 / 记忆 / 设置 三页，画在酒馆主文档里。
+   * 用 <dialog>.showModal() 进入浏览器顶层，大厅与抽卡面板的 z-index 盖不住它。
+   * 样式在 ui-theme.js（与语义适配面板共用一套主题变量与外框），这里只有标记与接线。
+   * 入口只有读者大厅的「彩蛋服务台」：标题栏左边的「服务台」回到那里，右边的关闭回到聊天。
+   * 标记里的 id、data-act、data-tab、data-s 等是冒烟脚本认的约定（tools/smoke/），改名要两边一起改。
    */
   var modules = root.__ReaderIIModules = root.__ReaderIIModules || {};
   var OVERLAY_ID = 'reader-agent-overlay';
-  var STYLE_ID = 'reader-agent-style';
   var TYPE_ORDER = ['episode', 'fact', 'bond', 'howto'];
-
-  var CSS = [
-    '#reader-agent-overlay{--ra-bg:#1d1612;--ra-panel:#2a201a;--ra-panel2:#33271f;--ra-line:rgba(226,190,130,.22);--ra-ink:#f1e7d0;--ra-mute:#b9a88c;--ra-accent:#d9a85a;--ra-accent-ink:#2a1c0c;--ra-user:#3b2d22;--ra-ok:#8fbf8a;--ra-bad:#e08a7a;--ra-warn:#e2b25c;--ra-shadow:rgba(0,0,0,.55);',
-    'position:fixed;inset:0;width:100%;height:100%;max-width:none;max-height:none;margin:0;padding:0;border:0;background:rgba(8,6,5,.62);color:var(--ra-ink);font:15px/1.6 "Noto Serif SC","Songti SC","Source Han Serif SC",serif;z-index:2147483647;overflow:hidden}',
-    '#reader-agent-overlay::backdrop{background:rgba(8,6,5,.5)}',
-    '#reader-agent-overlay[data-theme="summer"]{--ra-bg:#eaf6f8;--ra-panel:#fbfeff;--ra-panel2:#e3f1f5;--ra-line:rgba(40,120,150,.22);--ra-ink:#17323c;--ra-mute:#5b7a86;--ra-accent:#2f9fc4;--ra-accent-ink:#fff;--ra-user:#d4ecf4;--ra-ok:#2f8f6a;--ra-bad:#c9544a;--ra-warn:#b7791f;--ra-shadow:rgba(20,60,80,.25);background:rgba(190,225,235,.5)}',
-    '#reader-agent-overlay[data-theme="ink"]{--ra-bg:#f3efe4;--ra-panel:#fbf8ef;--ra-panel2:#ece6d6;--ra-line:rgba(60,70,60,.24);--ra-ink:#262a26;--ra-mute:#6d7168;--ra-accent:#5d8f84;--ra-accent-ink:#fff;--ra-user:#e3ecdf;--ra-ok:#4d7f5d;--ra-bad:#a8423a;--ra-warn:#96702a;--ra-shadow:rgba(40,40,30,.28);background:rgba(120,120,105,.42)}',
-    '#reader-agent-overlay *{box-sizing:border-box}',
-    '#reader-agent-overlay .ra-shell{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:min(880px,94vw);height:min(760px,90vh);display:flex;flex-direction:column;background:var(--ra-bg);border:1px solid var(--ra-line);border-radius:14px;box-shadow:0 24px 70px var(--ra-shadow);overflow:hidden}',
-    '#reader-agent-overlay .ra-head{display:flex;align-items:center;gap:14px;padding:12px 16px;border-bottom:1px solid var(--ra-line);background:var(--ra-panel)}',
-    '#reader-agent-overlay .ra-id{display:flex;flex-direction:column;line-height:1.25;min-width:0}',
-    '#reader-agent-overlay .ra-id b{font-size:17px;letter-spacing:.06em}',
-    '#reader-agent-overlay .ra-id i{font-style:normal;font-size:12px;color:var(--ra-mute);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
-    '#reader-agent-overlay .ra-tabs{display:flex;gap:4px;margin-left:auto}',
-    '#reader-agent-overlay button{font:inherit;color:inherit;cursor:pointer}',
-    '#reader-agent-overlay .ra-tab{padding:6px 14px;border:1px solid transparent;border-radius:999px;background:transparent;color:var(--ra-mute)}',
-    '#reader-agent-overlay .ra-tab[aria-selected="true"]{border-color:var(--ra-line);background:var(--ra-panel2);color:var(--ra-ink)}',
-    '#reader-agent-overlay .ra-close{width:34px;height:34px;border:1px solid var(--ra-line);border-radius:50%;background:transparent;font-size:18px;line-height:1}',
-    '#reader-agent-overlay .ra-pane{flex:1;min-height:0;display:none;flex-direction:column}',
-    '#reader-agent-overlay .ra-pane.is-on{display:flex}',
-    '#reader-agent-overlay .ra-log{flex:1;min-height:0;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:10px;overscroll-behavior:contain}',
-    '#reader-agent-overlay .ra-msg{max-width:86%;padding:9px 13px;border-radius:12px;white-space:pre-wrap;word-break:break-word}',
-    '#reader-agent-overlay .ra-ai{align-self:flex-start;background:var(--ra-panel);border:1px solid var(--ra-line);border-top-left-radius:4px}',
-    '#reader-agent-overlay .ra-user{align-self:flex-end;background:var(--ra-user);border-top-right-radius:4px}',
-    '#reader-agent-overlay .ra-thought{align-self:flex-start;max-width:86%;color:var(--ra-mute);font-size:13.5px;padding:0 4px;white-space:pre-wrap}',
-    '#reader-agent-overlay .ra-msg code{font:13px/1.5 ui-monospace,Consolas,monospace;background:var(--ra-panel2);padding:1px 5px;border-radius:4px}',
-    '#reader-agent-overlay .ra-msg pre{margin:6px 0;padding:8px 10px;background:var(--ra-panel2);border-radius:8px;overflow-x:auto;font:13px/1.5 ui-monospace,Consolas,monospace;white-space:pre}',
-    '#reader-agent-overlay .ra-step{align-self:flex-start;max-width:92%;font-size:13px;color:var(--ra-mute);border-left:2px solid var(--ra-line);padding:2px 0 2px 10px}',
-    '#reader-agent-overlay .ra-step summary{cursor:pointer;list-style:none;display:flex;gap:8px;align-items:baseline}',
-    '#reader-agent-overlay .ra-step summary::-webkit-details-marker{display:none}',
-    '#reader-agent-overlay .ra-step .st{flex:none;font-weight:700}',
-    '#reader-agent-overlay .ra-step[data-state="run"] .st{color:var(--ra-warn)}',
-    '#reader-agent-overlay .ra-step[data-state="ok"] .st{color:var(--ra-ok)}',
-    '#reader-agent-overlay .ra-step[data-state="bad"] .st{color:var(--ra-bad)}',
-    '#reader-agent-overlay .ra-step pre{margin:4px 0 0;white-space:pre-wrap;word-break:break-word;font:12px/1.5 ui-monospace,Consolas,monospace;max-height:180px;overflow:auto}',
-    '#reader-agent-overlay .ra-confirm{align-self:stretch;border:1px solid var(--ra-warn);border-radius:10px;padding:10px 12px;background:var(--ra-panel)}',
-    '#reader-agent-overlay .ra-confirm.is-danger{border-color:var(--ra-bad)}',
-    '#reader-agent-overlay .ra-confirm h4{margin:0 0 4px;font-size:14px}',
-    '#reader-agent-overlay .ra-confirm pre{margin:6px 0;max-height:150px;overflow:auto;white-space:pre-wrap;word-break:break-word;font:12px/1.5 ui-monospace,Consolas,monospace;color:var(--ra-mute)}',
-    '#reader-agent-overlay .ra-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}',
-    '#reader-agent-overlay .ra-btn{padding:6px 14px;border:1px solid var(--ra-line);border-radius:8px;background:var(--ra-panel2)}',
-    '#reader-agent-overlay .ra-btn.is-main{background:var(--ra-accent);border-color:var(--ra-accent);color:var(--ra-accent-ink)}',
-    '#reader-agent-overlay .ra-btn.is-bad{border-color:var(--ra-bad);color:var(--ra-bad);background:transparent}',
-    '#reader-agent-overlay .ra-btn:disabled{opacity:.5;cursor:default}',
-    '#reader-agent-overlay .ra-btn.is-small{padding:3px 9px;font-size:12.5px}',
-    '#reader-agent-overlay .ra-quick{display:flex;gap:6px;padding:0 16px 8px;flex-wrap:wrap}',
-    '#reader-agent-overlay .ra-chip{padding:3px 11px;border:1px solid var(--ra-line);border-radius:999px;background:transparent;font-size:12.5px;color:var(--ra-mute)}',
-    '#reader-agent-overlay .ra-chip[aria-pressed="true"]{background:var(--ra-accent);border-color:var(--ra-accent);color:var(--ra-accent-ink)}',
-    '#reader-agent-overlay .ra-input{display:flex;gap:8px;padding:10px 16px;border-top:1px solid var(--ra-line);background:var(--ra-panel)}',
-    '#reader-agent-overlay textarea,#reader-agent-overlay input[type=text],#reader-agent-overlay input[type=password],#reader-agent-overlay input[type=number],#reader-agent-overlay input[type=search],#reader-agent-overlay select{font:inherit;color:var(--ra-ink);background:var(--ra-bg);border:1px solid var(--ra-line);border-radius:8px;padding:7px 9px;min-width:0}',
-    '#reader-agent-overlay .ra-input textarea{flex:1;height:64px;resize:none}',
-    '#reader-agent-overlay .ra-foot{display:flex;gap:10px;align-items:center;padding:6px 16px 10px;font-size:12px;color:var(--ra-mute);background:var(--ra-panel)}',
-    '#reader-agent-overlay .ra-foot span{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}@media (max-width:560px){.ra-foot span{white-space:normal}}',
-    '#reader-agent-overlay .ra-scroll{flex:1;min-height:0;overflow-y:auto;padding:14px 16px;overscroll-behavior:contain}',
-    '#reader-agent-overlay .ra-card{border:1px solid var(--ra-line);border-radius:10px;background:var(--ra-panel);padding:11px 13px;margin-bottom:10px}',
-    '#reader-agent-overlay .ra-card h3{margin:0 0 8px;font-size:14.5px;letter-spacing:.04em}',
-    '#reader-agent-overlay .ra-upd-list{margin:6px 0;padding-left:20px}',
-    '#reader-agent-overlay .ra-upd-list li{margin:3px 0}',
-    '#reader-agent-overlay .ra-upd-ok{color:var(--ra-accent)}',
-    '#reader-agent-overlay .ra-upd-bad{color:#d9775f}',
-    '#reader-agent-overlay .ra-note{font-size:12.5px;color:var(--ra-mute);margin:4px 0}',
-    '#reader-agent-overlay .ra-mem{border:1px solid var(--ra-line);border-radius:10px;background:var(--ra-panel);padding:9px 12px;margin-bottom:8px}',
-    '#reader-agent-overlay .ra-mem-head{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}',
-    '#reader-agent-overlay .ra-badge{flex:none;font-size:12px;padding:0 7px;border-radius:5px;border:1px solid var(--ra-line);color:var(--ra-mute)}',
-    '#reader-agent-overlay .ra-badge.t-episode{color:var(--ra-accent);border-color:var(--ra-accent)}',
-    '#reader-agent-overlay .ra-badge.t-bond{color:var(--ra-bad);border-color:var(--ra-bad)}',
-    '#reader-agent-overlay .ra-badge.t-fact{color:var(--ra-ok);border-color:var(--ra-ok)}',
-    '#reader-agent-overlay .ra-badge.t-howto{color:var(--ra-warn);border-color:var(--ra-warn)}',
-    '#reader-agent-overlay .ra-mem-title{font-weight:700;flex:1;min-width:120px}',
-    '#reader-agent-overlay .ra-mem-body{margin:5px 0;white-space:pre-wrap;word-break:break-word;font-size:14px}',
-    '#reader-agent-overlay .ra-mem-keys{font-size:12px;color:var(--ra-mute)}',
-    '#reader-agent-overlay .ra-form{display:grid;grid-template-columns:110px 1fr;gap:8px 10px;align-items:center}',
-    '#reader-agent-overlay .ra-form label{font-size:13.5px;color:var(--ra-mute)}',
-    '#reader-agent-overlay .ra-form textarea{width:100%;min-height:92px;resize:vertical}',
-    '#reader-agent-overlay .ra-form input[type=text],#reader-agent-overlay .ra-form input[type=password],#reader-agent-overlay .ra-form textarea,#reader-agent-overlay .ra-form select{width:100%}',
-    '#reader-agent-overlay .ra-form .wide{grid-column:1/-1}',
-    '#reader-agent-overlay .ra-check{display:flex;gap:8px;align-items:center;font-size:14px}',
-    '#reader-agent-overlay .ra-status{font-size:12.5px;color:var(--ra-mute);min-height:1.4em}',
-    '#reader-agent-overlay .ra-status.is-bad{color:var(--ra-bad)}',
-    '#reader-agent-overlay .ra-dots::after{content:"…";animation:ra-dots 1.2s steps(3,end) infinite}',
-    '@keyframes ra-dots{0%{content:"."}33%{content:".."}66%{content:"…"}}',
-    '@media(max-width:640px){#reader-agent-overlay .ra-shell{width:100vw;height:100%;max-height:none;border-radius:0;border:0}#reader-agent-overlay .ra-head{flex-wrap:wrap;gap:8px}#reader-agent-overlay .ra-tabs{order:3;width:100%;margin-left:0}#reader-agent-overlay .ra-tab{flex:1}#reader-agent-overlay .ra-close{margin-left:auto}#reader-agent-overlay .ra-form{grid-template-columns:1fr}#reader-agent-overlay .ra-msg{max-width:94%}}',
-    '@media(prefers-reduced-motion:reduce){#reader-agent-overlay .ra-dots::after{animation:none}}'
-  ].join('');
+  var INPUT_MAX_HEIGHT = 160;   /* 输入框随内容长高到这里为止，再多就在框里滚动 */
+  /* 设置页的各块，也是左边目录的顺序。前四块之外的改动都是立即生效的。 */
+  var SECTIONS = [
+    ['ra-reader-card', '这张卡'], ['ra-agent-card', '助手'], ['ra-tools-card', '工具调用'], ['ra-rules-card', '权限规则'],
+    ['ra-memory-card', '记忆'], ['ra-model-card', '模型'], ['ra-conn-card', '插件对接'], ['ra-net-card', '联网'],
+    ['ra-comp-card', '后端伴侣'], ['ra-upd-card', '版本更新'], ['ra-runs-card', '改动记录']
+  ];
+  var TOOL_MODE = { native: '原生调用', text: '文本协议', none: '不可用' };
 
   function esc(value) {
     return String(value == null ? '' : value).replace(/[&<>"']/g, function (character) {
@@ -111,6 +37,8 @@
 
   function createAgentUi(env, kit, agent, memory, llm, deps) {
     var doc = env.document;
+    var host = env.host || root;
+    var theme = modules.readerTheme || null;
     var overlay = null;
     var tab = 'chat';
     var running = false;
@@ -118,31 +46,30 @@
     var memoryFilter = { type: '', store: '', query: '' };
     var editing = null;
     var unsubscribe = [];
+    var dirty = false;      /* 要点「保存设置」才生效的那四块（助手、工具调用、权限规则、记忆）有没有没保存的改动 */
+    var probeView = '';     /* 「测试工具调用」的结果；重画设置页时还在 */
+    var spyHold = 0;        /* 点了目录之后的一小段时间里，不让滚动反过来改目录的高亮 */
 
-    function themeName() {
-      var value = kit.readChatValue('dream_visual_theme');
-      if (value !== 'summer' && value !== 'ink' && value !== 'cafe') {
-        try { value = env.storage && env.storage.getItem(modules.localKey('dream_visual_theme')); } catch (error) { value = ''; }
-      }
-      return value === 'summer' || value === 'ink' ? value : 'cafe';
+    function icon(name) { return theme ? theme.icon(name) : ''; }
+    function themeName() { return theme ? theme.name(env, kit) : 'cafe'; }
+    function lobbyApi() { return deps && typeof deps.lobby === 'function' ? deps.lobby() : null; }
+    function coreApi() { return deps && typeof deps.core === 'function' ? deps.core() : null; }
+    function message(error) { return String(error && error.message || error); }
+
+    /* 触屏上回车留给换行（软键盘按不出 Shift+Enter），发送靠按钮。 */
+    function touchInput() {
+      try { return !!(host.matchMedia && host.matchMedia('(pointer: coarse)').matches); } catch (error) { return false; }
     }
-
-    function ensureStyle() {
-      var style = doc.getElementById(STYLE_ID);
-      if (!style) {
-        style = doc.createElement('style');
-        style.id = STYLE_ID;
-        (doc.head || doc.documentElement).appendChild(style);
-      }
-      if (style.textContent !== CSS) style.textContent = CSS;
+    function calmMotion() {
+      try { return !!(host.matchMedia && host.matchMedia('(prefers-reduced-motion: reduce)').matches); } catch (error) { return false; }
     }
 
     function $(selector) { return overlay ? overlay.querySelector(selector) : null; }
 
-    function toast(message, bad) {
+    function toast(text, bad) {
       var target = $('[data-ra-status="' + tab + '"]');
       if (!target) return;
-      target.textContent = message || '';
+      target.textContent = text || '';
       target.classList.toggle('is-bad', !!bad);
     }
 
@@ -168,8 +95,15 @@
 
     function showIndicator(label) {
       clearIndicator();
-      var node = append('<span class="ra-dots">' + esc(label) + '</span>', 'ra-thought');
+      var node = append('<span class="ra-dots">' + esc(label) + '<i></i><i></i><i></i></span>', 'ra-thought');
       if (node) node.id = 'ra-thinking';
+    }
+
+    /* 运行中途的一行提示：protocol（原生调用走不通，改走文本协议）、nudge（她只说不做，已提醒一次）。 */
+    function notice(kind, text) {
+      clearIndicator();
+      var node = append(icon('info') + '<span>' + esc(text) + '</span>', 'ra-notice');
+      if (node) node.setAttribute('data-notice', kind);
     }
 
     function renderHistory() {
@@ -189,6 +123,14 @@
         if (turn.tools && turn.tools.length) append(esc('用过的工具：' + turn.tools.join('、')), 'ra-thought');
       });
       log.scrollTop = log.scrollHeight;
+    }
+
+    function fitInput() {
+      var input = $('#ra-text');
+      if (!input) return;
+      input.style.height = 'auto';
+      /* scrollHeight 不含边框；页签没显示时它是 0，交给样式里的 min-height。 */
+      if (input.scrollHeight) input.style.height = Math.min(input.scrollHeight + 2, INPUT_MAX_HEIGHT) + 'px';
     }
 
     function setRunning(value) {
@@ -215,6 +157,7 @@
           if (done) return;
           done = true;
           pendingConfirms = pendingConfirms.filter(function (item) { return item !== finish; });
+          if (node) node.classList.add('is-done');
           if (node) node.innerHTML = '<div>' + esc(request.description || request.name) + '</div><div class="ra-note">' + (answer === 'deny' ? '已拒绝' : answer === 'always' ? '已允许（本次对话内不再为此询问）' : '已允许') + '</div>';
           resolve(answer);
         };
@@ -233,26 +176,35 @@
       });
     }
 
+    function stepHtml(label, detail) {
+      return '<details><summary><span class="st">' + icon('spin') + '</span><span>' + esc(label) + '</span></summary><pre>' + esc(detail) + '</pre></details>';
+    }
+
     function onAgentEvent(event) {
       if (!overlay) return;
       if (event.type === 'thinking') { showIndicator(event.step ? '继续思考' : '思考中'); return; }
       if (event.type === 'thought') { clearIndicator(); append(esc(event.text), 'ra-thought'); return; }
+      if (event.type === 'protocol') {
+        notice('protocol', '原生函数调用这条路没走通' + (event.reason ? '（' + event.reason + '）' : '') + '，已改用文本协议接着做。');
+        refreshFoot();
+        return;
+      }
+      if (event.type === 'nudge') { notice('nudge', '她只是应了一声、还没动手，已经提醒她一次。'); return; }
       if (event.type === 'tool_start') {
         clearIndicator();
-        var node = append('<details><summary><span class="st">◇</span><span>' + esc(event.description && event.description !== event.name ? event.description : event.name) + '</span></summary><pre>'
-          + esc(event.name + ' ' + JSON.stringify(event.args)) + '</pre></details>', 'ra-step');
+        var node = append(stepHtml(event.description && event.description !== event.name ? event.description : event.name, event.name + ' ' + JSON.stringify(event.args)), 'ra-step');
         if (node) { node.setAttribute('data-step', event.id); node.setAttribute('data-state', 'run'); }
         return;
       }
       if (event.type === 'tool_end') {
         var step = overlay.querySelector('.ra-step[data-step="' + event.id + '"]');
         if (!step) {
-          step = append('<details><summary><span class="st">◇</span><span>' + esc(event.name) + '</span></summary><pre></pre></details>', 'ra-step');
+          step = append(stepHtml(event.name, ''), 'ra-step');
           if (!step) return;
         }
         step.setAttribute('data-state', event.ok ? 'ok' : 'bad');
         var mark = step.querySelector('.st');
-        if (mark) mark.textContent = event.ok ? '✓' : event.denied ? '⊘' : '✕';
+        if (mark) mark.innerHTML = icon(event.ok ? 'check' : event.denied ? 'ban' : 'cross');
         var pre = step.querySelector('pre');
         if (pre) pre.textContent = (pre.textContent ? pre.textContent + '\n' : '') + '→ ' + (event.summary || '');
         return;
@@ -271,7 +223,7 @@
       var input = $('#ra-text');
       var text = String(textOverride !== undefined ? textOverride : input && input.value || '').trim();
       if (!text) return;
-      if (input && textOverride === undefined) input.value = '';
+      if (input && textOverride === undefined) { input.value = ''; fitInput(); }
       append(rich(text), 'ra-msg ra-user');
       var log = logNode();
       if (log) log.scrollTop = log.scrollHeight;
@@ -280,12 +232,13 @@
         var outcome = await agent.run(text, { onEvent: onAgentEvent, confirm: confirmCard });
         if (outcome.busy) append(esc(outcome.answer), 'ra-thought');
       } catch (error) {
-        append(esc('出错：' + String(error && error.message || error)), 'ra-thought');
+        append(esc('出错：' + message(error)), 'ra-thought');
       } finally {
         clearIndicator();
         setRunning(false);
         refreshFoot();
-        if (input) { try { input.focus(); } catch (error) { /* 面板可能已关闭 */ } }
+        /* 触屏上不抢焦点：不然每答完一轮软键盘都弹出来。 */
+        if (input && !touchInput()) { try { input.focus(); } catch (error) { /* 面板可能已关闭 */ } }
       }
     }
 
@@ -296,14 +249,29 @@
       return mode + ' · ' + ({ ask: '先询问', auto: '档位内直接执行', yolo: '全部直接执行' }[current.approval] || '先询问') + (current.lite ? ' · 轻聊' : '');
     }
 
+    function toolStatus() {
+      try { return typeof agent.toolStatus === 'function' ? agent.toolStatus() : { mode: 'none', via: '', reason: '', setting: 'auto' }; }
+      catch (error) { return { mode: 'none', via: '', reason: message(error), setting: 'auto' }; }
+    }
+
+    /* 底栏：模型 / 记忆 / 权限 / 工具调用方式，各是一枚小标签。 */
     function refreshFoot() {
       var node = $('#ra-foot-text');
       if (!node) return;
       var backend = llm.getBackendSummary('agent');
       var memorySettings = memory.getSettings();
-      node.textContent = '模型：' + (backend.mode === 'custom' ? backend.model : '酒馆当前连接')
-        + ' ｜ 记忆：' + (memorySettings.enabled ? (memory.targetStore() === 'ocean' ? '《' + memorySettings.oceanBook + '》' : '当前聊天') : '关闭')
-        + ' ｜ 权限：' + footPermission();
+      var tag = function (text) { return '<span class="ra-tag">' + esc(text) + '</span>'; };
+      node.innerHTML = tag('模型：' + (backend.mode === 'custom' ? backend.model : '酒馆当前连接'))
+        + tag('记忆：' + (memorySettings.enabled ? (memory.targetStore() === 'ocean' ? '《' + memorySettings.oceanBook + '》' : '当前聊天') : '关闭'))
+        + tag('权限：' + footPermission());
+      var status = toolStatus();
+      var mode = TOOL_MODE[status.mode] ? status.mode : 'none';
+      var tool = $('#ra-tool-mode');
+      if (tool) {
+        tool.setAttribute('data-mode', mode);
+        tool.textContent = '工具：' + TOOL_MODE[mode];
+        tool.title = (status.reason ? status.reason + '。' : '') + '点这里去设置与测试';
+      }
       var persona = $('#ra-persona');
       if (persona) persona.textContent = 'READER AGENT · ' + agent.personaContext().name;
     }
@@ -313,7 +281,7 @@
       var isNew = !record.id;
       var types = TYPE_ORDER.map(function (type) { return '<option value="' + type + '"' + (record.type === type ? ' selected' : '') + '>' + memory.TYPES[type] + '</option>'; }).join('');
       var importance = [1, 2, 3, 4, 5].map(function (value) { return '<option value="' + value + '"' + (Number(record.importance) === value ? ' selected' : '') + '>' + value + '</option>'; }).join('');
-      return '<div class="ra-card" id="ra-editor"><h3>' + (isNew ? '新增记忆' : '编辑记忆') + '</h3><div class="ra-form">'
+      return '<section class="ra-card" id="ra-editor"><h3>' + (isNew ? '新增记忆' : '编辑记忆') + '</h3><div class="ra-form">'
         + '<label>类型</label><select data-f="type">' + types + '</select>'
         + '<label>标题</label><input type="text" data-f="title" maxlength="40" value="' + esc(record.title || '') + '">'
         + '<label>正文</label><textarea data-f="content" maxlength="4000">' + esc(record.content || '') + '</textarea>'
@@ -321,19 +289,24 @@
         + '<label>重要度</label><select data-f="importance">' + importance + '</select>'
         + '<label>归属</label><select data-f="owner"><option value="story"' + (record.owner !== 'agent' ? ' selected' : '') + '>正文的记忆：正文里的夜梦会想起</option><option value="agent"' + (record.owner === 'agent' ? ' selected' : '') + '>助手自己的：打开“同一个人”后正文才会想起</option></select>'
         + (isNew ? '<label>存放位置</label><select data-f="store"><option value="chat"' + (record.store === 'chat' ? ' selected' : '') + '>当前聊天</option><option value="ocean"' + (record.store === 'ocean' ? ' selected' : '') + '>《' + esc(memory.getSettings().oceanBook) + '》世界书（跨存档）</option></select>' : '')
-        + '<label class="ra-check wide"><input type="checkbox" data-f="pinned"' + (record.pinned ? ' checked' : '') + '>常驻：每一轮都带上（《夜之洋》里对应蓝灯条目）</label>'
+        + '<label class="ra-check wide"><input type="checkbox" data-f="pinned"' + (record.pinned ? ' checked' : '') + '><span class="ra-switch" aria-hidden="true"></span><span>常驻<span class="ra-hint">每一轮都带上（《夜之洋》里对应蓝灯条目）</span></span></label>'
         + '<div class="ra-row wide"><button type="button" class="ra-btn is-main" data-act="mem-save">保存</button><button type="button" class="ra-btn" data-act="mem-cancel">取消</button></div>'
-        + '</div></div>';
+        + '</div></section>';
+    }
+
+    function starsHtml(count) {
+      var dots = '';
+      for (var index = 1; index <= 5; index += 1) dots += '<i' + (index <= count ? ' class="on"' : '') + '></i>';
+      return '<span class="ra-stars" role="img" aria-label="重要度 ' + Number(count) + '" title="重要度 ' + Number(count) + '">' + dots + '</span>';
     }
 
     function memoryItemHtml(record) {
-      var stars = '★★★★★'.slice(0, record.importance) + '☆☆☆☆☆'.slice(0, 5 - record.importance);
       return '<div class="ra-mem" data-id="' + esc(record.id) + '"><div class="ra-mem-head"><span class="ra-badge t-' + record.type + '">' + esc(memory.TYPE_SHORT[record.type]) + '</span>'
-        + '<span class="ra-mem-title">' + esc(record.title) + '</span><span class="ra-mem-keys">' + stars + '</span>'
+        + '<span class="ra-mem-title">' + esc(record.title) + '</span>' + starsHtml(record.importance)
         + '<span class="ra-badge">' + (record.store === 'ocean' ? '夜之洋' : '聊天') + '</span>' + (record.owner === 'agent' ? '<span class="ra-badge">助手</span>' : '') + (record.pinned ? '<span class="ra-badge">常驻</span>' : '') + (record.enabled ? '' : '<span class="ra-badge">已停用</span>') + '</div>'
         + '<div class="ra-mem-body">' + esc(record.content) + '</div>'
         + (record.keys.length ? '<div class="ra-mem-keys">触发词：' + esc(record.keys.join('、')) + '</div>' : '')
-        + '<div class="ra-row" style="margin-top:6px"><button type="button" class="ra-btn is-small" data-act="mem-edit">编辑</button>'
+        + '<div class="ra-row"><button type="button" class="ra-btn is-small" data-act="mem-edit">编辑</button>'
         + '<button type="button" class="ra-btn is-small" data-act="mem-pin">' + (record.pinned ? '取消常驻' : '设为常驻') + '</button>'
         + '<button type="button" class="ra-btn is-small" data-act="mem-move">' + (record.store === 'ocean' ? '移到当前聊天' : '移到夜之洋') + '</button>'
         + '<button type="button" class="ra-btn is-small is-bad" data-act="mem-del">删除</button></div></div>';
@@ -347,32 +320,33 @@
         status = await memory.status();
         list = await memory.list({ type: memoryFilter.type || undefined, store: memoryFilter.store || undefined, query: memoryFilter.query || undefined, fresh: true });
       } catch (error) {
-        pane.innerHTML = '<div class="ra-card">读取记忆失败：' + esc(String(error && error.message || error)) + '</div>';
+        pane.innerHTML = '<div class="ra-card">读取记忆失败：' + esc(message(error)) + '</div>';
         return;
       }
       if (!overlay || tab !== 'memory') return;
       var chip = function (group, value, label) {
         return '<button type="button" class="ra-chip" data-act="mem-filter" data-group="' + group + '" data-value="' + value + '" aria-pressed="' + (memoryFilter[group] === value) + '">' + label + '</button>';
       };
+      var fact = function (text) { return '<span class="ra-tag">' + esc(text) + '</span>'; };
       var last = status.last ? ((status.last.ok ? '上次整理：新增 ' + status.last.added + '、更新 ' + status.last.updated : '上次整理失败：' + (status.last.error || '')) + (status.last.note ? '（' + status.last.note + '）' : '')) : '还没有整理过';
       var threshold = status.thresholds.auto ? '自动整理阈值 ' + (status.thresholds.turns || '—') + ' 条回复 / ' + (status.thresholds.chars || '—') + ' 字' : '自动整理已关闭';
-      var html = '<div class="ra-card"><div class="ra-row"><label>本聊天的新记忆写到</label><select id="ra-store">'
+      var ocean = '《' + status.oceanBook + '》' + (status.oceanExists ? status.oceanCount + ' 条' + (status.oceanNative ? '（已挂载，由酒馆按触发词原生带入）' : '（未挂载，由脚本带入）') : '尚未创建');
+      var html = '<section class="ra-card"><div class="ra-membar"><label class="ra-inline"><span>本聊天的新记忆写到</span><select id="ra-store">'
         + '<option value=""' + (status.chatOverride === '' ? ' selected' : '') + '>跟随全局设置（' + (memory.getSettings().store === 'ocean' ? '夜之洋' : '当前聊天') + '）</option>'
         + '<option value="chat"' + (status.chatOverride === 'chat' ? ' selected' : '') + '>当前聊天</option>'
-        + '<option value="ocean"' + (status.chatOverride === 'ocean' ? ' selected' : '') + '>《' + esc(status.oceanBook) + '》世界书（跨存档）</option></select>'
-        + '<button type="button" class="ra-btn is-main" data-act="mem-run"' + (status.running ? ' disabled' : '') + '>立即整理</button>'
+        + '<option value="ocean"' + (status.chatOverride === 'ocean' ? ' selected' : '') + '>《' + esc(status.oceanBook) + '》世界书（跨存档）</option></select></label>'
+        + '<span class="ra-row"><button type="button" class="ra-btn is-main" data-act="mem-run"' + (status.running ? ' disabled' : '') + '>立即整理</button>'
         + '<button type="button" class="ra-btn" data-act="mem-new">新增记忆</button>'
-        + '<button type="button" class="ra-btn" data-act="mem-export">导出</button><button type="button" class="ra-btn" data-act="mem-import">导入</button></div>'
-        + '<p class="ra-note">当前聊天 ' + status.chatCount + ' 条 · 《' + esc(status.oceanBook) + '》' + (status.oceanExists ? status.oceanCount + ' 条' + (status.oceanNative ? '（已挂载，由酒馆按触发词原生带入）' : '（未挂载，由脚本带入）') : '尚未创建')
-        + ' ｜ 待整理 ' + status.pending.turns + ' 条回复 / ' + status.pending.chars + ' 字 ｜ ' + esc(threshold) + '</p>'
-        + '<p class="ra-note">' + esc(last) + '</p><div class="ra-status" data-ra-status="memory"></div></div>';
-      html += '<div class="ra-card"><h3>前情梗概</h3><textarea id="ra-summary" style="width:100%;min-height:70px" placeholder="整理对话时自动更新；也可以自己改写。注入正文时放在记忆的最前面。">' + esc(status.summary || '') + '</textarea>'
-        + '<div class="ra-row" style="margin-top:6px"><button type="button" class="ra-btn is-small" data-act="mem-summary">保存梗概</button></div></div>';
+        + '<button type="button" class="ra-btn is-ghost" data-act="mem-export">导出</button><button type="button" class="ra-btn is-ghost" data-act="mem-import">导入</button></span></div>'
+        + '<div class="ra-facts">' + fact('当前聊天 ' + status.chatCount + ' 条') + fact(ocean) + fact('待整理 ' + status.pending.turns + ' 条回复 / ' + status.pending.chars + ' 字') + fact(threshold) + '</div>'
+        + '<p class="ra-note">' + esc(last) + '</p><div class="ra-status" data-ra-status="memory"></div></section>';
+      html += '<section class="ra-card"><h3>前情梗概</h3><textarea id="ra-summary" placeholder="整理对话时自动更新；也可以自己改写。注入正文时放在记忆的最前面。">' + esc(status.summary || '') + '</textarea>'
+        + '<div class="ra-row" style="margin-top:8px"><button type="button" class="ra-btn is-small" data-act="mem-summary">保存梗概</button></div></section>';
       if (editing) html += memoryEditorHtml(editing);
-      html += '<div class="ra-row" style="margin-bottom:8px">' + chip('type', '', '全部') + TYPE_ORDER.map(function (type) { return chip('type', type, memory.TYPE_SHORT[type]); }).join('')
-        + '<span style="width:10px"></span>' + chip('store', '', '两处') + chip('store', 'chat', '聊天') + chip('store', 'ocean', '夜之洋')
-        + '<input type="search" id="ra-mem-q" placeholder="搜索" value="' + esc(memoryFilter.query) + '" style="flex:1;min-width:120px"></div>';
-      html += list.length ? list.map(memoryItemHtml).join('') : '<p class="ra-note">这里还没有记忆。聊上一阵后会自动整理；也可以点“立即整理”或“新增记忆”。</p>';
+      html += '<div class="ra-filter">' + chip('type', '', '全部') + TYPE_ORDER.map(function (type) { return chip('type', type, memory.TYPE_SHORT[type]); }).join('')
+        + '<span class="ra-sep" aria-hidden="true"></span>' + chip('store', '', '两处') + chip('store', 'chat', '聊天') + chip('store', 'ocean', '夜之洋')
+        + '<label class="ra-search">' + icon('search') + '<input type="search" id="ra-mem-q" placeholder="搜索" aria-label="搜索记忆" value="' + esc(memoryFilter.query) + '"></label></div>';
+      html += list.length ? list.map(memoryItemHtml).join('') : '<p class="ra-empty">这里还没有记忆。聊上一阵后会自动整理；也可以点“立即整理”或“新增记忆”。</p>';
       var scroll = pane.scrollTop;
       pane.innerHTML = html;
       pane.scrollTop = scroll;
@@ -477,81 +451,153 @@
           return;
         }
         await renderMemory();
+        /* 点「新增」「编辑」后把编辑框带到眼前：它排在梗概下面，不滚的话看不出点了有反应。 */
+        if (action === 'mem-new' || action === 'mem-edit') {
+          var box = $('#ra-editor');
+          if (box && box.scrollIntoView) box.scrollIntoView({ block: 'nearest' });
+        }
       } catch (error) {
-        toast(String(error && error.message || error), true);
+        toast(message(error), true);
       }
     }
 
     /* ---------- 设置页 ---------- */
-    function renderSettings() {
-      var pane = $('[data-pane="settings"] .ra-scroll');
-      if (!pane) return;
-      var a = agent.getSettings();
-      var m = memory.getSettings();
-      var option = function (value, label, current) { return '<option value="' + value + '"' + (String(current) === String(value) ? ' selected' : '') + '>' + label + '</option>'; };
-      var number = function (name, value, minimum, maximum, step) { return '<input type="number" data-s="' + name + '" value="' + esc(value) + '" min="' + minimum + '" max="' + maximum + '"' + (step ? ' step="' + step + '"' : '') + ' style="width:120px">'; };
-      var check = function (name, value, label) { return '<label class="ra-check wide"><input type="checkbox" data-s="' + name + '"' + (value ? ' checked' : '') + '>' + label + '</label>'; };
-      var route = function (key, label) {
-        var backend = llm.getBackendSummary(key);
-        return '<p class="ra-note">' + label + '：' + esc(backend.mode === 'custom' ? backend.model + ' · ' + backend.apiurl : '酒馆当前连接') + '</p>';
-      };
-      pane.innerHTML = '<div class="ra-card"><h3>助手</h3><div class="ra-form">'
-        + '<label>权限档位</label><select data-s="a.mode">' + option('readonly', '只读：只看不改', a.mode) + option('card', '单卡：只改当前聊天和这张卡（推荐）', a.mode) + option('tavern', '酒馆全权：酒馆里的一切', a.mode) + option('device', '设备全权：再加上设备上的文件与命令（需后端伴侣）', a.mode) + '</select>'
-        + '<label>确认方式</label><select data-s="a.approval">' + option('ask', '每次写入前询问（推荐）', a.approval) + option('auto', '档位内直接执行，危险操作仍询问', a.approval) + option('yolo', '全部直接执行', a.approval) + '</select>'
-        + check('a.plotContext', a.plotContext, '让助手了解当前剧情（做前后端、修脚本时可以关掉，省 token）')
-        + check('a.lite', a.lite, '轻聊：不带任何工具，只聊天')
-        + '<label>最多工具步数</label>' + number('a.maxSteps', a.maxSteps, 1, 40)
-        + '<label>带入历史轮数</label>' + number('a.historyTurns', a.historyTurns, 0, 40)
-        + '<label>温度</label>' + number('a.temperature', a.temperature, 0, 2, 0.05)
-        + '<label>输出上限</label>' + number('a.maxTokens', a.maxTokens, 256, 64000)
-        + '<label>单次超时（秒）</label>' + number('a.timeoutSec', a.timeoutSec, 20, 900)
-        + check('a.recall', a.recall, '回答前自动带入相关记忆')
-        + '</div><p class="ra-note">输出上限与温度只对独立 API 生效；走酒馆连接时沿用当前预设。</p></div>'
-        + rulesCardHtml(a.rules)
-        + '<div class="ra-card"><h3>记忆</h3><div class="ra-form">'
-        + check('m.enabled', m.enabled, '启用记忆系统')
-        + '<label>自动整理与带入正文</label><select data-s="m.scope">' + option('reader', '只在用了 Reader-II 的聊天里（推荐）', m.scope) + option('all', '所有聊天', m.scope) + '</select>'
-        + '<label>新记忆写到</label><select data-s="m.store">' + option('chat', '当前聊天（随存档，互不相干）', m.store) + option('ocean', '《夜之洋》世界书（跨存档）', m.store) + '</select>'
-        + check('m.autoExtract', m.autoExtract, '自动整理：对话攒够下面任一数量后，把它沉淀为记忆')
-        + '<label>每多少条回复</label>' + number('m.everyTurns', m.everyTurns, 0, 200)
-        + '<label>或每多少字</label>' + number('m.everyChars', m.everyChars, 0, 400000)
-        + '<label>最近几条先不整理</label>' + number('m.keepRecent', m.keepRecent, 0, 20)
-        + check('m.inject', m.inject, '把相关记忆带进正文提示词')
-        + '<label>注入深度</label>' + number('m.injectDepth', m.injectDepth, 0, 40)
-        + '<label>最多带几条</label>' + number('m.injectMax', m.injectMax, 1, 30)
-        + '<label>字数预算</label>' + number('m.injectBudget', m.injectBudget, 200, 20000)
-        + check('m.injectSummary', m.injectSummary, '同时带上前情梗概')
-        + check('m.agentExtract', m.agentExtract, '与助手的对话也沉淀为记忆（情感、偏好、做法）')
-        + check('m.unify', m.unify, '助手夜梦 = 正文夜梦：助手自己的记忆也带进正文（功能记忆除外；正文里不主动超游）')
-        + '<label>夜之洋书名</label><input type="text" data-s="m.oceanBook" value="' + esc(m.oceanBook) + '" maxlength="60">'
-        + '<label>夜之洋挂载</label><select data-s="m.oceanMount">' + option('global', '全局启用：所有角色卡的聊天都能想起', m.oceanMount) + option('character', '绑到当前角色卡：只在这张卡的各个存档间共享', m.oceanMount) + option('none', '不挂载：只由脚本检索带入', m.oceanMount) + '</select>'
-        + '</div><p class="ra-note">两个数量都填 0 时只在手动点“立即整理”时整理。已挂载的《夜之洋》由酒馆按触发词原生带入正文；当前聊天里的记忆、以及未挂载的《夜之洋》由脚本带入。没打开“同一个人”时，助手自己的记忆不进正文，它们在《夜之洋》里的条目保持停用。</p></div>'
-        + '<div class="ra-card"><h3>模型</h3>' + route('agent', '助手对话') + route('memory', '记忆整理') + route('adapt', '语义适配')
-        + '<p class="ra-note">三项各自对应「独立 API」里的调用类型；没有单独设置时用默认方案，默认方案也没有时走酒馆当前连接。</p>'
-        + '<div class="ra-row"><button type="button" class="ra-btn" data-act="open-api">打开独立 API 设置</button><button type="button" class="ra-btn" data-act="open-panel">打开语义适配面板</button></div></div>'
-        + '<div class="ra-row"><button type="button" class="ra-btn is-main" data-act="save-settings">保存设置</button><span class="ra-status" data-ra-status="settings"></span></div>'
-        + connectorsCardHtml()
-        + (netUi ? netUi.cardsHtml() : '')
-        + updatesCardHtml()
-        + '<div class="ra-card"><h3>改动记录</h3><p class="ra-note">助手每一轮改过的东西都留有改动前的样子，可以按轮撤销。之后又被别处改过的不会被强行覆盖。</p><div id="ra-runs"></div></div>';
-      renderRuns();
+    function option(value, label, current) {
+      return '<option value="' + value + '"' + (String(current) === String(value) ? ' selected' : '') + '>' + label + '</option>';
+    }
+    /* 数字输入排成紧凑的小格：标签在上，输入框在下。 */
+    function numberField(name, label, value, minimum, maximum, step) {
+      return '<label class="ra-num"><span>' + label + '</span><input type="number" inputmode="decimal" data-s="' + name + '" value="' + esc(value) + '" min="' + minimum + '" max="' + maximum + '"' + (step ? ' step="' + step + '"' : '') + '></label>';
+    }
+    function switchField(name, value, label, hint) {
+      return '<label class="ra-check"><input type="checkbox" data-s="' + name + '"' + (value ? ' checked' : '') + '><span class="ra-switch" aria-hidden="true"></span><span>' + label
+        + (hint ? '<span class="ra-hint">' + hint + '</span>' : '') + '</span></label>';
+    }
+    function group(title) { return '<div class="ra-group">' + title + '</div>'; }
+    /* live：这一块不跟着底部的「保存设置」走，标题右边标一句它怎么生效（立即生效 / 单独保存）。 */
+    function card(id, title, body, live) {
+      return '<section class="ra-card" id="' + id + '"><h3>' + title + (live ? '<span class="ra-live">' + live + '</span>' : '') + '</h3>' + body + '</section>';
+    }
+    function replaceCard(id, html) {
+      var node = $('#' + id);
+      if (node && html) node.outerHTML = html;
     }
 
-    /* ---------- 权限规则与插件对接（设置页） ---------- */
+    /* 这张卡上的 Reader-II：按角色卡启用。助手自己在任何聊天里都能用，这个开关管的是来信、大厅、记账与提示词注入。 */
+    function readerCardHtml() {
+      var lobby = lobbyApi();
+      var core = coreApi();
+      if (!lobby) return '';
+      var hasChat = false, enabled = false;
+      try { hasChat = !!(core && core.hasChat()); enabled = hasChat && !!lobby.isEnabled(); } catch (error) { hasChat = false; }
+      var name = '';
+      try { name = kit.names().char || ''; } catch (error) { name = ''; }
+      var body = !core ? '<p class="ra-note">读者界面还没有就绪，稍等一下再打开这一页。</p>'
+        : !hasChat ? '<p class="ra-note">先打开一个聊天，才能决定要不要在那张卡上启用。夜梦助手自己不受影响，在哪里都能用。</p>'
+        : '<div class="ra-switch-row"><div><b>在「' + esc(name || '这张卡') + '」上启用 Reader-II</b>'
+          + '<p class="ra-note">启用后，九十九夜梦会读这个故事、偶尔来信，读者大厅（定调、命运抽卡等）在这张卡上可用；她的设定会随每次生成一起发给模型。关掉后这张卡上不再注入、不再记账，已有的记录都留着。</p></div>'
+          + '<button type="button" class="ra-switch-btn" role="switch" aria-checked="' + (enabled ? 'true' : 'false') + '" aria-label="在这张卡上启用 Reader-II" data-act="card-toggle"><span class="ra-switch" aria-hidden="true"></span></button></div>';
+      return card('ra-reader-card', '这张卡', body, '立即生效');
+    }
+
+    function refreshBack() {
+      var back = $('[data-act="back-lobby"]');
+      if (!back) return;
+      var on = false;
+      try { var lobby = lobbyApi(); on = !!(lobby && lobby.isEnabled()); } catch (error) { on = false; }
+      back.hidden = !on;
+    }
+
+    async function cardToggle(actor) {
+      var lobby = lobbyApi();
+      if (!lobby) return;
+      actor.disabled = true;
+      try {
+        if (lobby.isEnabled()) await lobby.disable(); else await lobby.enable();
+        toast(lobby.isEnabled() ? '已在这张卡上启用 Reader-II' : '已在这张卡上停用 Reader-II');
+      } catch (error) {
+        toast(message(error), true);
+      }
+      replaceCard('ra-reader-card', readerCardHtml());
+      refreshBack();
+    }
+
+    function agentCardHtml(a) {
+      return card('ra-agent-card', '助手', group('权限')
+        + '<div class="ra-form">'
+        + '<label>权限档位</label><select data-s="a.mode">' + option('readonly', '只读：只看不改', a.mode) + option('card', '单卡：只改当前聊天和这张卡（推荐）', a.mode) + option('tavern', '酒馆全权：酒馆里的一切', a.mode) + option('device', '设备全权：再加上设备上的文件与命令（需后端伴侣）', a.mode) + '</select>'
+        + '<label>确认方式</label><select data-s="a.approval">' + option('ask', '每次写入前询问（推荐）', a.approval) + option('auto', '档位内直接执行，危险操作仍询问', a.approval) + option('yolo', '全部直接执行', a.approval) + '</select>'
+        + '</div>'
+        + group('对话')
+        + switchField('a.plotContext', a.plotContext, '让助手了解当前剧情', '做前后端、修脚本时可以关掉，省 token')
+        + switchField('a.lite', a.lite, '轻聊', '不带任何工具，只聊天')
+        + switchField('a.recall', a.recall, '回答前自动带入相关记忆')
+        + group('生成参数')
+        + '<div class="ra-nums">' + numberField('a.maxSteps', '最多工具步数', a.maxSteps, 1, 40) + numberField('a.historyTurns', '带入历史轮数', a.historyTurns, 0, 40)
+        + numberField('a.temperature', '温度', a.temperature, 0, 2, 0.05) + numberField('a.maxTokens', '输出上限', a.maxTokens, 256, 64000) + numberField('a.timeoutSec', '单次超时（秒）', a.timeoutSec, 20, 900) + '</div>'
+        + '<p class="ra-note">输出上限与温度只对独立 API 生效；走酒馆连接时沿用当前预设。</p>');
+    }
+
+    function toolLineHtml() {
+      var status = toolStatus();
+      var mode = TOOL_MODE[status.mode] ? status.mode : 'none';
+      var text = mode === 'native' ? '原生函数调用' : mode === 'text' ? '文本协议' : '现在用不了';
+      return '<p class="ra-note" id="ra-tool-line">现在用的是：<b>' + text + '</b>' + (status.reason ? '（' + esc(status.reason) + '）' : '') + '</p>';
+    }
+
+    function probeHtml(report) {
+      var row = function (key, label, item) {
+        return '<div class="ra-probe" data-probe="' + key + '" data-ok="' + (item.ok ? '1' : '0') + '">' + icon(item.ok ? 'check' : 'cross') + '<b>' + label + '</b><span>' + esc(item.detail || (item.ok ? '可用' : '不可用')) + '</span></div>';
+      };
+      var advice = report.recommend === 'native' ? '建议用原生函数调用。结论已经生效：选「自动」时会直接用它。'
+        : report.recommend === 'text' ? '建议用文本协议。结论已经生效：选「自动」时会直接用它。'
+        : '两种方式都没走通：这个模型或中转站多半不支持工具调用。可以换一个模型，或者打开「轻聊」只聊天。';
+      return row('native', '原生函数调用', report.native) + row('text', '文本协议', report.text)
+        + '<p class="ra-tip' + (report.recommend === 'none' ? ' is-bad' : '') + '" data-probe="recommend" data-recommend="' + esc(report.recommend) + '">' + advice + '</p>';
+    }
+
+    function toolsCardHtml(a) {
+      return card('ra-tools-card', '工具调用',
+        '<p class="ra-note">助手靠「工具调用」来读写卡里的东西。多数模型认原生的函数调用；不认的，改让它按约定的文本格式写出来。拿不准就留在「自动」，助手只说不做的时候来这里测一下。</p>'
+        + '<div class="ra-form"><label>调用方式</label><select data-s="a.toolProtocol">' + option('auto', '自动：能用原生就用，不行退回文本协议（推荐）', a.toolProtocol) + option('native', '只用原生函数调用', a.toolProtocol) + option('text', '只用文本协议', a.toolProtocol) + '</select></div>'
+        + toolLineHtml()
+        + '<div class="ra-row"><button type="button" class="ra-btn" data-act="probe-tools">测试工具调用</button><span class="ra-note">会向模型发两次很短的请求，不改任何东西。</span></div>'
+        + '<div id="ra-probe-out" aria-live="polite">' + probeView + '</div>');
+    }
+
+    async function probeTools(actor) {
+      var out = $('#ra-probe-out');
+      actor.disabled = true;
+      if (out) out.innerHTML = '<p class="ra-note"><span class="ra-dots">正在测试<i></i><i></i><i></i></span></p>';
+      try {
+        probeView = probeHtml(await agent.probeTools());
+      } catch (error) {
+        probeView = '<p class="ra-tip is-bad">' + esc(message(error)) + '</p>';
+      }
+      out = $('#ra-probe-out');
+      if (out) out.innerHTML = probeView;
+      var line = $('#ra-tool-line');
+      if (line) line.outerHTML = toolLineHtml();
+      if (actor.isConnected) actor.disabled = false;
+      refreshFoot();
+    }
+
+    /* 权限规则 */
     var RULE_EFFECT = { deny: '禁止', ask: '总是先问', allow: '免问' };
     var RULE_ACTION = { '*': '读写', read: '只管读', write: '只管写' };
 
     function ruleRowHtml(rule) {
       var opts = function (map, current) { return Object.keys(map).map(function (key) { return '<option value="' + key + '"' + (key === current ? ' selected' : '') + '>' + map[key] + '</option>'; }).join(''); };
-      return '<div class="ra-row" data-rule style="margin:4px 0"><select data-r="effect">' + opts(RULE_EFFECT, rule.effect || 'deny') + '</select><select data-r="action">' + opts(RULE_ACTION, rule.action || '*') + '</select>'
-        + '<input type="text" data-r="pattern" value="' + esc(rule.pattern || '') + '" placeholder="路径或工具名，如 wb:/日记/**" style="flex:1;min-width:160px">'
+      return '<div class="ra-rule" data-rule><select data-r="effect" aria-label="怎么处理">' + opts(RULE_EFFECT, rule.effect || 'deny') + '</select><select data-r="action" aria-label="管读还是写">' + opts(RULE_ACTION, rule.action || '*') + '</select>'
+        + '<input type="text" data-r="pattern" value="' + esc(rule.pattern || '') + '" placeholder="路径或工具名，如 wb:/日记/**" aria-label="路径或工具名" spellcheck="false">'
         + '<button type="button" class="ra-btn is-small is-bad" data-act="rule-del">删除</button></div>';
     }
 
     function rulesCardHtml(rules) {
-      return '<div class="ra-card"><h3>权限规则</h3><p class="ra-note">按路径或工具名匹配：<code>*</code> 不跨“/”，<code>**</code> 跨层级。禁止优先，其余取第一条匹配的。例：<code>wb:/日记/**</code> 禁止读写这本世界书；<code>var:/chat.json*</code> 写聊天变量免问；<code>slash_run</code> 斜杠命令总是先问。档位不够的写入照样不执行。</p>'
+      return card('ra-rules-card', '权限规则',
+        '<p class="ra-note">按路径或工具名匹配：<code>*</code> 不跨“/”，<code>**</code> 跨层级。禁止优先，其余取第一条匹配的。例：<code>wb:/日记/**</code> 禁止读写这本世界书；<code>var:/chat.json*</code> 写聊天变量免问；<code>slash_run</code> 斜杠命令总是先问。档位不够的写入照样不执行。</p>'
         + '<div id="ra-rules">' + (rules || []).map(ruleRowHtml).join('') + '</div>'
-        + '<div class="ra-row"><button type="button" class="ra-btn is-small" data-act="rule-add">添加规则</button><span class="ra-note">改完点“保存设置”。</span></div></div>';
+        + '<div class="ra-row"><button type="button" class="ra-btn is-small" data-act="rule-add">添加规则</button></div>');
     }
 
     function readRules() {
@@ -561,34 +607,70 @@
       }).filter(function (rule) { return rule.pattern; });
     }
 
+    function memoryCardHtml(m) {
+      return card('ra-memory-card', '记忆', group('总开关')
+        + switchField('m.enabled', m.enabled, '启用记忆系统')
+        + '<div class="ra-form">'
+        + '<label>在哪些聊天里生效</label><select data-s="m.scope">' + option('reader', '只在用了 Reader-II 的聊天里（推荐）', m.scope) + option('all', '所有聊天', m.scope) + '</select>'
+        + '<label>新记忆写到</label><select data-s="m.store">' + option('chat', '当前聊天（随存档，互不相干）', m.store) + option('ocean', '《夜之洋》世界书（跨存档）', m.store) + '</select>'
+        + '</div>'
+        + group('自动整理')
+        + switchField('m.autoExtract', m.autoExtract, '自动整理', '对话攒够下面任一数量后，把它沉淀为记忆')
+        + '<div class="ra-nums">' + numberField('m.everyTurns', '每多少条回复', m.everyTurns, 0, 200) + numberField('m.everyChars', '或每多少字', m.everyChars, 0, 400000) + numberField('m.keepRecent', '最近几条先不整理', m.keepRecent, 0, 20) + '</div>'
+        + switchField('m.agentExtract', m.agentExtract, '与助手的对话也沉淀为记忆', '情感、偏好、做法')
+        + '<p class="ra-note">两个数量都填 0 时，只在手动点“立即整理”时整理。</p>'
+        + group('带入正文')
+        + switchField('m.inject', m.inject, '把相关记忆带进正文提示词')
+        + '<div class="ra-nums">' + numberField('m.injectDepth', '注入深度', m.injectDepth, 0, 40) + numberField('m.injectMax', '最多带几条', m.injectMax, 1, 30) + numberField('m.injectBudget', '字数预算', m.injectBudget, 200, 20000) + '</div>'
+        + switchField('m.injectSummary', m.injectSummary, '同时带上前情梗概')
+        + switchField('m.unify', m.unify, '助手夜梦 = 正文夜梦', '助手自己的记忆也带进正文（功能记忆除外；正文里不主动超游）')
+        + group('夜之洋')
+        + '<div class="ra-form">'
+        + '<label>书名</label><input type="text" data-s="m.oceanBook" value="' + esc(m.oceanBook) + '" maxlength="60">'
+        + '<label>挂载</label><select data-s="m.oceanMount">' + option('global', '全局启用：所有角色卡的聊天都能想起', m.oceanMount) + option('character', '绑到当前角色卡：只在这张卡的各个存档间共享', m.oceanMount) + option('none', '不挂载：只由脚本检索带入', m.oceanMount) + '</select>'
+        + '</div>'
+        + '<p class="ra-note">已挂载的《夜之洋》由酒馆按触发词原生带入正文；当前聊天里的记忆、以及未挂载的《夜之洋》由脚本带入。没打开“同一个人”时，助手自己的记忆不进正文，它们在《夜之洋》里的条目保持停用。</p>');
+    }
+
+    function modelCardHtml() {
+      var route = function (key, label) {
+        var backend = llm.getBackendSummary(key);
+        return '<dt>' + label + '</dt><dd>' + esc(backend.mode === 'custom' ? backend.model + ' · ' + backend.apiurl : '酒馆当前连接') + '</dd>';
+      };
+      return card('ra-model-card', '模型', '<dl class="ra-kv">' + route('agent', '助手对话') + route('memory', '记忆整理') + route('adapt', '语义适配') + '</dl>'
+        + '<p class="ra-note">三项各自对应「独立 API」里的调用类型；没有单独设置时用默认方案，默认方案也没有时走酒馆当前连接。</p>'
+        + '<div class="ra-row"><button type="button" class="ra-btn" data-act="open-api">打开独立 API 设置</button><button type="button" class="ra-btn" data-act="open-panel">打开语义适配</button></div>');
+    }
+
     /* 乙组的 MCP 服务器放进 #ra-mcp（data-slot="mcp"）。 */
     function connectorsCardHtml() {
       var custom = agent.getSettings().connectors || [];
       var active = agent.listConnectors();
       var activeIds = active.map(function (item) { return item.id; });
-      var builtin = active.filter(function (item) { return !item.custom; }).map(function (item) { return '<span class="ra-badge" title="' + esc(item.summary || '') + '">' + esc(item.title) + '</span>'; }).join(' ');
+      var builtin = active.filter(function (item) { return !item.custom; }).map(function (item) { return '<span class="ra-badge" title="' + esc(item.summary || '') + '">' + esc(item.title) + '</span>'; }).join('');
       var rows = custom.map(function (manifest) {
-        return '<div class="ra-row" data-conn="' + esc(manifest.id) + '" style="justify-content:space-between;margin:4px 0"><span><b>' + esc(manifest.title || manifest.id) + '</b> <span class="ra-note">' + esc(manifest.id) + ' · ' + (activeIds.indexOf(manifest.id) >= 0 ? '已探测到' : '没探测到（插件没装或还没加载）') + '</span></span>'
+        return '<div class="ra-item" data-conn="' + esc(manifest.id) + '"><div class="ra-item-main"><b>' + esc(manifest.title || manifest.id) + '</b>'
+          + '<p class="ra-note">' + esc(manifest.id) + ' · ' + (activeIds.indexOf(manifest.id) >= 0 ? '已探测到' : '没探测到（插件没装或还没加载）') + '</p></div>'
           + '<span class="ra-row"><button type="button" class="ra-btn is-small" data-act="conn-view">查看</button><button type="button" class="ra-btn is-small is-bad" data-act="conn-del">删除</button></span></div>';
       }).join('');
-      return '<div class="ra-card" id="ra-conn-card"><h3>插件对接</h3><p class="ra-note">已探测到：</p><div class="ra-row">' + (builtin || '<span class="ra-note">没有</span>') + '</div>'
-        + '<p class="ra-note" style="margin-top:10px">自定义对接（声明式 connector.json，格式见知识 connector-authoring，也可以让助手替你写）：</p>'
+      return card('ra-conn-card', '插件对接', '<p class="ra-note">已探测到的插件：</p><div class="ra-row">' + (builtin || '<span class="ra-note">没有</span>') + '</div>'
+        + '<h4 class="ra-sub">自定义对接</h4><p class="ra-note">声明式的 connector.json，格式见知识 connector-authoring，也可以让助手替你写。</p>'
         + (rows || '<p class="ra-note">还没有。</p>')
-        + '<textarea id="ra-conn-json" spellcheck="false" placeholder="{&quot;id&quot;: &quot;myplugin&quot;, &quot;title&quot;: &quot;我的插件&quot;, &quot;detect&quot;: &quot;window.MyPlugin&quot;, &quot;tools&quot;: […]}" style="width:100%;min-height:110px;margin-top:6px;box-sizing:border-box"></textarea>'
-        + '<div class="ra-row"><button type="button" class="ra-btn is-small" data-act="conn-save">添加 / 按 id 更新</button><span class="ra-note">这一栏的改动立即生效。</span></div>'
-        + '<div id="ra-mcp" data-slot="mcp">' + (netUi ? netUi.mcpHtml() : '') + '</div></div>';
+        + '<textarea id="ra-conn-json" class="is-code" spellcheck="false" placeholder="{&quot;id&quot;: &quot;myplugin&quot;, &quot;title&quot;: &quot;我的插件&quot;, &quot;detect&quot;: &quot;window.MyPlugin&quot;, &quot;tools&quot;: […]}" style="margin-top:8px"></textarea>'
+        + '<div class="ra-row" style="margin-top:8px"><button type="button" class="ra-btn is-small" data-act="conn-save">添加 / 按 id 更新</button></div>'
+        + '<div id="ra-mcp" data-slot="mcp">' + (netUi ? netUi.mcpHtml() : '') + '</div>', '立即生效');
     }
 
     /* 联网、MCP、后端伴侣三块设置在 ui-net.js；这里只留插槽与分发。 */
     var netUi = deps && typeof deps.netUi === 'function' ? deps.netUi({
-      $: $, esc: esc, toast: toast,
+      $: $, esc: esc, toast: toast, icon: icon,
       ask: function (text) { showTab('chat'); if (!running) send(text); }
     }) : null;
 
     function settingsAction(action, actor) {
       try {
-        if (action === 'rule-add') { $('#ra-rules').insertAdjacentHTML('beforeend', ruleRowHtml({})); return; }
-        if (action === 'rule-del') { actor.closest('[data-rule]').remove(); return; }
+        if (action === 'rule-add') { $('#ra-rules').insertAdjacentHTML('beforeend', ruleRowHtml({})); setDirty(true); return; }
+        if (action === 'rule-del') { actor.closest('[data-rule]').remove(); setDirty(true); return; }
         var list = (agent.getSettings().connectors || []).slice();
         var row = actor.closest('[data-conn]');
         var id = row ? row.getAttribute('data-conn') : '';
@@ -608,62 +690,43 @@
           agent.saveSettings({ connectors: list.filter(function (item) { return item.id !== checked.id; }).concat([manifest]) });
           toast('已保存对接「' + checked.title + '」，' + checked.tools + ' 个工具' + (checked.detected ? '' : '；暂时没探测到这个插件'));
         }
-        var card = $('#ra-conn-card');
-        if (card) card.outerHTML = connectorsCardHtml();
+        replaceCard('ra-conn-card', connectorsCardHtml());
       } catch (error) {
-        toast(String(error && error.message || error), true);
+        toast(message(error), true);
       }
     }
 
-    /* ---------- 检查更新（设置页；交接 0.6 甲组第 9 项，逻辑在 updates.js） ---------- */
+    /* ---------- 版本更新（逻辑在 updates.js：只比对更新源上的版本号，更新本身走酒馆的扩展更新） ---------- */
     var updates = deps && deps.updates || null;
-    var updatesView = '', updatesPlan = null;
-    var GUIDE_EXT = '<ol class="ra-upd-list"><li>酒馆顶栏「扩展」（三个方块的图标）→「管理扩展」→ 找到「Reader-II · 夜梦」，点它的更新按钮（就是 git pull）。TauriTavern 在扩展管理里同样操作。当初是手动拷贝安装的，重新下载后覆盖 <code>manifest.json</code>、<code>index.js</code>、<code>dist/</code>、<code>knowledge/</code>。</li>'
-      + '<li>刷新酒馆页面。</li><li>回到这里点「检查卡内组件」，把卡内组件更新到同一版本。</li></ol>'
-      + '<p class="ra-note">设置、记忆、工作区、对话记录都不在扩展目录里，更新扩展不会动它们。不要直接改扩展目录里的文件（git pull 会因此失败，或把改动冲掉）：自定义的东西放工作区 <code>ws:/</code>，或者另写一个扩展。</p>';
-    var GUIDE_CDN = '<p class="ra-note">你没有装扩展，夜梦助手是从 CDN 加载的：刷新页面就会拿到新版（jsDelivr 有缓存，可能要等几个小时）。想及时更新，可以装上扩展。</p>';
-    var UPDATE_MARK = { current: '✓', missing: '＋', outdated: '↑', modified: '✎', unavailable: '—', blocked: '!' };
+    var updatesView = '';
+    var GUIDE = '<ol class="ra-list"><li>酒馆顶栏「扩展」（三个方块的图标）→「管理扩展」→ 找到「Reader-II · 夜梦」，点它的更新按钮（就是 git pull）。TauriTavern 在扩展管理里同样操作。当初是手动拷贝安装的，重新下载后覆盖 <code>manifest.json</code>、<code>index.js</code>、<code>dist/</code>、<code>knowledge/</code>。</li>'
+      + '<li>刷新酒馆页面。</li></ol>'
+      + '<p class="ra-note">Reader-II 只有扩展这一个组件，更新完它就全部更新完了。设置、记忆、工作区、对话记录都不在扩展目录里，更新不会动它们。不要直接改扩展目录里的文件（git pull 会因此失败，或把改动冲掉）：自定义的东西放工作区 <code>ws:/</code>，或者另写一个扩展。</p>';
+
+    function runningVersion() {
+      if (!updates) return '';
+      return String(typeof updates.version === 'function' ? updates.version() : updates.version || '');
+    }
 
     function updatesCardHtml() {
       if (!updates) return '';
-      var s = updates.getSettings(), carrier = updates.carrier();
-      var last = s.installed && s.installed.version ? '；上次代装 v' + esc(s.installed.version) : '';
-      return '<div class="ra-card" id="ra-upd-card"><h3>检查更新</h3>'
-        + '<p class="ra-note">当前版本 <b>v' + esc(updates.version) + '</b>（' + (carrier === 'cdn' ? '从 CDN 加载' : carrier === 'extension' ? '酒馆扩展' : '载入方式未知') + '）' + last + '。</p>'
-        + '<div class="ra-row"><button type="button" class="ra-btn" data-act="upd-check">检查更新</button><button type="button" class="ra-btn" data-act="upd-inspect">检查卡内组件</button></div>'
-        + '<details><summary class="ra-note">更新源（每行一个地址，按顺序尝试）</summary><textarea id="ra-upd-remotes" style="width:100%;min-height:56px">' + esc(s.remotes.join('\n')) + '</textarea>'
-        + '<div class="ra-row"><button type="button" class="ra-btn is-small" data-act="upd-remotes">保存更新源</button><button type="button" class="ra-btn is-small" data-act="upd-reset">恢复默认</button></div></details>'
-        + '<div id="ra-upd-out" aria-live="polite">' + updatesView + '</div></div>';
+      var s = updates.getSettings();
+      var checked = s.lastCheck && s.lastCheck.at
+        ? '上次检查 ' + new Date(s.lastCheck.at).toLocaleString() + '：' + ({ newer: '有新版本 v' + s.lastCheck.latest, same: '与更新源一致', older: '本机比更新源新' }[s.lastCheck.status] || '没有结果')
+        : '还没有检查过';
+      return card('ra-upd-card', '版本更新', '<p>当前版本 <b>v' + esc(runningVersion()) + '</b></p><p class="ra-note">' + esc(checked) + '</p>'
+        + '<div class="ra-row"><button type="button" class="ra-btn" data-act="upd-check">检查更新</button></div>'
+        + '<div id="ra-upd-out" aria-live="polite">' + updatesView + '</div>'
+        + '<details class="ra-fold"><summary>' + icon('chevron') + '更新源（每行一个地址，按顺序尝试）</summary><textarea id="ra-upd-remotes" class="is-code" spellcheck="false">' + esc(s.remotes.join('\n')) + '</textarea>'
+        + '<div class="ra-row"><button type="button" class="ra-btn is-small" data-act="upd-remotes">保存更新源</button><button type="button" class="ra-btn is-small" data-act="upd-reset">恢复默认</button></div></details>');
     }
 
     function checkHtml(result) {
       var errors = result.errors && result.errors.length ? '<p class="ra-note">没连上的更新源：' + result.errors.map(esc).join('；') + '</p>' : '';
-      if (!result.ok) return '<p class="ra-upd-bad">检查失败，不能据此判断已是最新。</p>' + errors;
-      if (result.status === 'newer') return '<p class="ra-upd-ok">有新版本 <b>v' + esc(result.latest) + '</b>（当前 v' + esc(result.current) + '）。</p>' + (result.carrier === 'cdn' ? GUIDE_CDN : GUIDE_EXT) + errors;
-      if (result.status === 'older') return '<p>当前 v' + esc(result.current) + ' 比更新源上的 v' + esc(result.latest) + ' 还新（开发中的版本）。</p>' + errors;
-      return '<p>已是最新：v' + esc(result.current) + '（更新源 ' + esc(result.source) + '）。卡内组件要和扩展同一版本，可以点「检查卡内组件」看一眼。</p>' + errors;
-    }
-
-    function planHtml(plan) {
-      var rows = plan.items.map(function (item) {
-        var details = item.details && item.details.length && item.status !== 'current' ? '<ul class="ra-upd-list">' + item.details.map(function (line) { return '<li>' + esc(line) + '</li>'; }).join('') + '</ul>' : '';
-        return '<li data-upd="' + esc(item.key) + '" data-status="' + esc(item.status) + '">' + (UPDATE_MARK[item.status] || '·') + ' <b>' + esc(item.label) + '</b>：' + esc(item.text) + details + '</li>';
-      }).join('');
-      var needsScope = plan.items.some(function (item) { return item.action === 'install' && (item.key === 'script' || item.key === 'worldbook'); });
-      var scope = needsScope ? '<div class="ra-row"><label>新装到</label><select id="ra-upd-scope"><option value="character"' + (plan.scope === 'character' ? ' selected' : '') + '>当前角色卡（推荐）</option><option value="global"' + (plan.scope === 'global' ? ' selected' : '') + '>全局（每个聊天都运行）</option></select></div>' : '';
-      var notes = plan.notes.length ? '<p class="ra-upd-bad">' + plan.notes.map(esc).join('<br>') + '</p>' : '';
-      var action = plan.actions
-        ? '<div class="ra-row"><button type="button" class="ra-btn is-main" data-act="upd-apply">安装 / 更新卡内组件（' + plan.actions + ' 项）</button></div><p class="ra-note">动手前会再核对一遍；写到一半出错，已写的会退回。被替换的世界书条目留作停用的备份，你改过的不覆盖。</p>'
-        : '<p>卡内组件不需要改动。</p>';
-      return '<p>卡内组件 v' + esc(plan.version) + '（来源 ' + esc(plan.source) + '，全部校验通过）：</p><ul class="ra-upd-list">' + rows + '</ul>' + scope + notes + action;
-    }
-
-    function reportHtml(report) {
-      var parts = ['<p class="ra-upd-ok">' + (report.done.length ? '已完成：' + report.done.map(esc).join('、') : '没有需要改动的') + '。</p>'];
-      if (report.kept.length) parts.push('<p class="ra-note">没有覆盖（你改过）：' + report.kept.map(esc).join('、') + '</p>');
-      if (report.notes.length) parts.push('<p class="ra-upd-bad">' + report.notes.map(esc).join('<br>') + '</p>');
-      if (report.reload) parts.push('<p class="ra-note">刷新页面后全部生效。</p>');
-      return parts.join('');
+      if (!result.ok) return '<p class="ra-tip is-bad">检查失败，不能据此判断已是最新。</p>' + errors;
+      if (result.status === 'newer') return '<p class="ra-tip">有新版本 <b>v' + esc(result.latest) + '</b>（当前 v' + esc(result.current) + '）。</p>' + GUIDE + errors;
+      if (result.status === 'older') return '<p class="ra-tip">当前 v' + esc(result.current) + ' 比更新源上的 v' + esc(result.latest) + ' 还新（开发中的版本）。</p>' + errors;
+      return '<p class="ra-tip">已是最新：v' + esc(result.current) + '（更新源 ' + esc(result.source) + '）。</p>' + errors;
     }
 
     function setUpdatesView(html) {
@@ -672,37 +735,25 @@
       if (out) out.innerHTML = html;
     }
 
-    async function updatesAction(action, actor) {
+    async function updatesAction(action) {
       if (!updates) return;
       try {
         if (action === 'upd-remotes') { updates.saveSettings({ remotes: ($('#ra-upd-remotes') || {}).value || '' }); toast('更新源已保存'); return; }
         if (action === 'upd-reset') {
           updates.saveSettings({ remotes: [] });
-          var card = $('#ra-upd-card');
-          if (card) card.outerHTML = updatesCardHtml();
+          replaceCard('ra-upd-card', updatesCardHtml());
+          var fold = $('#ra-upd-card details');
+          if (fold) fold.open = true;
           toast('已恢复默认更新源');
           return;
         }
-        if (action === 'upd-check') { setUpdatesView('<p class="ra-note">正在检查…</p>'); setUpdatesView(checkHtml(await updates.checkRemote())); return; }
-        if (action === 'upd-inspect') {
-          var select = $('#ra-upd-scope'), options = select ? { scope: select.value } : {};
-          updatesPlan = null;
-          setUpdatesView('<p class="ra-note">正在下载并校验卡内组件…</p>');
-          updatesPlan = await updates.inspect(options);
-          setUpdatesView(planHtml(updatesPlan));
-          return;
-        }
-        if (action === 'upd-apply') {
-          if (!updatesPlan) throw new Error('请先点「检查卡内组件」');
-          if (actor.getAttribute('data-armed') !== '1') { actor.setAttribute('data-armed', '1'); actor.textContent = '再点一次确认'; return; }
-          actor.disabled = true;
-          var plan = updatesPlan;
-          updatesPlan = null;
-          setUpdatesView(reportHtml(await updates.apply(plan)));
+        if (action === 'upd-check') {
+          setUpdatesView('<p class="ra-note"><span class="ra-dots">正在检查<i></i><i></i><i></i></span></p>');
+          setUpdatesView(checkHtml(await updates.checkRemote()));
         }
       } catch (error) {
-        var text = String(error && error.message || error);
-        setUpdatesView('<p class="ra-upd-bad">' + esc(text).replace(/\n/g, '<br>') + '</p>');
+        var text = message(error);
+        setUpdatesView('<p class="ra-tip is-bad">' + esc(text).replace(/\n/g, '<br>') + '</p>');
         toast(text.split('\n')[0], true);
       }
     }
@@ -716,10 +767,10 @@
       agent.listRuns(12).then(function (runs) {
         if (!runs.length) { box.innerHTML = '<p class="ra-note">还没有改动记录。</p>'; return; }
         box.innerHTML = runs.map(function (run) {
-          var notes = (run.notes || []).length ? '<br><span class="ra-note">无法自动撤销：' + esc(run.notes.join('；')) + '</span>' : '';
+          var notes = (run.notes || []).length ? '<span class="ra-hint">无法自动撤销：' + esc(run.notes.join('；')) + '</span>' : '';
           var button = run.changes && !run.undone
             ? '<button type="button" class="ra-btn is-small' + (forceUndo[run.id] ? ' is-bad' : '') + '" data-act="undo-run" data-run="' + esc(run.id) + '">' + (forceUndo[run.id] ? '强制撤销' : '撤销') + '</button>' : '';
-          return '<div class="ra-row" style="justify-content:space-between;gap:8px;margin:6px 0"><span>' + esc(new Date(run.startedAt).toLocaleString()) + ' · ' + esc(run.title || '')
+          return '<div class="ra-run"><span>' + esc(new Date(run.startedAt).toLocaleString()) + ' · ' + esc(run.title || '')
             + ' · 改动 ' + run.changes + ' 处' + (run.undone ? '（已撤销）' : '') + notes + '</span>' + button + '</div>';
         }).join('');
       }).catch(function () { box.innerHTML = '<p class="ra-note">读取记录失败。</p>'; });
@@ -737,7 +788,87 @@
           toast('已撤销这一轮的 ' + report.restored.length + ' 处改动');
         }
         renderRuns();
-      }).catch(function (error) { toast(String(error && error.message || error), true); renderRuns(); });
+      }).catch(function (error) { toast(message(error), true); renderRuns(); });
+    }
+
+    /* ---------- 设置页：整页、目录、保存 ---------- */
+    function settingsScroll() { return $('[data-pane="settings"] .ra-scroll'); }
+
+    function setDirty(value) {
+      dirty = !!value;
+      var hint = $('.ra-dirty');
+      if (hint) hint.hidden = !dirty;
+    }
+
+    function markToc(id) {
+      var toc = $('.ra-toc');
+      if (!toc) return;
+      Array.prototype.forEach.call(toc.querySelectorAll('button'), function (button) {
+        var on = button.getAttribute('data-target') === id;
+        if (on) button.setAttribute('aria-current', 'true'); else button.removeAttribute('aria-current');
+        /* 手机上目录是横着的一排：让当前这一项留在看得见的地方。 */
+        if (on && toc.scrollWidth > toc.clientWidth) {
+          var left = button.offsetLeft - toc.offsetLeft;
+          if (left < toc.scrollLeft || left + button.offsetWidth > toc.scrollLeft + toc.clientWidth) toc.scrollLeft = Math.max(0, left - 24);
+        }
+      });
+    }
+
+    function renderToc() {
+      var toc = $('.ra-toc');
+      if (!toc) return;
+      toc.innerHTML = SECTIONS.filter(function (item) { return $('#' + item[0]); }).map(function (item) {
+        return '<button type="button" data-act="toc" data-target="' + item[0] + '">' + item[1] + '</button>';
+      }).join('');
+      spy(true);
+    }
+
+    /* 滚动时目录跟着走：取顶线之上最后一块；滚到底时最后几块够不到顶线，直接算最后一块。 */
+    function spy(force) {
+      var scroll = settingsScroll();
+      if (!scroll || (!force && Date.now() < spyHold)) return;
+      var line = scroll.scrollTop + 48, current = '', last = '';
+      SECTIONS.forEach(function (item) {
+        var node = $('#' + item[0]);
+        if (!node) return;
+        last = item[0];
+        if (!current || node.offsetTop <= line) current = item[0];
+      });
+      if (scroll.scrollTop > 0 && scroll.scrollTop + scroll.clientHeight >= scroll.scrollHeight - 2) current = last;
+      markToc(current);
+    }
+
+    function gotoSection(id, smooth) {
+      var scroll = settingsScroll();
+      var node = $('#' + id);
+      if (!scroll || !node) return;
+      var top = Math.max(0, node.offsetTop - 14);
+      spyHold = Date.now() + 800;
+      markToc(id);
+      if (smooth && !calmMotion() && typeof scroll.scrollTo === 'function') scroll.scrollTo({ top: top, behavior: 'smooth' });
+      else scroll.scrollTop = top;
+    }
+
+    function renderSettings() {
+      var pane = settingsScroll();
+      if (!pane) return;
+      var a = agent.getSettings();
+      var m = memory.getSettings();
+      var scroll = pane.scrollTop;
+      pane.innerHTML = readerCardHtml()
+        + agentCardHtml(a)
+        + toolsCardHtml(a)
+        + rulesCardHtml(a.rules)
+        + memoryCardHtml(m)
+        + modelCardHtml()
+        + connectorsCardHtml()
+        + (netUi ? netUi.cardsHtml() : '')
+        + updatesCardHtml()
+        + card('ra-runs-card', '改动记录', '<p class="ra-note">助手每一轮改过的东西都留有改动前的样子，可以按轮撤销。之后又被别处改过的不会被强行覆盖。</p><div id="ra-runs"></div>');
+      pane.scrollTop = scroll;
+      setDirty(false);
+      renderToc();
+      renderRuns();
     }
 
     function saveSettingsFromForm() {
@@ -763,24 +894,62 @@
       overlay.querySelectorAll('.ra-tab').forEach(function (button) { button.setAttribute('aria-selected', String(button.getAttribute('data-tab') === tab)); });
       overlay.querySelectorAll('.ra-pane').forEach(function (pane) { pane.classList.toggle('is-on', pane.getAttribute('data-pane') === tab); });
       if (tab === 'memory') renderMemory();
-      else if (tab === 'settings') renderSettings();
-      else { refreshFoot(); var input = $('#ra-text'); if (input) { try { input.focus(); } catch (error) { /* ignore */ } } }
+      else if (tab === 'settings') {
+        /* 有没保存的改动时不重画：切去别的页再回来，填到一半的东西还在。只把会自己变的改动记录刷新一下。 */
+        var scroller = settingsScroll();
+        if (dirty && scroller && scroller.children.length) { replaceCard('ra-reader-card', readerCardHtml()); renderRuns(); }
+        else { toast(''); renderSettings(); }
+      }
+      else {
+        refreshFoot();
+        fitInput();
+        /* 页签没显示时滚不动（高度是 0）：切回来再落到最新一条上。 */
+        var log = logNode();
+        if (log) log.scrollTop = log.scrollHeight;
+        var input = $('#ra-text');
+        if (input && !touchInput()) { try { input.focus(); } catch (error) { /* ignore */ } }
+      }
+    }
+
+    /* 语义适配面板要读这张卡的变量：没启用 Reader-II 或没有聊天时打不开，把原因说出来，而不是关了窗口就没下文。 */
+    function openSemanticPanel() {
+      var core = coreApi();
+      if (!core || typeof core.openPanel !== 'function') { toast('读者界面还没有就绪', true); return; }
+      close();
+      Promise.resolve().then(function () { return core.openPanel(); }).catch(function (error) {
+        var toastr = env.toastr || host.toastr;
+        if (toastr && typeof toastr.warning === 'function') toastr.warning('语义适配没能打开：' + message(error), 'Reader-II');
+        else env.console.warn('[ReaderII] 语义适配没能打开', error);
+      });
+    }
+
+    function backToLobby() {
+      close();
+      var lobby = lobbyApi();
+      if (!lobby || typeof lobby.open !== 'function') return;
+      Promise.resolve().then(function () { return lobby.open('eggs'); }).catch(function (error) { env.console.warn('[ReaderII] 回不到服务台', error); });
     }
 
     function build() {
-      ensureStyle();
+      if (theme) theme.ensure(doc);
+      var touch = touchInput();
       overlay = doc.createElement('dialog');
       overlay.id = OVERLAY_ID;
       overlay.setAttribute('aria-label', '夜梦助手');
-      overlay.innerHTML = '<div class="ra-shell"><header class="ra-head"><div class="ra-id"><b>九十九夜梦</b><i id="ra-persona">READER AGENT</i></div>'
+      overlay.innerHTML = '<div class="ra-shell" tabindex="-1" autofocus><header class="ra-head">'
+        + '<button type="button" class="ra-back" data-act="back-lobby" title="回到彩蛋服务台" hidden>' + icon('back') + '<span>服务台</span></button>'
+        + '<div class="ra-id"><span class="ra-seal" aria-hidden="true"><i>夜</i><i>梦</i></span><div class="ra-name"><b>九十九夜梦</b><i id="ra-persona">READER AGENT</i></div></div>'
         + '<nav class="ra-tabs" role="tablist"><button type="button" class="ra-tab" role="tab" data-tab="chat">对话</button><button type="button" class="ra-tab" role="tab" data-tab="memory">记忆</button><button type="button" class="ra-tab" role="tab" data-tab="settings">设置</button></nav>'
-        + '<button type="button" class="ra-close" data-act="close" aria-label="关闭">×</button></header>'
+        + '<button type="button" class="ra-close" data-act="close" aria-label="关闭，回到聊天" title="关闭，回到聊天">' + icon('close') + '</button></header>'
         + '<section class="ra-pane" data-pane="chat"><div class="ra-log" id="ra-log" aria-live="polite"></div>'
         + '<div class="ra-quick"><button type="button" class="ra-chip" data-quick="看看现在 Reader 的状态。">看看状态</button><button type="button" class="ra-chip" data-quick="帮我把这张卡的变量适配到 Reader-II，逐项告诉我结果。">适配这张卡</button><button type="button" class="ra-chip" data-quick="把最近的对话整理成记忆，告诉我记下了什么。">整理记忆</button><button type="button" class="ra-chip" data-quick="你还记得关于我和这个故事的哪些事？">你还记得什么</button></div>'
-        + '<div class="ra-input"><textarea id="ra-text" placeholder="想问什么、想让我做什么，直接说。Enter 发送，Shift+Enter 换行"></textarea><button type="button" class="ra-btn is-main" id="ra-send">发送</button></div>'
-        + '<div class="ra-foot"><span id="ra-foot-text"></span><button type="button" class="ra-btn is-small" data-act="clear">清空对话</button></div></section>'
+        + '<div class="ra-input"><textarea id="ra-text" rows="1" aria-label="对夜梦说的话" placeholder="' + (touch ? '想问什么、想让我做什么，直接说。' : '想问什么、想让我做什么，直接说。Enter 发送，Shift+Enter 换行') + '"></textarea><button type="button" class="ra-btn is-main" id="ra-send">发送</button></div>'
+        + '<div class="ra-foot"><div class="ra-tags"><span id="ra-foot-text"></span><button type="button" class="ra-tag" id="ra-tool-mode" data-act="goto-tools" data-mode="none">工具：不可用</button></div>'
+        + '<button type="button" class="ra-btn is-small is-ghost" data-act="clear">清空对话</button></div></section>'
         + '<section class="ra-pane" data-pane="memory"><div class="ra-scroll"></div></section>'
-        + '<section class="ra-pane" data-pane="settings"><div class="ra-scroll"></div></section></div>';
+        + '<section class="ra-pane" data-pane="settings"><div class="ra-set"><nav class="ra-toc" aria-label="设置目录"></nav><div class="ra-scroll"></div></div>'
+        + '<div class="ra-savebar"><span class="ra-status" data-ra-status="settings" role="status"></span><span class="ra-dirty" hidden>有改动还没保存</span>'
+        + '<button type="button" class="ra-btn is-main" data-act="save-settings" title="保存 助手、工具调用、权限规则、记忆 四块；其余几块改了立即生效">保存设置</button></div></section></div>';
       overlay.addEventListener('click', function (event) {
         if (event.target === overlay) { close(); return; }
         var tabButton = event.target.closest('.ra-tab');
@@ -792,33 +961,36 @@
         if (!actor) return;
         var action = actor.getAttribute('data-act');
         if (action === 'close') close();
+        else if (action === 'back-lobby') backToLobby();
         else if (action === 'clear') {
           if (running) return;
           if (actor.getAttribute('data-armed') !== '1') { actor.setAttribute('data-armed', '1'); actor.textContent = '再点一次清空'; setTimeout(function () { actor.removeAttribute('data-armed'); actor.textContent = '清空对话'; }, 3000); return; }
           actor.removeAttribute('data-armed'); actor.textContent = '清空对话';
           agent.clearHistory(); renderHistory();
         }
+        else if (action === 'toc') gotoSection(actor.getAttribute('data-target'), true);
+        else if (action === 'goto-tools') { showTab('settings'); gotoSection('ra-tools-card', false); }
         else if (action === 'save-settings') saveSettingsFromForm();
+        else if (action === 'card-toggle') cardToggle(actor);
+        else if (action === 'probe-tools') probeTools(actor);
         else if (action === 'open-api') { close(); var shell = deps.shell && deps.shell(); if (shell) shell.command('openIndependentApiSettings'); }
-        else if (action === 'open-panel') { close(); var core = deps.core && deps.core(); if (core && core.openPanel) core.openPanel(); }
+        else if (action === 'open-panel') openSemanticPanel();
         else if (action === 'undo-run') undoRun(actor);
         else if (action.indexOf('mem-') === 0) memoryAction(action, actor);
         else if (action.indexOf('rule-') === 0 || action.indexOf('conn-') === 0) settingsAction(action, actor);
-        else if (action.indexOf('upd-') === 0) updatesAction(action, actor);
+        else if (action.indexOf('upd-') === 0) updatesAction(action);
         else if (netUi && /^(?:net|mcp|comp)-/.test(action)) netUi.action(action, actor, event);
       });
       overlay.addEventListener('change', function (event) {
+        if (event.target.closest && event.target.closest('[data-s],[data-r]')) setDirty(true);
         if (netUi && netUi.change(event)) return;
-        if (event.target.id === 'ra-upd-scope' && updates) {
-          try { updates.saveSettings({ scope: event.target.value }); } catch (error) { /* 下面重新检查时会报出来 */ }
-          updatesAction('upd-inspect');
-          return;
-        }
         if (event.target.id === 'ra-store') {
-          try { memory.setChatStoreOverride(event.target.value); renderMemory(); refreshFoot(); } catch (error) { toast(String(error && error.message || error), true); }
+          try { memory.setChatStoreOverride(event.target.value); renderMemory(); refreshFoot(); } catch (error) { toast(message(error), true); }
         }
       });
       overlay.addEventListener('input', function (event) {
+        if (event.target.id === 'ra-text') { fitInput(); return; }
+        if (event.target.closest && event.target.closest('[data-s],[data-r]')) { setDirty(true); return; }
         if (event.target.id === 'ra-mem-q') {
           memoryFilter.query = event.target.value;
           clearTimeout(overlay.__raSearch);
@@ -828,11 +1000,14 @@
         }
       });
       overlay.addEventListener('keydown', function (event) {
-        if (event.target.id === 'ra-text' && event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); send(); }
+        if (event.target.id === 'ra-text' && event.key === 'Enter' && !event.shiftKey && !event.isComposing && !touchInput()) { event.preventDefault(); send(); }
         /* 输入事件不冒泡到酒馆：聊天页的快捷键不该在面板里触发。 */
         event.stopPropagation();
       });
       overlay.addEventListener('cancel', function (event) { event.preventDefault(); close(); });
+      /* scroll 事件不冒泡，直接挂在设置页的滚动容器上。 */
+      var scroller = settingsScroll();
+      if (scroller) scroller.addEventListener('scroll', function () { spy(false); }, { passive: true });
       doc.body.appendChild(overlay);
     }
 
@@ -841,18 +1016,28 @@
       var stale = doc.getElementById(OVERLAY_ID);
       if (stale && stale !== overlay) stale.remove();
       if (!overlay || !overlay.isConnected) build();
+      else if (theme) theme.ensure(doc);
       overlay.setAttribute('data-theme', themeName());
+      refreshBack();
       if (!overlay.open) {
         try { overlay.showModal(); } catch (error) { overlay.setAttribute('open', ''); }
       }
       if (!running) renderHistory();
       showTab(target || tab);
+      /* <dialog> 打开时会把焦点给第一枚按钮（「服务台」），上面就多出一圈焦点框。对话页的焦点已经在输入框里；
+         别的页（以及触屏，不该弹键盘）把焦点放在外框上，按 Tab 再进到第一个控件。 */
+      if (tab !== 'chat' || touchInput()) {
+        var shellNode = $('.ra-shell');
+        if (shellNode) { try { shellNode.focus({ preventScroll: true }); } catch (error) { /* ignore */ } }
+      }
       if (!unsubscribe.length) {
         /* 设置被别处改了（斜杠命令、插件、助手自己）时，底栏跟着更新。 */
-        unsubscribe.push(agent.onChange(function (reason) { if (reason === 'settings' && overlay && overlay.open) refreshFoot(); }));
+        unsubscribe.push(agent.onChange(function (reason) { if ((reason === 'settings' || reason === 'probe') && overlay && overlay.open) refreshFoot(); }));
         unsubscribe.push(memory.onChange(function (reason) {
+          /* 换了聊天：设置页里「这张卡」说的已经是另一张卡了，没保存的改动不再留着，下次进设置页重画。 */
+          if (reason === 'chat') dirty = false;
           if (!overlay || !overlay.open) return;
-          if (reason === 'chat') { if (!running) renderHistory(); refreshFoot(); }
+          if (reason === 'chat') { if (!running) renderHistory(); refreshFoot(); refreshBack(); if (tab === 'settings') renderSettings(); }
           if (tab === 'memory' && reason !== 'settings' && !editing) renderMemory();
         }));
       }
@@ -871,8 +1056,7 @@
       close();
       if (overlay) overlay.remove();
       overlay = null;
-      var style = doc && doc.getElementById(STYLE_ID);
-      if (style) style.remove();
+      if (theme) theme.remove(doc);
     }
 
     return { open: open, close: close, dispose: dispose, isOpen: function () { return !!(overlay && overlay.open); } };

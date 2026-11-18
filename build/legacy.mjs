@@ -4,13 +4,14 @@
 // ReaderTransactions（src/controller/reader-transactions-generic.js），因此这里只需要：
 //   · 把直接写 stat_data.主角 / 命运点数 的几处改成事务接口；
 //   · 自定义人格、条件机制、缘加强换成不依赖命定之诗变量表的通用版本；
-//   · 去掉不进通用版的东西：书海、检查更新；换上夜梦助手 / 记忆 / 语义适配的入口。
+//   · 去掉不进通用版的东西：书海、检查更新；彩蛋页换上夜梦助手 / 助手设置 / 语义适配 / 记忆的入口（只此一处）。
 import { countExact, replaceExact, replaceRegex, replaceFunction, patchFunction, findFunctions, assertSyntax } from './lib.mjs';
 import { applyPersonaTransforms } from './legacy-persona.mjs';
 import { renameLocalKeys } from './local-keys.mjs';
 
 const AGENT_DOOR = "h+='<div class=\"dlb-sub-h\">夜梦助手<i>READER AGENT</i></div><button type=\"button\" class=\"dlb-row\" data-dlb=\"eggagent\" style=\"width:100%;text-align:left;background:transparent;color:inherit;font:inherit;cursor:pointer\"><div class=\"ic\">'+dlbSvg('quill')+'</div><div class=\"tx\"><div class=\"nm\">和夜梦说说话<em>AGENT</em></div><div class=\"ds\">查资料、改变量、适配这张卡、整理记忆；要动手改东西之前会先问你</div></div><div class=\"rt\"><span class=\"sv2\">打开</span></div></button>';";
-const MEMORY_ROWS = "h+='<div class=\"dlb-row\" data-dlb=\"eggmemory\"><div class=\"ic\">'+dlbSvg('info')+'</div><div class=\"tx\"><div class=\"nm\">记忆<em>MEMORY</em></div><div class=\"ds\">夜之洋：查看、整理与管理记忆；可存在当前聊天，或《夜之洋》世界书（跨存档）</div></div><div class=\"rt\"><span class=\"go\">'+dlbSvg('go')+'</span></div></div>';\n"
+const MEMORY_ROWS = "h+='<div class=\"dlb-row\" data-dlb=\"eggagentset\"><div class=\"ic\">'+dlbSvg('tuning')+'</div><div class=\"tx\"><div class=\"nm\">助手设置<em>SETTINGS</em></div><div class=\"ds\">模型与工具调用方式、权限、联网与插件对接、版本更新</div></div><div class=\"pr\">打开</div></div>';\n"
+  + "h+='<div class=\"dlb-row\" data-dlb=\"eggmemory\"><div class=\"ic\">'+dlbSvg('info')+'</div><div class=\"tx\"><div class=\"nm\">记忆<em>MEMORY</em></div><div class=\"ds\">夜之洋：查看、整理与管理记忆；可存在当前聊天，或《夜之洋》世界书（跨存档）</div></div><div class=\"rt\"><span class=\"go\">'+dlbSvg('go')+'</span></div></div>';\n"
   + "h+='<div class=\"dlb-row\" data-dlb=\"eggpanel\"><div class=\"ic\">'+dlbSvg('tuning')+'</div><div class=\"tx\"><div class=\"nm\">语义适配<em>READER CORE</em></div><div class=\"ds\">把宿主卡的变量接到读者这边：地点、角色、任务、技能、状态、货币、背包</div></div><div class=\"rt\"><span class=\"go\">'+dlbSvg('go')+'</span></div></div>';";
 
 /* 控制器里新增的小函数：通往主脚本里的 ReaderCore（语义层）、夜梦助手与适配面板。 */
@@ -71,7 +72,7 @@ export function transformLegacy(input) {
   source = replaceExact(source, "\n,'书海':ReaderBookseaAlbum.songs", '', '书海专辑');
   source = replaceFunction(source, 'dlbEnterBooksea', '', '书海入口函数');
   source = replaceRegex(source, /h\+='<div class="dlb-sub-h">书海迷宫<i>BOOKSEA<\/i><\/div><button type="button" class="dlb-row" data-dlb="eggbooksea"[^\n]*\n/, AGENT_DOOR + '\n', '彩蛋页书海入口');
-  source = replaceExact(source, "if(act==='eggbooksea'){dlbEnterBooksea();return;}", "if(act==='eggagent'){dreamOpenAgent('chat');return;}if(act==='eggmemory'){dreamOpenAgent('memory');return;}if(act==='eggpanel'){dreamOpenPanel();return;}", '彩蛋页入口动作');
+  source = replaceExact(source, "if(act==='eggbooksea'){dlbEnterBooksea();return;}", "if(act==='eggagent'){dreamOpenAgent('chat');return;}if(act==='eggagentset'){dreamOpenAgent('settings');return;}if(act==='eggmemory'){dreamOpenAgent('memory');return;}if(act==='eggpanel'){dreamOpenPanel();return;}", '彩蛋页入口动作');
   source = replaceExact(source, "['booksea_compile','书海 · 技能整备','进入迷宫前编译同行者能力'],\n['booksea_supplier','书海 · 补给员对话','迷宫里和补给员聊天、请她生成东西'],\n",
     "['agent','夜梦助手','助手对话与工具调用'],\n['memory','记忆整理','把对话沉淀为记忆（夜之洋）'],\n['adapt','语义适配','一键适配时寻找宿主变量、分析容器结构'],\n", '独立 API 调用类型');
   source = replaceExact(source, '/* 调用类型：[键, 名称, 说明]。书海读取同一份 dream_independent_api_v2.routes。正文回复始终走酒馆当前插头。 */', '/* 调用类型：[键, 名称, 说明]。主脚本里的助手、记忆与语义适配读取同一份方案表的 routes。正文回复始终走酒馆当前插头。 */', '独立 API 注释');
@@ -81,16 +82,12 @@ export function transformLegacy(input) {
   source = replaceExact(source, "if(act==='eggupdates'){openDreamReleaseUpdates(e,pToast);return;}\nif(act==='eggwb'){openDreamWorldbookUpdate(e,pToast);return;}\n", '', '检查更新动作');
   source = replaceExact(source,
     '<div class="sub-opt" data-action="worldbookUpdate"><span>检查更新</span><span style="font-family:monospace;font-size:12px;">检查</span></div><div style="padding:0 10px 6px 10px;font-size:11px;color:#8a796f;font-style:italic;">分别检查正则、脚本和世界书，更新可用项目</div>',
-    '<div class="sub-opt" data-action="readerAgent"><span>夜梦助手</span><span style="font-family:monospace;font-size:12px;">打开</span></div><div style="padding:0 10px 6px 10px;font-size:11px;color:#8a796f;font-style:italic;">查资料、改变量、适配这张卡、整理记忆</div><div class="sub-opt" data-action="readerMemory"><span>记忆</span><span style="font-family:monospace;font-size:12px;">管理</span></div>',
+    '',
     '悬浮菜单检查更新');
-  source = replaceExact(source, "else if(act==='worldbookUpdate'){openDreamWorldbookUpdate(e,pToast);}", "else if(act==='readerAgent'){dreamOpenAgent('chat');}else if(act==='readerMemory'){dreamOpenAgent('memory');}", '悬浮菜单动作');
+  source = replaceExact(source, "else if(act==='worldbookUpdate'){openDreamWorldbookUpdate(e,pToast);}", '', '悬浮菜单动作');
   /* 世界书版本检查整段不再需要（读的是上游仓库的发布清单）。 */
   source = replaceFunction(source, 'dreamWbAutoCheck', 'async function dreamWbAutoCheck(){}', '世界书自动检查');
   source = replaceFunction(source, 'openDreamWorldbookUpdate', "function openDreamWorldbookUpdate(e){if(e&&e.stopPropagation)e.stopPropagation();dreamOpenAgent('memory');}", '世界书更新窗口');
-
-  /* ---- 6b. 旧版大厅里的店猫与迎宾小人：点一下就是和夜梦说话 ---- */
-  source = patchFunction(source, 'cfCounterHTML', [['<div class="cf-decor cf-cat cf-hov" title="店猫">', '<div class="cf-decor cf-cat cf-hov" data-dlb="eggagent" title="店猫 · 夜梦助手">']], '咖啡馆店猫');
-  source = patchFunction(source, 'sxSkeleton', [['<div class="sx-greeter hov">', '<div class="sx-greeter hov" data-dlb="eggagent" title="夜梦助手">']], '盛夏迎宾');
 
   /* ---- 7. 常驻宿主接口在通用版里叫 ReaderShell（ReaderCore 是语义层） ---- */
   source = replaceExact(source, 'pW.ReaderCore', 'pW.ReaderShell', '宿主接口名', countExact(source, 'pW.ReaderCore'));

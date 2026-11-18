@@ -38,14 +38,13 @@ export function jsLiteral(value) {
 
 /* ---------- legacy-body.html（控制器页面的 body，旧版菜单板） ---------- */
 const BODY_UPDATE_ROW = '<div class="sub-opt" onclick="openDreamWorldbookUpdate(event,showToast)"><span>检查更新</span><span style="font-family:monospace;font-size:12px;">检查</span></div><div style="padding:0 10px 6px 10px;font-size:11px;color:#8a796f;font-style:italic;">分别检查正则、脚本和世界书，更新可用项目</div>';
-/* 与 legacy.mjs 里悬浮菜单换上的两行一致。 */
-const BODY_AGENT_ROWS = '<div class="sub-opt" onclick="dreamOpenAgent(\'chat\')"><span>夜梦助手</span><span style="font-family:monospace;font-size:12px;">打开</span></div><div style="padding:0 10px 6px 10px;font-size:11px;color:#8a796f;font-style:italic;">查资料、改变量、适配这张卡、整理记忆</div><div class="sub-opt" onclick="dreamOpenAgent(\'memory\')"><span>记忆</span><span style="font-family:monospace;font-size:12px;">管理</span></div>';
+/* 菜单板上不再放助手的入口：助手对话、助手设置、语义适配、记忆都收在大厅的「彩蛋服务台」里（交接 0.9）。 */
 
 export function transformLegacyBody(input) {
   let s = input;
   s = replaceExact(s, "orderItem('更新新闻')", "orderItem('请读者写一则旁观札记')", '菜单板点单：旁观札记');
   s = replaceExact(s, '<span>新闻更新</span>', '<span>旁观札记</span>', '菜单板名字：旁观札记');
-  s = replaceExact(s, BODY_UPDATE_ROW, BODY_AGENT_ROWS, '菜单板：检查更新 → 夜梦助手 / 记忆');
+  s = replaceExact(s, BODY_UPDATE_ROW, '', '菜单板：去掉检查更新');
   s = replaceExact(s, '条目模仿与书海的请求可分别指定方案', '条目模仿、命运抽卡与夜梦助手的请求可分别指定方案', '菜单板：独立 API 说明');
   /* 「使用间章:小憩」不改：世界书靠这句点单触发。 */
   if (countExact(s, "orderItem('使用间章:小憩')") !== 1) throw new Error('legacy-body.html：小憩的点单应原样保留且唯一');
@@ -57,11 +56,11 @@ export function transformReaderUi(input) {
   let s = input;
   s = replaceExact(s,
     '${i("eggbooksea")}><b class="q-nm">进入普罗泰利西翁</b><small class="q-ds">书海迷宫。眼下的对话会留着；输入框里有草稿的话先存好。</small><span class="sv2">进入</span>',
-    '${i("eggagent")}><b class="q-nm">和夜梦说说话</b><small class="q-ds">查资料、改变量、适配这张卡、整理记忆。要动手改东西之前，她会先问你。</small><span class="sv2">打开</span>',
+    '${i("eggagent")}><b class="q-nm">和夜梦说说话</b><small class="q-ds">查资料、改变量、排查这张卡、整理记忆。要动手改东西之前，她会先问你。</small><span class="sv2">打开</span>',
     '彩蛋页书海入口 → 夜梦助手');
   s = replaceExact(s, 'g(i("eggwb"),"检查更新","分别检查正则、脚本和世界书")',
-    'g(i("eggmemory"),"记忆","查看、整理记忆；存在当前聊天或《夜之洋》世界书")+g(i("eggpanel"),"语义适配","把这张卡的变量接到读者这边，可以一键适配")',
-    '彩蛋页检查更新 → 记忆 / 语义适配');
+    'g(i("eggagentset"),"助手设置","模型与工具调用方式、权限、联网与插件对接、版本更新")+g(i("eggpanel"),"语义适配","把这张卡的变量接到读者这边，可以一键适配")+g(i("eggmemory"),"记忆","查看、整理记忆；存在当前聊天或《夜之洋》世界书")',
+    '彩蛋页检查更新 → 助手设置 / 语义适配 / 记忆');
   s = replaceExact(s, 'sea:"书海迷宫"', 'sea:"夜梦助手"', '三套主题的书海标题', 3);
   s = replaceExact(s, '{text:"更新新闻"}', '{text:"请读者写一则旁观札记"}', '三套主题的点单文本', 3);
   s = replaceExact(s, 'name:"新闻更新"', 'name:"旁观札记"', '三套主题的菜单名', 3);

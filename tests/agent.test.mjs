@@ -234,7 +234,7 @@ test('主循环：读 → 改（确认）→ 回答，随后整轮撤销', async
   assert.match(system, /【当前剧情】/);
   assert.match(system, /艾琳放下了手里的杯子/);
   assert.ok(!/fp_adjust/.test(system), '没打开的工具箱不该出现在提示词里');
-  assert.match(llmCalls[1].at(-1).content, /<tool_result name="read" status="ok">/);
+  assert.match(llmCalls[1].at(-1).content, /<action_result name="read" status="ok">/);
 
   const runs = await agent.listRuns(5);
   assert.equal(runs[0].id, result.runId);

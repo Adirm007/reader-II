@@ -2,64 +2,93 @@
   'use strict';
 
   var modules = root.__ReaderIIModules = root.__ReaderIIModules || {};
-  var MVU_BUNDLE_URL = 'https://testingcf.jsdelivr.net/gh/MagicalAstrogy/MagVarUpdate/artifact/bundle.js';
-  /* 夜梦助手与记忆在 ① 酒馆扩展里（host.ReaderII）。没装扩展时，从这里按需加载同一份扩展包到酒馆主窗口。 */
-  var EXT_BASE = 'https://cdn.jsdelivr.net/gh/Adirm007/reader-II@main/';
-  var EXT_WAIT_MS = 20000;
-  var EXT_AUTOLOAD_DELAY_MS = 6000;
-  var EXT_AUTOLOAD_KEY = 'reader_ii_ext_autoload';
   var HOST_KIND_KEY = 'reader_ii_host_kind';
+  /* 这张卡要不要用 Reader：记在角色卡的扩展字段里（跟着卡走）；群聊与没有角色卡时记在聊天元数据里。 */
+  var CARD_FIELD = 'reader_ii';
+  var CHAT_FLAG = 'reader_ii_enabled';
   var LATEST = { type: 'message', message_id: 'latest' };
 
-  if (typeof modules.createEnv !== 'function') throw new Error('Reader-II 主系统缺少 reader-env 模块，请重新导入完整的脚本');
+  if (typeof modules.createEnv !== 'function') throw new Error('Reader-II 缺少 reader-env 模块');
   var env = modules.createEnv(root);
   var host = env.host;
-  var find = env.find;
   var subscriptions = [];
 
-  async function resolveMvu() {
-    var existing = find('Mvu');
-    if (existing && typeof existing.getMvuData === 'function') return existing;
-    if (typeof env.waitGlobalInitialized === 'function') {
-      try {
-        var waited = await Promise.race([
-          env.waitGlobalInitialized('Mvu'),
-          new Promise(function (_, reject) {
-            setTimeout(function () { reject(new Error('等待宿主MVU超时')); }, 1200);
-          })
-        ]);
-        existing = waited || find('Mvu');
-        if (existing && typeof existing.getMvuData === 'function') return existing;
-      } catch (error) {
-        /* no host MVU: load Reader's bundled dependency */
-      }
-    }
-    if (root.__READER_DISABLE_MVU_IMPORT__ !== true) {
-      try {
-        var dynamicImport = Function('url', 'return import(url)');
-        await dynamicImport(MVU_BUNDLE_URL);
-      } catch (error) {
-        env.console.warn('[ReaderCore] Reader携带的MVU主系统加载失败', error);
-      }
-    }
-    for (var attempt = 0; attempt < 80; attempt += 1) {
-      existing = find('Mvu');
-      if (existing && typeof existing.getMvuData === 'function') return existing;
-      await new Promise(function (resolve) { setTimeout(resolve, 50); });
-    }
-    throw new Error('Reader无法取得MVU主系统；请检查网络或脚本加载顺序');
-  }
-
-  var mvu = null;
+  /*
+   * 楼层变量的读写（reader-native-host.js）。MVU 的 getMvuData / replaceMvuData 就是酒馆助手的 getVariables / replaceVariables，
+   * 所以不管宿主卡有没有 MVU、有没有装酒馆助手，都从同一处读写；宿主卡的 MVU 在跑时，变量更新由它解析，我们只订它的事件。
+   */
+  var mvu = modules.createNativeMvu(env);
+  var hookedMvu = null;
   var runtimeStore = modules.createRuntimeStore(env);
   var guard = modules.createMvuGuard(env, runtimeStore);
   var lwbHost = typeof modules.createLwbHost === 'function' ? modules.createLwbHost(env) : null;
   var queue = Promise.resolve();
-  var hostTreeEventsInstalled = false;
   var lastHostKind = 'mvu';
 
+  function context() {
+    try { return env.context() || null; } catch (error) { return null; }
+  }
+
+  /* 有没有打开着的聊天（刚进酒馆、还在欢迎页时没有）。 */
+  function hasChat() {
+    var ctx = context();
+    if (!ctx || !Array.isArray(ctx.chat) || !ctx.chat.length) return false;
+    var chatId = typeof ctx.getCurrentChatId === 'function' ? ctx.getCurrentChatId() : ctx.chatId;
+    return chatId !== undefined && chatId !== null && chatId !== '';
+  }
+
+  function currentCard() {
+    var ctx = context();
+    if (!ctx || ctx.groupId || ctx.characterId === undefined || ctx.characterId === null) return null;
+    return ctx.characters && ctx.characters[ctx.characterId] || null;
+  }
+
+  function cardFlag() {
+    var card = currentCard();
+    var field = card && card.data && card.data.extensions && card.data.extensions[CARD_FIELD];
+    return modules.isObject(field) && typeof field.enabled === 'boolean' ? field.enabled : undefined;
+  }
+
+  /*
+   * 这个聊天用不用 Reader。顺序：这张卡明确开了或关了 → 聊天元数据里的开关 → 这个聊天以前用过（有 reader_ii_runtime）。
+   * 不用的聊天里，Reader 什么都不做：不建后备变量、不注入提示词、不解析事件、不挂信。
+   */
+  function isEnabled() {
+    if (!hasChat()) return false;
+    var card = cardFlag();
+    if (card !== undefined) return card;
+    var ctx = context();
+    var meta = ctx && ctx.chatMetadata;
+    if (meta && typeof meta[CHAT_FLAG] === 'boolean') return meta[CHAT_FLAG];
+    return chatVariables()[runtimeStore.key] !== undefined;
+  }
+
+  async function setEnabled(value) {
+    var enabled = value !== false;
+    var ctx = context();
+    if (!ctx || !hasChat()) throw new Error('请先打开一个聊天');
+    var card = currentCard();
+    if (card && typeof ctx.writeExtensionField === 'function') {
+      var field = Object.assign({}, card.data && card.data.extensions && card.data.extensions[CARD_FIELD], { enabled: enabled });
+      await ctx.writeExtensionField(ctx.characterId, CARD_FIELD, field);
+      /* 酒馆只把这个字段写进卡片文件；内存里的卡要自己补上，开关才当场生效。 */
+      if (!card.data) card.data = {};
+      if (!modules.isObject(card.data.extensions)) card.data.extensions = {};
+      card.data.extensions[CARD_FIELD] = field;
+    } else if (ctx.chatMetadata) {
+      ctx.chatMetadata[CHAT_FLAG] = enabled;
+      if (typeof ctx.saveMetadata === 'function') { try { await ctx.saveMetadata(); } catch (error) { /* best-effort */ } }
+    }
+    if (enabled) ready = ensureNamespace();
+    else if (prompt) prompt.clear();
+    notify('enabled_changed', null);
+    try { await ready; } catch (error) { /* 调用方看 isEnabled */ }
+    return isEnabled();
+  }
+
   function readMvuData() {
-    var data = mvu.getMvuData(LATEST);
+    var data;
+    try { data = mvu.getMvuData(LATEST); } catch (error) { data = null; }
     if (!modules.isObject(data)) data = {};
     return data;
   }
@@ -134,7 +163,6 @@
   }
 
   function currentHostKind() {
-    if (!mvu) return lwbHost && lwbHost.available() && hostKindOverride() !== 'mvu' && lwbHost.inUse() ? 'lwb' : 'mvu';
     lastHostKind = hostKind(readMvuData());
     return lastHostKind;
   }
@@ -156,7 +184,10 @@
     return value;
   }
 
+  /* 没启用 Reader 的聊天里什么都不建，返回一份空的默认状态。 */
   async function ensureNamespace() {
+    if (!isEnabled()) return { data: { stat_data: {} }, reader: modules.createDefaultReaderState(), dormant: true };
+    hookHostMvu();
     var data = readData();
     guard.guard(data);
     guard.remember(data);
@@ -195,27 +226,46 @@
     });
   }
 
-  function installHostTreeEvents() {
-    if (hostTreeEventsInstalled || !mvu || !mvu.events || typeof env.eventOn !== 'function') return;
-    hostTreeEventsInstalled = true;
+  /* 宿主卡的 MVU 在跑时订上它的事件：变量更新前后由守卫裁剪 READER，更新后通知界面。事件名是固定的字符串，订一次就够。 */
+  function hookHostMvu() {
+    var real = mvu.hostMvu();
+    if (!real || !real.events || hookedMvu) return;
+    hookedMvu = real;
+    guard.install(real);
     function refresh(variables) {
+      if (!isEnabled()) return;
       var reader = variables && variables.stat_data && variables.stat_data.READER;
       notify('host_tree_updated', reader || modules.createDefaultReaderState());
     }
-    if (mvu.events.VARIABLE_INITIALIZED) env.eventOn(mvu.events.VARIABLE_INITIALIZED, refresh);
-    if (mvu.events.VARIABLE_UPDATE_ENDED) env.eventOn(mvu.events.VARIABLE_UPDATE_ENDED, refresh);
+    if (real.events.VARIABLE_INITIALIZED) env.eventOn(real.events.VARIABLE_INITIALIZED, refresh);
+    if (real.events.VARIABLE_UPDATE_ENDED) env.eventOn(real.events.VARIABLE_UPDATE_ENDED, refresh);
   }
 
-  var ready = (async function () {
-    mvu = await resolveMvu();
-    guard.install(mvu);
-    installHostTreeEvents();
-    return ensureNamespace();
-  })();
+  /*
+   * 宿主卡没有在跑 MVU 时，MVU 会做的两件事由我们来做：
+   *   一、新楼层沿用上一楼的变量（把读到的状态写进最后一楼，控制器的事务直接读这一楼）；
+   *   二、应用回复里指向 /READER/ 的 JSONPatch（后备的地点、角色、技能、状态、背包靠它更新）。
+   * 排进语义层自己的写入队列，与记账等写入不会互相覆盖。
+   */
+  function absorbNativeUpdate(messageId) {
+    if (!isEnabled() || mvu.hostMvu()) return Promise.resolve(0);
+    var plan = mvu.plan(messageId);
+    if (!plan && mvu.materialized()) return Promise.resolve(0);
+    return controller.mutate('native_update', function (data) {
+      if (!plan) return 0;
+      guard.remember(data);
+      var applied = plan.operations.length ? modules.readerJsonPatch.apply(data.stat_data, plan.operations, ['READER']) : 0;
+      data[mvu.MARK] = plan.signature;
+      return applied;
+    });
+  }
+
+  var ready = Promise.resolve().then(ensureNamespace);
 
   var controller = {
     snapshot: async function () {
       await ready;
+      if (!isEnabled()) return { data: { stat_data: {} }, reader: modules.createDefaultReaderState() };
       var data = readData();
       guard.guard(data);
       return { data: data, reader: data.stat_data.READER || {} };
@@ -223,6 +273,7 @@
     mutate: function (reason, updater) {
       var operation = queue.then(async function () {
         await ready;
+        if (!isEnabled()) throw new Error('这张卡还没有启用 Reader-II');
         var data = readData();
         guard.guard(data);
         var result = await updater(data, data.stat_data.READER || {});
@@ -631,123 +682,41 @@
   var autoAdapt = modules.createAutoAdapt(API, llmGateway);
   API.autoAdapt = autoAdapt.run;
 
-  /* ---------- 夜梦助手与记忆：用 ①（host.ReaderII），没有就按需加载扩展包 ---------- */
-  var readerIILoading = null;
-  var readerIICancel = null;
-  var autoloadTimer = null;
-
+  /* ---------- 夜梦助手与记忆：同一个扩展包里的 host.ReaderII（agent/boot.js 装配，排在本模块之后） ---------- */
   function currentReaderII() {
     var api = null;
     try { api = host.ReaderII; } catch (error) { api = null; }
     return api && api.ready === true && api.agent && typeof api.agent.open === 'function' ? api : null;
   }
 
-  /* 装了扩展时 index.js 会先写下 __ReaderIIBase，并在空闲时自己加载主包，这里只等它就绪。 */
-  function extensionInstalled() {
-    try { return !!host.__ReaderIIBase && host.__ReaderIICdn !== true; } catch (error) { return false; }
-  }
-
-  function ensureReaderII() {
-    var existing = currentReaderII();
-    if (existing) return Promise.resolve(existing);
-    if (readerIILoading) return readerIILoading;
-    if (root.__READER_DISABLE_EXT_IMPORT__ === true && !extensionInstalled()) {
-      return Promise.reject(new Error('夜梦助手没有安装：请安装 Reader-II 酒馆扩展'));
-    }
-    readerIILoading = new Promise(function (resolve, reject) {
-      var settled = false;
-      var poll = null;
-      var timer = null;
-      function finish(error) {
-        if (settled) return;
-        var api = currentReaderII();
-        if (!error && !api) return;
-        settled = true;
-        clearInterval(poll);
-        clearTimeout(timer);
-        try { host.removeEventListener('reader-ii:ready', check); } catch (removeError) { /* ignore */ }
-        readerIICancel = null;
-        if (error) reject(error);
-        else resolve(api);
-      }
-      function check() { finish(null); }
-      readerIICancel = function () { finish(new Error('Reader 已卸载')); };
-      try { host.addEventListener('reader-ii:ready', check); } catch (listenError) { /* 轮询兜底 */ }
-      poll = setInterval(check, 250);
-      timer = setTimeout(function () {
-        finish(new Error('夜梦助手加载超时：请检查网络，或安装 Reader-II 酒馆扩展'));
-      }, EXT_WAIT_MS);
-      if (extensionInstalled()) return;
-      var doc = env.document;
-      if (!doc || !doc.head || typeof doc.createElement !== 'function') {
-        finish(new Error('无法访问酒馆页面，夜梦助手加载失败'));
-        return;
-      }
-      if (typeof doc.querySelector === 'function' && doc.querySelector('script[data-reader-ii]')) return;
-      var base = String(root.__READER_II_EXT_BASE__ || EXT_BASE);
-      try {
-        host.__ReaderIICdn = true;
-        if (!host.__ReaderIIBase) host.__ReaderIIBase = base;
-      } catch (markError) { /* ignore */ }
-      var script = doc.createElement('script');
-      script.src = base + 'dist/reader-ii.ext.js';
-      script.setAttribute('data-reader-ii', 'cdn');
-      script.onerror = function () {
-        try { if (script.parentNode) script.parentNode.removeChild(script); } catch (removeError) { /* ignore */ }
-        finish(new Error('夜梦助手扩展包加载失败：' + script.src));
-      };
-      doc.head.appendChild(script);
-    });
-    readerIILoading.then(function () { readerIILoading = null; }, function () { readerIILoading = null; });
-    return readerIILoading;
-  }
-
   function openAgent(tab) {
-    return ensureReaderII().then(function (api) {
-      api.agent.open(tab || 'chat');
-      return true;
-    }).catch(function (error) {
-      env.console.warn('[ReaderCore] 夜梦助手打开失败', error);
-      if (env.toastr && typeof env.toastr.warning === 'function') env.toastr.warning(error.message || String(error), '夜梦助手');
-      return false;
-    });
-  }
-
-  /* 控制器里的 dreamOpenAgent 调 window.parent.ReaderAgent.open(tab)。① 还没加载时先放一个占位，点了再加载；① 启动后会覆盖它。 */
-  function installAgentPlaceholder() {
-    try {
-      if (host.ReaderAgent && !host.ReaderAgent.__readerCorePlaceholder) return;
-      host.ReaderAgent = { __readerCorePlaceholder: true, open: openAgent, close: function () {} };
-    } catch (error) { /* ignore */ }
-  }
-
-  /* 没装扩展时，空闲后在后台加载 ①，记忆注入才会在这张卡的聊天里工作。localStorage reader_ii_ext_autoload=off 可关。 */
-  function scheduleAutoload() {
-    if (root.__READER_DISABLE_EXT_IMPORT__ === true || !env.document || currentReaderII()) return;
-    try { if (env.storage && env.storage.getItem(EXT_AUTOLOAD_KEY) === 'off') return; } catch (error) { /* ignore */ }
-    autoloadTimer = setTimeout(function () {
-      autoloadTimer = null;
-      ensureReaderII().catch(function (error) {
-        env.console.warn('[ReaderCore] 夜梦助手（记忆）未能加载', error);
-      });
-    }, EXT_AUTOLOAD_DELAY_MS);
+    var api = currentReaderII();
+    if (!api) {
+      if (env.toastr && typeof env.toastr.warning === 'function') env.toastr.warning('夜梦助手还没有就绪，请稍后再试', 'Reader-II');
+      return Promise.resolve(false);
+    }
+    api.agent.open(tab || 'chat');
+    return Promise.resolve(true);
   }
 
   API.getReaderII = currentReaderII;
-  API.loadReaderII = ensureReaderII;
+  API.loadReaderII = function () {
+    var api = currentReaderII();
+    return api ? Promise.resolve(api) : Promise.reject(new Error('夜梦助手还没有就绪'));
+  };
   API.openAgent = openAgent;
-  installAgentPlaceholder();
+  API.isEnabled = isEnabled;
+  API.setEnabled = setEnabled;
+  API.hasChat = hasChat;
+  API.absorbNativeUpdate = absorbNativeUpdate;
+  API.hostMvu = function () { return mvu.hostMvu(); };
+  /* 最后一楼的变量（还没有时是往前找到的那一份）：提示词模板的 getvar 读它。 */
+  API.readFloor = readMvuData;
+  /* 旧版世界书挂在这张卡上：这张卡之前就在用 Reader，没有明确开关过就记为启用。 */
+  API.adoptLegacyCard = function () { return cardFlag() === undefined ? setEnabled(true) : Promise.resolve(isEnabled()); };
 
   var ui = modules.createUiBridge(API, env);
   API.openPanel = ui.openPanel;
-  if (typeof env.getButtonEvent === 'function') {
-    subscriptions.push(env.eventOn(env.getButtonEvent('Reader Core'), function () {
-      Promise.resolve(API.openPanel()).catch(function (error) {
-        env.console.warn('[ReaderCore] 面板打开失败', error);
-      });
-    }));
-    subscriptions.push(env.eventOn(env.getButtonEvent('夜梦助手'), function () { openAgent('chat'); }));
-  }
   var parser = modules.createEventParser(controller, env, economy, runtimeStore, semanticRouter);
   API.processMessageEvents = parser.processMessage;
   API.parseFpEvents = parser.parseFpEvents;
@@ -758,21 +727,25 @@
   root.ReaderCore = API;
   if (root.window) root.window.ReaderCore = API;
   try { host.ReaderCore = API; } catch (error) { /* same-origin is expected */ }
-  if (typeof env.initializeGlobal === 'function') {
-    try { env.initializeGlobal('ReaderCore', API); } catch (error) { /* already initialized */ }
-  }
-  /* 常驻壳 host.ReaderShell（reader-shell.js，取代旧的 reader-render-mount）：控制器 iframe、轻信挂载与登记，经 API.kit 订阅酒馆事件。 */
+  /* 常驻壳 host.ReaderShell（reader-shell.js）：控制器 iframe、轻信挂载与登记，经 API.kit 订阅酒馆事件。 */
   var shell = null;
   if (typeof modules.createShell === 'function') {
     try { shell = modules.createShell(API, env); } catch (error) { env.console.error('[ReaderCore] 常驻壳启动失败', error); }
   } else {
-    env.console.warn('[ReaderCore] 缺少 reader-shell 模块：轻信与读者菜单不会出现，请重新导入完整的脚本');
+    env.console.warn('[ReaderCore] 缺少 reader-shell 模块：轻信与读者菜单不会出现');
   }
   API.mountDreamSlots = shell ? shell.scan : function () { return 0; };
+  /* 提示词与正文处理（reader-prompt.js）：读者核心、变量列表、更新规则的注入，事件块与来信的显示。原先靠世界书与三条正则。 */
+  var prompt = null;
+  if (typeof modules.createPromptRuntime === 'function') {
+    try { prompt = modules.createPromptRuntime(API, env); } catch (error) { env.console.error('[ReaderCore] 提示词模块启动失败', error); }
+  }
+  API.prompt = prompt;
 
   var events = env.tavern_events || {};
   if (events.MESSAGE_SENT) {
     subscriptions.push(env.eventOn(events.MESSAGE_SENT, function (messageId) {
+      if (!isEnabled()) return;
       Promise.resolve(processCustomConditions(messageId)).catch(function (error) {
         env.console.warn('[ReaderCore] 自定义条件执行失败', error);
       });
@@ -781,30 +754,40 @@
   if (events.CHAT_CHANGED) {
     subscriptions.push(env.eventOn(events.CHAT_CHANGED, function () {
       ready = ensureNamespace();
-      ready.then(function () { return characterKeywordScanner.refresh(); }).catch(function (error) {
-        env.console.warn('[ReaderCore] 切换聊天后的角色关键词刷新失败', error);
+      ready.then(function () { return isEnabled() ? characterKeywordScanner.refresh() : null; }).catch(function (error) {
+        env.console.warn('[ReaderCore] 切换聊天后的初始化失败', error);
       });
     }));
   }
-  /* 小白X 在收到、重掷、删除、编辑楼层时改它的变量；MVU 有自己的事件（installHostTreeEvents），这里只管小白X。 */
+  ['MESSAGE_RECEIVED', 'MESSAGE_SENT'].forEach(function (name) {
+    if (!events[name]) return;
+    subscriptions.push(env.eventOn(events[name], function (messageId) {
+      Promise.resolve(absorbNativeUpdate(name === 'MESSAGE_RECEIVED' ? messageId : undefined)).catch(function (error) {
+        env.console.warn('[ReaderCore] 回复里的变量更新没能应用', error);
+      });
+    }));
+  });
+  /* 宿主卡的 MVU 可能比我们晚就绪：它就绪时会发这个事件（酒馆助手的 initializeGlobal）。 */
+  subscriptions.push(env.eventOn('global_Mvu_initialized', function () { hookHostMvu(); }));
+  /* 小白X 在收到、重掷、删除、编辑楼层时改它的变量；MVU 有自己的事件（hookHostMvu），这里只管小白X。 */
   ['MESSAGE_RECEIVED', 'MESSAGE_SWIPED', 'MESSAGE_DELETED', 'MESSAGE_EDITED', 'MESSAGE_UPDATED'].forEach(function (name) {
     if (!lwbHost || !events[name]) return;
     subscriptions.push(env.eventOn(events[name], function () {
-      if (lastHostKind !== 'lwb') return;
+      if (lastHostKind !== 'lwb' || !isEnabled()) return;
       setTimeout(function () { notify('host_tree_updated', null); }, 300);
     }));
   });
 
   function dispose() {
-    clearTimeout(autoloadTimer);
-    if (readerIICancel) readerIICancel();
+    if (prompt) {
+      try { prompt.dispose(); } catch (error) { env.console.warn('[ReaderCore] 提示词模块停止失败', error); }
+    }
     if (shell) {
       try { shell.stop(); } catch (error) { env.console.warn('[ReaderCore] 常驻壳停止失败', error); }
     }
     subscriptions.splice(0).forEach(function (handle) {
       try { if (handle && typeof handle.stop === 'function') handle.stop(); } catch (error) { /* ignore */ }
     });
-    try { if (host.ReaderAgent && host.ReaderAgent.__readerCorePlaceholder) delete host.ReaderAgent; } catch (error) { /* ignore */ }
   }
   API.dispose = dispose;
   try {
@@ -814,7 +797,6 @@
   ready.then(function () {
     return characterKeywordScanner.install(mvu, root);
   }).then(function () {
-    scheduleAutoload();
     env.console.info('[ReaderCore] initialized', modules.BUILD_VERSION || modules.VERSION);
   }).catch(function (error) {
     env.console.error('[ReaderCore] initialization failed', error);

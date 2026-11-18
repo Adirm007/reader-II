@@ -180,6 +180,28 @@
       catch (error) { return Promise.reject(error); }
     }
 
+    /*
+     * 宿主函数都在调用时解析：酒馆助手可能晚于扩展就绪，也可能根本没装。
+     *   lazy(name)    酒馆助手有就用它的；没有就用原生实现（reader-native-host.js：直接读写酒馆自己的数据，存放位置与酒馆助手相同）。
+     *   dynamic(name) 只认酒馆助手的（生成类：原生的生成走模型网关，不能再绕回这里）。
+     */
+    var nativeHelper = null;
+    function nativeHost() {
+      if (!nativeHelper && typeof modules.createNativeHelper === 'function') nativeHelper = modules.createNativeHelper(env);
+      return nativeHelper;
+    }
+    function lazy(name) {
+      return function () {
+        var fn = resolveFunction(name);
+        if (typeof fn !== 'function') {
+          var fallback = nativeHost();
+          fn = fallback && typeof fallback[name] === 'function' ? fallback[name] : null;
+        }
+        if (typeof fn !== 'function') throw new Error('当前环境没有 ' + name + ' 接口');
+        return fn.apply(null, arguments);
+      };
+    }
+
     var env = {
       host: host,
       root: base,
@@ -193,21 +215,21 @@
       context: context,
       eventOn: eventOn,
       hostImport: hostImport,
+      nativeHost: nativeHost,
       getButtonEvent: find('getButtonEvent'),
-      getChatMessages: resolveFunction('getChatMessages'),
-      getVariables: resolveFunction('getVariables'),
-      insertOrAssignVariables: resolveFunction('insertOrAssignVariables'),
-      waitGlobalInitialized: find('waitGlobalInitialized'),
-      initializeGlobal: find('initializeGlobal') || find('initializeGlobalApi'),
-      generate: resolveFunction('generate'),
-      generateRaw: resolveFunction('generateRaw'),
-      getModelList: resolveFunction('getModelList'),
-      generateQuietPrompt: resolveFunction('generateQuietPrompt'),
-      injectPrompts: resolveFunction('injectPrompts'),
+      getChatMessages: lazy('getChatMessages'),
+      getVariables: lazy('getVariables'),
+      replaceVariables: lazy('replaceVariables'),
+      updateVariablesWith: lazy('updateVariablesWith'),
+      insertOrAssignVariables: lazy('insertOrAssignVariables'),
+      injectPrompts: lazy('injectPrompts'),
       storage: (function () { try { return host && host.localStorage || null; } catch (error) { return null; } })()
     };
+    ['waitGlobalInitialized', 'initializeGlobal', 'generate', 'generateRaw', 'getModelList', 'generateQuietPrompt'].forEach(function (name) {
+      Object.defineProperty(env, name, { enumerable: true, configurable: true, get: function () { return resolveFunction(name); } });
+    });
     Object.defineProperty(env, 'tavern_events', { enumerable: true, get: eventTypes });
-    if (overrides) Object.keys(overrides).forEach(function (key) { env[key] = overrides[key]; });
+    if (overrides) Object.keys(overrides).forEach(function (key) { Object.defineProperty(env, key, { enumerable: true, configurable: true, writable: true, value: overrides[key] }); });
     modules.migrateLocalKeys(env.storage);
     return env;
   }

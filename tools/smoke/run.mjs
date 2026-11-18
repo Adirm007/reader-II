@@ -1,30 +1,30 @@
 #!/usr/bin/env node
-/*
- * 无头浏览器冒烟：自己起一个静态服务器和无头 Chrome，逐步打印结果，用退出码表示成败。先 node build.mjs，冒烟加载的是 dist/ 里的包。
- *
- *   node tools/smoke/run.mjs          ① 酒馆扩展：host.html?auto=1 的两种模式（有 / 没有酒馆助手）
- *   node tools/smoke/run.mjs card     ② 卡内组件：card.html?auto=1 的两种模式
- *                                       - 装了扩展，127.0.0.1（完整场景，中途刷新一次进第二阶段）
- *                                       - 没装扩展，用本机的局域网地址打开（非安全上下文，没有 crypto.subtle）；
- *                                         ② 从 CDN 拉 ①，这里把 cdn.jsdelivr.net/gh/Adirm007/reader-II@main/ 换成本地文件
- *                                     其余外网请求一律拦下（图片回一个 1×1 PNG），并经调试协议收集页面与所有 iframe 里的异常和 console.error。
- *   CHROME=/path/to/chrome node tools/smoke/run.mjs [card]
- *
- * 只用 Node 标准库（需要 Node 22+ 的全局 WebSocket）。不用 --virtual-time-budget：
- * IndexedDB 这类真实的异步操作在虚拟时间里跑不完。
+/* 只用 Node 标准库的浏览器冒烟。加载 dist/，请在界面完成后先构建。
+ * node tools/smoke/run.mjs                 扩展助手，有/无酒馆助手
+ * node tools/smoke/run.mjs card            按卡启用，有插件/无酒馆助手且无 MVU
+ * node tools/smoke/run.mjs [card] --shots <目录>
+ *   第一种模式存三主题 × 桌面/手机 × 大厅/对话/记忆/设置顶部/语义适配，共 30 张 PNG。
+ * CHROME=/usr/bin/google-chrome 可指定浏览器。外网只给图片占位，其余请求拦下。
  */
 import http from 'node:http';
 import { spawn } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
+import { readFile, mkdir, writeFile } from 'node:fs/promises';
 import { mkdtempSync, rmSync } from 'node:fs';
-import { networkInterfaces, tmpdir } from 'node:os';
-import { dirname, extname, join, normalize, sep } from 'node:path';
+import { tmpdir } from 'node:os';
+import { dirname, extname, join, normalize, sep, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
-const SUITE = process.argv[2] === 'card' ? 'card' : 'ext';
-const MODES = [['有酒馆助手', 'auto=1'], ['没有酒馆助手', 'auto=1&th=0']];
-const CDN = 'https://cdn.jsdelivr.net/gh/Adirm007/reader-II@main/';
+const args = process.argv.slice(2);
+let SUITE = 'ext', SHOTS = null;
+for (let i = 0; i < args.length; i++) {
+  if (args[i] === 'card' || args[i] === 'ext') SUITE = args[i];
+  else if (args[i] === '--shots' && args[i + 1] && !args[i + 1].startsWith('--')) SHOTS = resolve(args[++i]);
+  else throw new Error('用法：node tools/smoke/run.mjs [ext|card] [--shots <目录>]');
+}
+const MODES = SUITE === 'card'
+  ? [['有酒馆助手与 MVU', 'auto=1'], ['原生宿主：没有酒馆助手、没有 MVU', 'auto=1&native=1']]
+  : [['有酒馆助手', 'auto=1'], ['没有酒馆助手', 'auto=1&th=0']];
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8', '.json': 'application/json', '.md': 'text/markdown; charset=utf-8', '.css': 'text/css' };
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -47,14 +47,7 @@ function serve(host) {
       response.end('not found');
     }
   });
-  return new Promise((resolve) => server.listen(0, host, () => resolve(server)));
-}
-
-function lanAddress() {
-  for (const list of Object.values(networkInterfaces())) {
-    for (const item of list || []) if (item.family === 'IPv4' && !item.internal) return item.address;
-  }
-  return null;
+  return new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, host, () => resolve(server)); });
 }
 
 function launch(profile) {
@@ -62,7 +55,7 @@ function launch(profile) {
   const child = spawn(binary, ['--headless=new', '--no-sandbox', '--disable-gpu', '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank'], { stdio: ['ignore', 'ignore', 'pipe'] });
   return new Promise((resolve, reject) => {
     let buffer = '';
-    const timer = setTimeout(() => reject(new Error('浏览器没有在 20 秒内启动')), 20000);
+    const timer = setTimeout(() => { child.kill(); reject(new Error('浏览器没有在 20 秒内启动')); }, 20000);
     child.stderr.on('data', (chunk) => {
       buffer += chunk;
       const match = buffer.match(/DevTools listening on (ws:\/\/\S+)/);
@@ -98,127 +91,129 @@ function connect(endpoint) {
   });
 }
 
-async function runPage(cdp, url) {
-  const { targetId } = await cdp.send('Target.createTarget', { url });
-  const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
-  const evaluate = async (expression) => (await cdp.send('Runtime.evaluate', { expression, returnByValue: true }, sessionId)).result.value;
-  const started = Date.now();
-  let title = '';
-  while (Date.now() - started < 120000) {
-    title = await evaluate('document.title').catch(() => '');
-    if (/^SMOKE (PASS|FAIL)/.test(title)) break;
-    await sleep(250);
+async function captureShots(cdp, sessionId, evaluate) {
+  await mkdir(SHOTS, { recursive: true });
+  let count = 0;
+  // 截图时按「减少动态效果」渲染：界面的过渡动画随之关掉，不会截到页签淡入淡出的中间态。
+  await cdp.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] }, sessionId);
+  try {
+    for (const theme of ['cafe', 'summer', 'ink']) {
+      for (const [viewport, width, height, deviceScaleFactor, mobile] of [
+        ['desktop', 1280, 800, 1, false], ['mobile', 375, 812, 2, true],
+      ]) {
+        await cdp.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor, mobile }, sessionId);
+        for (const page of ['lobby', 'chat', 'memory', 'settings', 'panel']) {
+          await evaluate(`window.__smokeView(${JSON.stringify(theme)}, ${JSON.stringify(page)})`);
+          const { data } = await cdp.send('Page.captureScreenshot', { format: 'png', fromSurface: true, captureBeyondViewport: false }, sessionId);
+          await writeFile(join(SHOTS, `${theme}-${viewport}-${page}.png`), Buffer.from(data, 'base64'));
+          count++;
+        }
+      }
+    }
+  } finally {
+    await cdp.send('Emulation.clearDeviceMetricsOverride', {}, sessionId);
+    await cdp.send('Emulation.setEmulatedMedia', { features: [] }, sessionId).catch(() => {});
   }
-  const log = await evaluate("document.getElementById('smoke-log').innerText").catch(() => '');
-  await cdp.send('Target.closeTarget', { targetId }).catch(() => {});
-  return { title, log };
+  return count;
 }
 
-/* ② 的一页：拦外网请求（CDN 换成本地文件）、收集异常与 console.error / warning，等标题出结果（第一阶段会刷新一次）。 */
-async function runCardPage(cdp, url) {
+async function runPage(cdp, url, shots) {
   const { targetId } = await cdp.send('Target.createTarget', { url: 'about:blank' });
   const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
-  const errors = [], warnings = [], blocked = [], served = [];
-  const text = (args) => args.map((arg) => (arg.value !== undefined ? String(arg.value) : arg.description || arg.type)).join(' ');
+  const errors = [], warnings = [], blocked = [];
+  const evaluate = async (expression) => {
+    const result = await cdp.send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true }, sessionId);
+    if (result.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description || result.exceptionDetails.text);
+    return result.result.value;
+  };
+  const eventText = (args) => args.map((arg) => String(arg.value ?? arg.description ?? arg.type)).join(' ');
   const onEvent = async (message) => {
     if (message.sessionId !== sessionId) return;
     if (message.method === 'Runtime.exceptionThrown') {
       const details = message.params.exceptionDetails;
-      errors.push('异常：' + (details.exception && details.exception.description || details.text).split('\n').slice(0, 3).join(' | '));
+      errors.push((details.exception?.description || details.text).split('\n').slice(0, 3).join(' | '));
     } else if (message.method === 'Runtime.consoleAPICalled') {
-      const type = message.params.type;
-      if (type === 'error' || type === 'assert') errors.push('console.error：' + text(message.params.args).slice(0, 400));
-      else if (type === 'warning') warnings.push(text(message.params.args).slice(0, 300));
+      const { type, args } = message.params;
+      if (type === 'error' || type === 'assert') errors.push(eventText(args).slice(0, 400));
+      else if (type === 'warning') warnings.push(eventText(args).slice(0, 300));
     } else if (message.method === 'Fetch.requestPaused') {
       const { requestId, request, resourceType } = message.params;
       try {
-        if (request.url.startsWith(CDN)) {
-          const path = new URL(request.url).pathname.slice(new URL(CDN).pathname.length);
-          let body;
-          try { body = await readFile(inside('/' + path)); } catch { body = null; }
-          served.push(path + (body ? '' : '（本地没有，回 404）'));
-          await cdp.send('Fetch.fulfillRequest', {
-            requestId, responseCode: body ? 200 : 404, body: (body || Buffer.from('not found')).toString('base64'),
-            responseHeaders: [{ name: 'Content-Type', value: TYPES[extname(path)] || 'application/octet-stream' }, { name: 'Access-Control-Allow-Origin', value: '*' }],
-          }, sessionId);
-        } else if (resourceType === 'Image') {
+        if (resourceType === 'Image') {
           await cdp.send('Fetch.fulfillRequest', { requestId, responseCode: 200, body: PNG.toString('base64'), responseHeaders: [{ name: 'Content-Type', value: 'image/png' }] }, sessionId);
         } else {
-          blocked.push(`${resourceType} ${request.url.slice(0, 120)}`);
+          blocked.push(resourceType + ' ' + request.url);
           await cdp.send('Fetch.failRequest', { requestId, errorReason: 'BlockedByClient' }, sessionId);
         }
-      } catch (error) {
-        errors.push('运行器处理请求失败：' + error.message);
-      }
+      } catch (error) { errors.push('拦截请求失败：' + error.message); }
     }
   };
   cdp.listeners.add(onEvent);
-  await cdp.send('Runtime.enable', {}, sessionId);
-  await cdp.send('Fetch.enable', { patterns: [{ urlPattern: 'https://*', requestStage: 'Request' }] }, sessionId);
-  await cdp.send('Page.navigate', { url }, sessionId);
-  const evaluate = async (expression) => (await cdp.send('Runtime.evaluate', { expression, returnByValue: true }, sessionId)).result.value;
-  const started = Date.now();
-  let title = '';
-  while (Date.now() - started < 180000) {
-    title = await evaluate('document.title').catch(() => '');
-    if (/^SMOKE (PASS|FAIL)/.test(title)) break;
-    await sleep(300);
+  try {
+    await cdp.send('Runtime.enable', {}, sessionId);
+    await cdp.send('Page.enable', {}, sessionId);
+    await cdp.send('Fetch.enable', { patterns: [{ urlPattern: 'https://*', requestStage: 'Request' }, { urlPattern: 'http://*', requestStage: 'Request' }] }, sessionId);
+    // 本机静态资源直接放行；假 API 在页面内拦截，不接触真实服务。
+    const originalListener = onEvent;
+    cdp.listeners.delete(onEvent);
+    const filtered = (message) => {
+      if (message.sessionId === sessionId && message.method === 'Fetch.requestPaused' && message.params.request.url.startsWith(new URL(url).origin + '/')) {
+        cdp.send('Fetch.continueRequest', { requestId: message.params.requestId }, sessionId).catch((error) => errors.push(error.message));
+      } else return originalListener(message);
+    };
+    cdp.listeners.add(filtered);
+    try {
+      await cdp.send('Page.navigate', { url }, sessionId);
+      const started = Date.now();
+      let title = '';
+      while (Date.now() - started < 180000) {
+        title = await evaluate('document.title').catch(() => '');
+        if (/^SMOKE (PASS|FAIL)/.test(title)) break;
+        await sleep(250);
+      }
+      const log = await evaluate("document.getElementById('smoke-log')?.innerText || ''").catch(() => '');
+      let shotCount = 0;
+      if (shots) {
+        try { shotCount = await captureShots(cdp, sessionId, evaluate); }
+        catch (error) { errors.push('截图失败：' + error.message); }
+      }
+      return { title, log, errors, warnings, blocked, shotCount };
+    } finally { cdp.listeners.delete(filtered); }
+  } finally {
+    cdp.listeners.delete(onEvent);
+    await cdp.send('Target.closeTarget', { targetId }).catch(() => {});
   }
-  const log = await evaluate("document.getElementById('smoke-log').innerText").catch(() => '');
-  const missing = await evaluate("JSON.stringify({ helper: [...window.__mock.helperMissing], mvu: [...window.__mock.mvuMissing] })").catch(() => '{}');
-  cdp.listeners.delete(onEvent);
-  await cdp.send('Target.closeTarget', { targetId }).catch(() => {});
-  return { title, log, errors, warnings, blocked, served, missing: JSON.parse(missing || '{}') };
 }
 
-async function runExtension(cdp, port) {
+async function runSuite(cdp, port) {
   let failed = false;
-  for (const [label, query] of MODES) {
-    const outcome = await runPage(cdp, `http://127.0.0.1:${port}/tools/smoke/host.html?${query}`);
-    const ok = /^SMOKE PASS/.test(outcome.title);
-    failed = failed || !ok;
-    console.log(`\n== ${label} ==  ${outcome.title || '没有跑完（120 秒内没有出结果）'}`);
+  for (const [index, [label, query]] of MODES.entries()) {
+    const page = SUITE === 'card' ? 'card.html' : 'host.html';
+    const outcome = await runPage(cdp, `http://127.0.0.1:${port}/tools/smoke/${page}?${query}`, SHOTS && index === 0);
+    failed ||= !/^SMOKE PASS/.test(outcome.title) || outcome.errors.length > 0;
+    console.log(`\n== ${label} == ${outcome.title || '180 秒内没有结果'}`);
     console.log(outcome.log.split('\n').filter((line) => /^(PASS|FAIL)/.test(line)).map((line) => '  ' + line).join('\n'));
-  }
-  return failed;
-}
-
-async function runCard(cdp, port) {
-  const lan = lanAddress();
-  const modes = [['② 装了扩展 · 127.0.0.1', `http://127.0.0.1:${port}/tools/smoke/card.html?auto=1`]];
-  if (lan) modes.push([`② 没装扩展 · 局域网 HTTP ${lan}（非安全上下文）`, `http://${lan}:${port}/tools/smoke/card.html?auto=1&ext=0`]);
-  else console.log('\n（本机没有局域网 IPv4 地址，跳过「没装扩展 · 非安全上下文」那一遍）');
-  let failed = false;
-  for (const [label, url] of modes) {
-    const outcome = await runCardPage(cdp, url);
-    const clean = outcome.errors.length === 0;
-    const ok = /^SMOKE PASS/.test(outcome.title) && clean;
-    failed = failed || !ok;
-    console.log(`\n== ${label} ==  ${outcome.title || '没有跑完（180 秒内没有出结果）'}`);
-    console.log(outcome.log.split('\n').filter((line) => /^(PASS|FAIL)/.test(line)).map((line) => '  ' + line).join('\n'));
-    console.log(`  ${clean ? 'PASS' : 'FAIL'}  全程（含所有 iframe）没有异常与 console.error${clean ? '' : '：\n' + outcome.errors.map((line) => '        ' + line).join('\n')}`);
-    if (outcome.warnings.length) console.log(`  （console.warn ${outcome.warnings.length} 条）\n` + [...new Set(outcome.warnings)].slice(0, 12).map((line) => '        ' + line).join('\n'));
-    if (outcome.served.length) console.log(`  （CDN 换成本地文件 ${outcome.served.length} 个：${[...new Set(outcome.served)].slice(0, 6).join('、')}）`);
-    if (outcome.blocked.length) console.log(`  （拦下的外网请求 ${outcome.blocked.length} 个）\n` + [...new Set(outcome.blocked)].slice(0, 8).map((line) => '        ' + line).join('\n'));
-    const missing = [...(outcome.missing.helper || []).map((name) => 'TavernHelper.' + name), ...(outcome.missing.mvu || []).map((name) => 'Mvu.' + name)];
-    if (missing.length) console.log(`  （读过但假酒馆没实现的接口：${missing.join('、')}）`);
+    for (const error of outcome.errors) console.log('  FAIL 浏览器异常：' + error);
+    if (outcome.warnings.length) console.log('  console.warn：' + [...new Set(outcome.warnings)].join(' | '));
+    if (outcome.blocked.length) console.log(`  已拦外网请求 ${outcome.blocked.length} 个`);
+    if (outcome.shotCount) console.log(`  截图 ${outcome.shotCount} 张：${SHOTS}`);
   }
   return failed;
 }
 
 async function main() {
   const profile = mkdtempSync(join(tmpdir(), 'reader-ii-smoke-'));
-  const server = await serve(SUITE === 'card' ? '0.0.0.0' : '127.0.0.1');
-  let browser = null;
+  let server = null, browser = null, cdp = null;
   let failed = false;
   try {
+    server = await serve('127.0.0.1');
     browser = await launch(profile);
-    const cdp = await connect(browser.endpoint);
-    failed = SUITE === 'card' ? await runCard(cdp, server.address().port) : await runExtension(cdp, server.address().port);
-    cdp.close();
+    cdp = await connect(browser.endpoint);
+    failed = await runSuite(cdp, server.address().port);
   } finally {
+    if (cdp) cdp.close();
     if (browser) browser.child.kill();
-    server.close();
+    if (server) server.close();
     await sleep(300);
     try { rmSync(profile, { recursive: true, force: true }); } catch { /* 浏览器还占着就留给系统清理 */ }
   }

@@ -74,7 +74,7 @@ async function main() {
   });
 
   await step('记忆不在无关聊天里自动注入', async () => {
-    /* 假酒馆的聊天没有 Reader-II 卡内组件的痕迹：默认范围下不该有记忆注入，也不该为整理而调用模型。 */
+    /* 假酒馆的聊天没有 Reader-II 启用标记：默认范围下不该有记忆注入，也不该为整理而调用模型。 */
     await sleep(200);
     const injected = mock.prompts['reader-ii-memory'];
     assert(!injected || !(injected.text || injected.content), '在没用 Reader-II 的聊天里注入了记忆');
@@ -87,15 +87,19 @@ async function main() {
     assert(mock.slash.some((command) => command.name === 'yume'), '没有注册 /yume');
   });
 
-  await step('点菜单打开面板（<dialog> 顶层）', async () => {
+  await step('菜单进入大厅，再从服务台打开助手（<dialog> 顶层）', async () => {
+    assert($('#reader-ii-menu').textContent.includes('Reader-II · 大厅'), '菜单名称不对');
     $('#reader-ii-menu').click();
+    await until(() => $('#dlb-overlay'), '大厅', 20000);
+    await window.ReaderII.lobby.open('eggs');
+    (await until(() => $('[data-dlb="eggagent"]'), '服务台对话入口')).click();
     const overlay = await until(() => $('#reader-agent-overlay'), '面板');
     assert(overlay.open, '面板没有处于打开状态');
     assert($('#ra-text') && $('#ra-send'), '缺少输入框或发送按钮');
     const rect = overlay.getBoundingClientRect();
     assert(rect.width > 200 && rect.height > 200, `面板尺寸异常 ${rect.width}x${rect.height}`);
     assert(!/undefined|\[object /.test(overlay.textContent), '面板文字里出现了 undefined：' + ($('#ra-foot-text')?.textContent || ''));
-    assert(/权限：单卡/.test($('#ra-foot-text').textContent), '底栏没有显示权限档位');
+    assert($('#ra-tool-mode[data-mode="native"], #ra-tool-mode[data-mode="text"], #ra-tool-mode[data-mode="none"]'), '底栏没有显示工具调用方式');
     assert(document.documentElement.scrollWidth <= window.innerWidth + 1, '页面出现了横向滚动');
     return `${Math.round(rect.width)}×${Math.round(rect.height)} @ ${window.innerWidth}×${window.innerHeight}`;
   });
@@ -198,7 +202,7 @@ async function main() {
     agent.saveSettings({ lite: false, mode: 'card' });
   });
 
-  await step('设置页：检查更新与卡内组件（本机当假远端）', async () => {
+  await step('设置页：只检查版本（本机当假远端）', async () => {
     $('#reader-agent-overlay [data-tab="settings"]').click();
     const box = await until(() => $('#ra-upd-remotes'), '更新源输入框');
     box.value = location.origin + '/';
@@ -207,9 +211,7 @@ async function main() {
     $('#reader-agent-overlay [data-act="upd-check"]').click();
     const checked = await until(() => { const text = $('#ra-upd-out')?.textContent || ''; return /已是最新|检查失败|有新版本|还新/.test(text) && text; }, '检查更新的结果');
     assert(/已是最新/.test(checked), '本机与扩展是同一版本，应当显示已是最新：' + checked.slice(0, 160));
-    $('#reader-agent-overlay [data-act="upd-inspect"]').click();
-    const listed = await until(() => { const text = $('#ra-upd-out')?.textContent || ''; return /全部校验通过|失败/.test(text) && text; }, '卡内组件清单', 20000);
-    assert(/全部校验通过/.test(listed) && /主脚本/.test(listed) && /世界书/.test(listed) && /正则/.test(listed), '卡内组件清单不对：' + listed.slice(0, 200));
+    assert(!document.querySelector('[data-act="upd-inspect"], [data-act="upd-apply"], #ra-upd-scope'), '仍有旧组件更新入口');
   });
 
   /* ---------- 联网、MCP、后端伴侣（交接 0.6 乙组）；假对端在 host.html 里 ---------- */

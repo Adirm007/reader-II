@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Reader-II 冒烟宿主 ②（假酒馆）</title>
+<title>Reader-II 按卡启用冒烟宿主（假酒馆）</title>
 <style>
   body { font: 14px/1.6 system-ui, sans-serif; background: #15171c; color: #d8dce6; margin: 0; padding: 16px; }
   h3 { margin: 0 0 8px; }
@@ -19,28 +19,17 @@
 </style>
 </head>
 <body>
-<!--
-  假酒馆 ②：在浏览器里冒烟卡内组件（dist/reader-ii.script.json + 世界书 + 三条正则），先跑 node build.mjs。
-    card.html                    手动试：扩展 ①（index.js）也装着；点「Reader Core」「夜梦助手」按钮
-    card.html?ext=0              没装扩展：② 要用夜梦助手时从 CDN 拉 ①（命令行冒烟里由运行器把 CDN 换成本地 dist/）
-    card.html?auto=1             自动跑一遍脚本化场景（会清空本机的 reader_ii_* 与 dream_* 键），结果写在页面底部与标题里
-  命令行：node tools/smoke/run.mjs card（自己起服务器和无头 Chrome，两种模式各跑一遍，并收集所有 iframe 里的报错）。
--->
-<h3>假酒馆宿主 · ② 卡内组件</h3>
-<div class="bar"><div id="extensionsMenu"></div><span>酒馆助手脚本按钮：</span><div id="th-buttons" class="bar"></div></div>
+<!-- 只加载 index.js；?native=1 不提供酒馆助手和 MVU。 -->
+<h3>假酒馆宿主 · 按卡启用</h3>
+<div class="bar"><div id="extensionsMenu"></div></div>
 <div id="chat"></div>
 <div id="send_form"><textarea id="send_textarea"></textarea><button id="send_but" type="button">发送</button></div>
 <pre id="smoke-log">（冒烟结果会写在这里）</pre>
 
 <script src="./card-tavern.js"></script>
-<script>
-  if (new URLSearchParams(location.search).get('ext') !== '0') {
-    const entry = document.createElement('script');
-    entry.type = 'module';
-    entry.src = '../../index.js';
-    document.head.appendChild(entry);
-  }
-</script>
+<script src="./card-predefine.js"></script>
+<script src="./surfaces.js"></script>
+<script type="module" src="../../index.js"></script>
 <script type="module" src="./card-scenario.js"></script>
 </body>
 </html>

@@ -102,7 +102,9 @@
       updates: updates,
       netUi: function (panel) { return modules.createNetUi(env, kit, agent, { net: net, secrets: secrets, mcp: mcp, companion: companion, web: web }, panel); },
       shell: function () { return host.ReaderShell || null; },
-      core: function () { return host.ReaderCore && host.ReaderCore.__reader_core_api ? host.ReaderCore : null; }
+      core: function () { return host.ReaderCore && host.ReaderCore.__reader_core_api ? host.ReaderCore : null; },
+      /* 下面才定义的 lobby：助手窗口的「服务台」返回按钮与设置页「这张卡」的开关要用。 */
+      lobby: function () { return lobby; }
     });
 
     try { memory.install(); } catch (error) { env.console.warn('[ReaderII] 记忆系统启动失败', error); }
@@ -110,9 +112,63 @@
     skills.loadUserSkills().catch(function () { /* 工作区不可用时没有用户知识 */ });
     mcp.load().catch(function () { /* 没有缓存就等用户点刷新 */ });
 
+    /*
+     * 读者大厅：所有入口的去处（扩展菜单里的「Reader-II · 大厅」与不带内容的 /yume）。
+     * Reader 按角色卡启用：这张卡还没启用时先问一句——启用并进大厅，或者只用夜梦助手（她在任何聊天里都能用）。
+     */
+    function toast(kind, text) {
+      var toastr = env.toastr || host.toastr;
+      if (toastr && typeof toastr[kind] === 'function') toastr[kind](text, 'Reader-II');
+      else env.console.info('[ReaderII] ' + text);
+    }
+    function currentCore() { return host.ReaderCore && host.ReaderCore.__reader_core_api ? host.ReaderCore : null; }
+
+    async function askEnable() {
+      var ctx = kit.context() || {};
+      var name = kit.names().char;
+      var text = '要在「' + name + '」这张卡上启用 Reader-II 吗？\n\n启用后，九十九夜梦会读这个故事、偶尔来信，读者大厅（定调、命运抽卡等）也在这张卡上可用；她的设定会随每次生成一起发给模型。之后随时可以在「彩蛋服务台 → 助手设置」里关掉。';
+      if (typeof ctx.callGenericPopup === 'function' && ctx.POPUP_TYPE) {
+        var html = '<div style="text-align:left;line-height:1.7">' + text.replace(/[&<>]/g, function (ch) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;' }[ch]; }).replace(/\n/g, '<br>') + '</div>';
+        try {
+          var picked = await ctx.callGenericPopup(html, ctx.POPUP_TYPE.CONFIRM, '', {
+            okButton: '启用并进入大厅', cancelButton: '先不用',
+            customButtons: [{ text: '只用夜梦助手', result: 77 }]
+          });
+          if (picked === 77) return 'agent';
+          return picked === 1 || picked === true ? 'enable' : 'cancel';
+        } catch (error) { /* 弹窗出不来就用浏览器自带的 */ }
+      }
+      return typeof host.confirm === 'function' && host.confirm(text) ? 'enable' : 'cancel';
+    }
+
+    var lobby = {
+      isEnabled: function () { var core = currentCore(); return !!core && core.isEnabled(); },
+      enable: function () { var core = currentCore(); return core ? core.setEnabled(true) : Promise.reject(new Error('读者还没有就绪')); },
+      disable: function () { var core = currentCore(); return core ? core.setEnabled(false) : Promise.reject(new Error('读者还没有就绪')); },
+      /* page：lobby（默认）或大厅里的某一页，如 eggs（彩蛋服务台）。返回是否打开了大厅。 */
+      open: async function (page) {
+        var core = currentCore();
+        var shell = host.ReaderShell;
+        if (!core || !shell || typeof shell.open !== 'function') { toast('warning', '读者界面还没有就绪，请稍等一下再试'); return false; }
+        if (!core.hasChat()) { toast('info', '请先打开一个聊天，再进读者大厅'); return false; }
+        if (!core.isEnabled()) {
+          var choice = await askEnable();
+          if (choice === 'agent') { ui.open('chat'); return false; }
+          if (choice !== 'enable') return false;
+          try { await core.setEnabled(true); }
+          catch (error) { toast('error', '启用失败：' + String(error && error.message || error)); return false; }
+        }
+        var opened = false;
+        try { opened = await shell.open(page || 'lobby'); } catch (error) { env.console.warn('[ReaderII] 大厅打开失败', error); }
+        if (!opened) toast('warning', '大厅没能打开：读者界面可能还在准备，稍等几秒再点一次');
+        return !!opened;
+      }
+    };
+
     var api = {
       version: modules.READER_AGENT_VERSION, ready: true, carrier: env.carrier,
       agent: Object.assign(agent, { open: ui.open, close: ui.close }),
+      lobby: lobby,
       memory: memory, kit: kit, llm: llm, vfs: vfs, updates: updates, mcp: mcp, companion: companion, net: net,
       dispose: function () {
         try { ui.dispose(); } catch (error) { /* ignore */ }

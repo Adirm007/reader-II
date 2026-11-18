@@ -265,7 +265,10 @@
     tool({
       name: 'todo', effect: 'read', scope: 'workspace',
       summary: '多步骤的任务先列计划，做完一步更新一次。每次都给出完整清单。',
-      params: [{ name: 'items', type: 'json', required: true, desc: '数组，每项 { "text": 步骤, "status": "pending" | "doing" | "done" }' }],
+      params: [{
+        name: 'items', type: 'json', required: true, desc: '数组，每项 { "text": 步骤, "status": "pending" | "doing" | "done" }',
+        schema: { type: 'array', items: { type: 'object', properties: { text: { type: 'string' }, status: { type: 'string', enum: ['pending', 'doing', 'done'] } }, required: ['text'] } }
+      }],
       run: function (args, ctx) {
         var items = (Array.isArray(args.items) ? args.items : []).slice(0, 20).map(function (item) {
           var source = typeof item === 'string' ? { text: item } : item || {};
