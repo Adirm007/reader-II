@@ -141,6 +141,58 @@ function kimi(plan) {
   };
 }
 
+test('普通制卡请求从能力查询找到插件、预检同一权限，再打开并实际调用', async () => {
+  let writes = 0;
+  const asked = [];
+  const { agent, run, log } = makeHost({ backend: (body, turn) => {
+    const calls = [
+      nativeCall('capabilities', { query: '人物索引' }),
+      nativeCall('capabilities', { tool: 'card_index', args: { title: '旅人' } }),
+      nativeCall('toolbox', { name: 'card_notes' }),
+      nativeCall('card_index', { title: '旅人' }),
+    ];
+    return calls[turn - 1] ? reply({ tool_calls: [calls[turn - 1]] }) : reply({ content: '已建人物索引。' });
+  } });
+  agent.registerTool({ name: 'card_index', toolset: 'card_notes', summary: '建立人物索引', effect: 'write', scope: 'card',
+    params: [{ name: 'title', type: 'string', required: true }], run: () => { writes++; return { ok: true }; } });
+  const result = await run('给旅人建一条人物索引', { confirm: async (request) => { asked.push(request); return 'allow'; } });
+  assert.equal(result.error, '');
+  assert.equal(writes, 1);
+  same(asked.map((item) => item.name), ['card_index']);
+  const search = JSON.parse(log.backend[1].body.messages.at(-1).content);
+  assert.ok(search.tools.some((item) => item.name === 'card_index' && item.toolset === 'card_notes'));
+  const preview = JSON.parse(log.backend[2].body.messages.at(-1).content);
+  assert.equal(preview.open, false);
+  assert.equal(preview.permission.decision, 'ask');
+  assert.ok(log.backend[3].body.tools.some((item) => item.function.name === 'card_index'));
+});
+
+test('长调用整轮压缩，实际执行记录保留，原生协议无孤立工具消息', async () => {
+  const large = '长文本'.repeat(22000);
+  const { run, log } = makeHost({ backend: (body, turn) => {
+    if (turn === 1) return reply({ tool_calls: [nativeCall('write', { path: 'ws:/长稿', content: large }), nativeCall('ls', { path: 'ws:/' })] });
+    if (turn === 2) return reply({ tool_calls: [nativeCall('read', { path: 'ws:/长稿', limit: 1 })] });
+    return reply({ content: '写入后已回读。' });
+  } });
+  const result = await run('请写稿并回读');
+  assert.equal(result.error, '');
+  same(result.steps.map((item) => item.ok), [true, true, true]);
+  const messages = log.backend[1].body.messages;
+  assert.ok(!JSON.stringify(messages).includes(large));
+  assert.ok(messages.some((item) => item.content.includes('请写稿并回读')));
+  assert.match(messages.at(-1).content, /ws:\/长稿/);
+  assert.ok(!messages.some((item) => item.role === 'tool' || item.tool_calls));
+  const last = log.backend[2].body.messages;
+  assert.equal(last.at(-1).tool_call_id, last.at(-2).tool_calls[0].id);
+});
+
+test('历史轮数为零时不会把之前的聊天带入下一次请求', async () => {
+  const { run, log } = makeHost({ settings: { historyTurns: 0 }, backend: (body, turn) => reply({ content: '答复' + turn }) });
+  await run('旧聊天内容应留在面板');
+  await run('本次新问题');
+  same(log.backend.at(-1).body.messages.slice(1), [{ role: 'user', content: '本次新问题' }]);
+});
+
 test('原生函数调用：tools 随请求声明，调用取自 tool_calls，结果用 role: tool 交还；读 → 改（确认）→ 回答', async () => {
   const asked = [];
   const { run, log, worldbooks } = makeHost({

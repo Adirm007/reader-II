@@ -113,8 +113,9 @@
     };
   }
 
-  function createRuntimeStore(env) {
+  function createRuntimeStore(env, chatKey) {
     var memory = defaultRuntimeState();
+    var memoryChat = null;
 
     function context() {
       try {
@@ -133,7 +134,7 @@
         return ctx.chatMetadata.variables;
       }
       if (env && typeof env.getVariables === 'function') {
-        try { return env.getVariables({ type: 'chat' }) || {}; }
+        try { return env.getVariables({ type: 'chat' }) || null; }
         catch (error) { /* use in-memory fallback */ }
       }
       return null;
@@ -145,11 +146,15 @@
       if (typeof raw === 'string') {
         try { raw = JSON.parse(raw); } catch (error) { raw = null; }
       }
-      memory = normalizeRuntimeState(raw || memory);
+      var chat = chatKey();
+      /* 能读到聊天变量时，缺少运行记录就是一个新聊天。只在存储暂不可用时使用本聊天的内存副本。 */
+      memory = normalizeRuntimeState(vars ? raw : memoryChat === chat ? memory : null);
+      memoryChat = chat;
       return modules.clone(memory);
     }
 
     function persist(state) {
+      memoryChat = chatKey();
       memory = normalizeRuntimeState(state);
       var vars = variables();
       if (vars) vars[STORE_KEY] = modules.clone(memory);

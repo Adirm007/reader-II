@@ -203,6 +203,159 @@ async function bindCurrency(api, segments) {
   await api.confirmSemanticBinding('currency');
 }
 
+test('一键适配在世界书副本上验证空羁绊表，绕开背包外层；首条真实数据出现后重新校验', async () => {
+  const values = {
+    世界信息: { 位置: '车站' }, 羁绊列表: {}, 任务列表: {},
+    人物: {
+      技能树: { 技能列表: [{ 名称: '辨字' }] },
+      状态效果: { 夜视: { 效果: '夜间视物', 时长: '永久' } },
+      背包: { 通用币: 0, 道具: { 灯: { 数量: 2 }, 石: { 数量: 1 }, 钥匙: { 数量: 1 } } },
+    },
+  };
+  const reads = [];
+  const world = createWorld({ mvuData: { stat_data: structuredClone(values) }, host: {
+    getCharWorldbookNames: () => ({ primary: '本卡' }),
+    getWorldbook: async (name) => {
+      reads.push(name);
+      return [{ name: '[mvu_update]变量更新', content: '<JSONPatch>\n[{"op":"add","path":"/羁绊列表/示例","value":{"关系":{"亲密度":42}}}]\n</JSONPatch>' }];
+    },
+  } });
+  const { api } = world;
+  await api.ready();
+  const report = plain(await api.autoAdapt({ useLlm: false }));
+  assert.equal(report.boundCount, 7, JSON.stringify(report.slots));
+  assert.match(report.slots.find((item) => item.slot === 'characters').note, /本卡/);
+  assert.deepEqual(reads, ['本卡']);
+  assert.equal(api.getSemanticRouting().inventory.rootRef, ref('人物', '背包', '道具'));
+  assert.deepEqual(plain(await api.listInventory()).map((item) => item.name), ['灯', '石', '钥匙']);
+  const { READER, ...after } = world.mvuData.stat_data;
+  assert.deepEqual(after, values);
+  assert.deepEqual(plain(await api.listImportantCharacters()), []);
+  world.mvuData.stat_data.羁绊列表.小舟 = { 关系: { 亲密度: 72 } };
+  assert.deepEqual(plain(await api.listImportantCharacters()), [{ name: '小舟', favor: 72 }]);
+  api.dispose();
+});
+
+test('定向改绑只处理指定槽，失败保留原路由；显式声明空包形状，首次写入前复核实时数据', async () => {
+  const world = createWorld({ mvuData: { stat_data: { 背包: { 灯: 2 }, 新背包: {}, 未知: {} } } });
+  const { api } = world;
+  await api.ready();
+  await api.autoAdapt({ useLlm: false, roots: { inventory: ['背包'] } });
+  const before = plain(api.getSemanticMappingPreview('inventory'));
+  const failed = plain(await api.autoAdapt({ useLlm: false, roots: { inventory: ['未知'] } }));
+  assert.equal(failed.ok, false);
+  assert.equal(failed.slotCount, 1);
+  assert.equal(failed.slots[0].changed, false);
+  assert.match(failed.slots[0].reason, /空背包/);
+  assert.equal(failed.slots[0].path, 'stat_data.背包');
+  assert.deepEqual(plain(api.getSemanticMappingPreview('inventory')), before);
+  const corrected = plain(await api.autoAdapt({
+    useLlm: false, roots: { inventory: ['stat_data', '新背包'] },
+    mappings: { inventory: { entryKind: 'count', name: { from: 'key' }, fields: {} } },
+  }));
+  assert.equal(corrected.slots[0].changed, true);
+  assert.deepEqual(world.mvuData.stat_data.新背包, {});
+  const tx = structuredClone(world.mvuData);
+  tx.stat_data.新背包 = { 灯: { 描述: '不能作为数量' } };
+  assert.throws(() => api.tx.inventoryAdd(tx, { name: '绳' }), /必需语义/);
+  assert.deepEqual(tx.stat_data.新背包, { 灯: { 描述: '不能作为数量' } });
+  assert.equal(api.getSemanticRouting().inventory.status, 'broken');
+  api.dispose();
+});
+
+test('按卡的 YAML 变量更新规则分析空容器，拒绝引用其他节的字段，保留既有绑定', async () => {
+  let favor = '亲近';
+  const world = createWorld({ mvuData: { stat_data: { 关系: {}, 旧表: { 甲: { 好感度: 12 } } } }, host: {
+    getCharWorldbookNames: () => ({ primary: '本卡' }),
+    getWorldbook: async () => [{ name: '变量更新规则', content: '变量规则:\n  关系:\n    type: Record<姓名, { 亲近: number }>\n  其他:\n    type: {体重: number}' }],
+  } });
+  const { api } = world;
+  world.root.TavernHelper.generateRaw = async (config) => {
+    assert.match(config.user_input, /亲近/);
+    assert.doesNotMatch(config.user_input, /体重/);
+    return JSON.stringify({ version: 1, slot: 'characters', rootRef: ref('关系'), containerKind: 'object', name: { from: 'key' }, fields: { favor: { path: [favor] } } });
+  };
+  await api.ready();
+  await api.autoAdapt({ roots: { characters: ['旧表'] }, useLlm: false });
+  favor = '体重';
+  const wrong = plain(await api.autoAdapt({ roots: { characters: ['关系'] } }));
+  assert.equal(wrong.slots[0].changed, false);
+  assert.match(wrong.slots[0].reason, /规则里没有/);
+  assert.equal(api.getSemanticRouting().characters.rootRef, ref('旧表'));
+  favor = '亲近';
+  const verified = plain(await api.autoAdapt({ roots: { characters: ['关系'] } }));
+  assert.equal(verified.slots[0].changed, true, JSON.stringify(verified));
+  assert.match(verified.slots[0].note, /变量更新规则/);
+  assert.deepEqual(world.mvuData.stat_data.关系, {});
+  api.dispose();
+});
+
+test('手动与批量分析空容器共用卡内证据；等模型时换聊天不会提交映射', async () => {
+  const rules = { 羁绊列表: { 例: { 好感度: 88 } }, 人物: { 背包: ['灯'] } };
+  const read = [];
+  const world = createWorld({ mvuData: { stat_data: { 羁绊列表: {}, 人物: { 背包: [] } } }, host: {
+    getCharWorldbookNames: () => ({ primary: '设定' }),
+    getGlobalWorldbookNames: () => ['无关书'],
+    getWorldbook: async (book) => { read.push(book); return [{ name: '[initvar]', enabled: false, content: JSON.stringify(rules) }]; },
+  } });
+  const { api } = world;
+  await api.ready();
+  await api.selectSemanticRoot('characters', ref('羁绊列表'));
+  await api.selectSemanticRoot('inventory', ref('人物', '背包'));
+  const mappings = {
+    characters: { version: 1, slot: 'characters', rootRef: ref('羁绊列表'), containerKind: 'object', name: { from: 'key' }, fields: { favor: { path: ['好感度'] } } },
+    inventory: { version: 1, slot: 'inventory', rootRef: ref('人物', '背包'), containerKind: 'array', entryKind: 'name', name: { from: 'value' }, fields: {} },
+  };
+  world.root.TavernHelper.generateRaw = async () => JSON.stringify(mappings);
+  const draft = await api.analyzeLockedSemanticMappings();
+  assert.deepEqual(Object.keys(draft), ['characters', 'inventory']);
+  assert.deepEqual(read, ['设定']);
+  assert.deepEqual(plain(draft.characters.preview), []);
+  const oldDraft = plain(api.getSemanticMappingPreview('characters'));
+  world.root.TavernHelper.generateRaw = async () => {
+    world.context.getCurrentChatId = () => 'chat-2';
+    return JSON.stringify(mappings.characters);
+  };
+  await assert.rejects(api.analyzeSemanticMapping('characters'), /聊天或槽位绑定已改变/);
+  assert.deepEqual(plain(api.getSemanticMappingPreview('characters')), oldDraft);
+  api.dispose();
+});
+
+test('空槽只参考当前角色和聊天绑定的世界书，切换新聊天不会继承旧槽', async () => {
+  const reads = [];
+  const world = createWorld({ mvuData: { stat_data: { 关系列表: {} } }, host: {
+    getCharWorldbookNames: () => ({ primary: '本卡', additional: ['附加书'] }),
+    getChatWorldbookName: () => '本聊天',
+    getGlobalWorldbookNames: () => ['全局'],
+    getWorldbookNames: () => ['全局', '别的卡', '本卡', '附加书', '本聊天'],
+    getWorldbook: async (name) => {
+      reads.push(name);
+      return name === '本聊天' ? [{ name: '[initvar]', enabled: false, content: '{"关系列表":{"角色":{"好感":30}}}' }] : [];
+    },
+  } });
+  const { api } = world;
+  await api.ready();
+  const first = await api.autoAdapt({ roots: { characters: ['关系列表'] }, useLlm: false });
+  assert.equal(first.slots[0].changed, true);
+  assert.deepEqual(reads, ['本卡', '附加书', '本聊天']);
+  const originalMetadata = world.chatMetadata;
+  world.context.getCurrentChatId = () => 'new';
+  world.chatMetadata = { variables: {} };
+  assert.equal(api.getSemanticRouting().characters.status, 'unbound');
+  world.context.getCurrentChatId = () => 'chat-1';
+  world.chatMetadata = originalMetadata;
+  assert.equal(api.getSemanticRouting().characters.rootRef, ref('关系列表'));
+  api.dispose();
+});
+
+test('有宿主变量但 Reader 休眠时，适配提示真实启用入口', async () => {
+  const world = createWorld({ enabled: false, mvuData: { stat_data: { 金币: 20 } } });
+  await world.api.ready();
+  await assert.rejects(world.api.autoAdapt({ useLlm: false }), /设置 → 这张卡/);
+  assert.equal(world.api.getSemanticRouting().currency.status, 'unbound');
+  world.api.dispose();
+});
+
 /* ---------- 7.A.1 背包 codec 的不可叠加情形 ---------- */
 
 test('背包 codec：名字数组同名再放一条，移除时按件循环', () => {

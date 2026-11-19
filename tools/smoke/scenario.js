@@ -127,6 +127,34 @@ async function main() {
     assert(/人口三十万/.test(capital()), '被拒绝的修改还是写进去了');
   });
 
+  await step('对话：从受阻操作进入权限档位，保存后返回原任务', async () => {
+    const previous = agent.getSettings().mode;
+    agent.saveSettings({ mode: 'readonly' });
+    const original = capital();
+    mock.replies.push(call('edit', { path: 'wb:/设定集/王都', old: '人口三十万', new: '人口九万' }), '保留原文。');
+    $('#ra-text').value = '修改前让我看一下权限';
+    $('#ra-send').click();
+    try {
+      const open = await until(() => $('#ra-log [data-review="settings"]'), '档位调整入口');
+      assert(open.closest('.ra-confirm').textContent.includes('wb:/设定集/王都'), '没有显示实际操作目标');
+      open.click();
+      const mode = $('#ra-agent-card [data-s="a.mode"]');
+      assert(document.activeElement === mode && mode.value === 'readonly', '没有定位到权限档位');
+      mode.value = previous;
+      $('#reader-agent-overlay [data-act="save-settings"]').click();
+      assert($('#reader-agent-overlay [data-pane="chat"]').classList.contains('is-on'), '保存设置后没有返回对话');
+      $('#ra-log [data-review="retry"]').click();
+      await sleep(50);
+      assert(agent.isBusy() && !$('#ra-log [data-answer="allow"]'), '模拟点击触发了待执行的写入');
+      $('#ra-log [data-review="skip"]').click();
+      await until(() => !agent.isBusy(), '结束本次权限等待');
+      assert(capital() === original, '跳过后仍然写入');
+    } finally {
+      if (agent.isBusy()) $('#ra-send').click();
+      agent.saveSettings({ mode: previous });
+    }
+  });
+
   await step('沙箱脚本 run_js（隔离 iframe）', async () => {
     const before = mock.llmCalls.length;
     /* 沙箱里伸手去够酒馆应当被浏览器拦下（跨源）。 */
@@ -137,6 +165,30 @@ async function main() {
     assert(/reach=blocked/.test(feedback), '沙箱竟然能碰到酒馆页面：' + feedback.slice(0, 200));
     assert(!document.querySelector('iframe[sandbox]'), '沙箱 iframe 没有清理');
     return feedback.match(/输出：\n([^\n]*)/)?.[1] || '';
+  });
+
+  await step('工具轮数：从对话底栏保存，触顶可在当前任务中选择汇总', async () => {
+    $('#ra-tool-mode').click();
+    const budget = await until(() => $('#ra-tools-card [data-s="a.maxSteps"]'), '每项任务的工具轮数');
+    assert(Number(budget.max) >= 200, '大任务预算不可选');
+    budget.value = '1';
+    $('#reader-agent-overlay [data-act="save-settings"]').click();
+    $('#reader-agent-overlay [data-tab="chat"]').click();
+    assert(/1 轮$/.test($('#ra-tool-mode').textContent), '对话底栏没有更新');
+    const before = capital();
+    mock.replies.push(call('read', { path: 'wb:/设定集/王都' }), call('edit', { path: 'wb:/设定集/王都', old: '人口三十万', new: '人口九万' }), '已按要求汇总。');
+    $('#ra-text').value = '读完还想写时先等我决定';
+    $('#ra-send').click();
+    try {
+      const proceed = await until(() => $('#ra-log [data-budget="continue"]'), '预算用完的选择');
+      assert(proceed.closest('.ra-confirm').textContent.includes('edit'), '没有显示待执行工具');
+      proceed.click();
+      await sleep(60);
+      assert(agent.isBusy() && $('#ra-log [data-budget="continue"]'), '脚本模拟的点击追加了轮数');
+      $('#ra-log [data-budget="finish"]').click();
+      await until(() => !agent.isBusy(), '汇总完成');
+      assert(capital() === before && $('#ra-log').textContent.includes('已按要求汇总'), '汇总时执行了待处理的改动或未回复');
+    } finally { if (agent.isBusy()) $('#ra-send').click(); }
   });
 
   await step('IndexedDB：运行日志与工作区落盘', async () => {
@@ -155,9 +207,11 @@ async function main() {
     assert(mode.options.length === 4, '权限档位应有四档');
     assert($('#reader-agent-overlay [data-s="a.approval"]') && $('#reader-agent-overlay [data-s="a.plotContext"]') && $('#reader-agent-overlay [data-s="a.lite"]'), '缺少确认方式 / 剧情 / 轻聊开关');
     mode.value = 'tavern';
+    $('#ra-tools-card [data-s="a.maxSteps"]').value = '200';
     $('#reader-agent-overlay [data-act="save-settings"]').click();
     await sleep(80);
     assert(agent.getSettings().mode === 'tavern', '保存后档位没变');
+    assert(agent.getSettings().maxSteps === 200, '较大的预算没有生效');
     assert(window.SillyTavern.getContext().extensionSettings.reader_ii?.agent?.mode === 'tavern', '设置没有写进 extension_settings');
   });
 

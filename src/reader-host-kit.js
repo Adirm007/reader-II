@@ -195,6 +195,17 @@
     var WI_LOGIC = ['and_any', 'not_all', 'not_any', 'and_all'];
     var WI_ROLES = ['system', 'user', 'assistant'];
 
+    /* 保留模块本身，书名、选中的全局书及角色附加书每次从宿主的当前状态读取。 */
+    var worldInfo;
+    var loadingWorldInfo;
+    async function prepareWorldbooks() {
+      if (worldInfo || fn('getWorldbookNames') && fn('getCharWorldbookNames') || !env.hostImport) return;
+      if (!loadingWorldInfo) loadingWorldInfo = env.hostImport('/scripts/world-info.js')
+        .then(function (module) { worldInfo = module; }, function () { /* 旧版使用原生上下文与下拉框 */ })
+        .finally(function () { loadingWorldInfo = null; });
+      await loadingWorldInfo;
+    }
+
     function nativeToEntry(raw) {
       var entry = {
         uid: raw.uid, name: String(raw.comment || ''), enabled: raw.disable !== true, content: String(raw.content || ''),
@@ -244,11 +255,12 @@
       return target;
     }
 
-    async function nativeBook(name) {
+    async function nativeBook(name, optional) {
       var ctx = context();
       if (!ctx || typeof ctx.loadWorldInfo !== 'function') throw new Error('当前环境没有世界书接口');
       var data = await ctx.loadWorldInfo(String(name));
-      if (!data || !modules.isObject(data.entries)) data = { entries: {} };
+      if (!data && optional) return null;
+      if (!data || !modules.isObject(data.entries)) throw new Error('读取世界书「' + name + '」失败，未修改该书');
       return data;
     }
 
@@ -280,6 +292,9 @@
       var get = fn('getWorldbookNames');
       try {
         if (get) return (get() || []).map(String);
+        var ctx = context();
+        if (ctx && typeof ctx.getWorldInfoNames === 'function') return ctx.getWorldInfoNames().map(String);
+        if (worldInfo && Array.isArray(worldInfo.world_names)) return worldInfo.world_names.slice();
         /* 酒馆的世界书下拉框里有全部书名。 */
         var options = env.document ? env.document.querySelectorAll('#world_editor_select option') : [];
         return Array.prototype.filter.call(options, function (option) { return option.value !== ''; }).map(function (option) { return String(option.textContent || '').trim(); }).filter(Boolean);
@@ -290,6 +305,7 @@
       var get = fn('getGlobalWorldbookNames');
       try {
         if (get) return (get() || []).map(String);
+        if (worldInfo && Array.isArray(worldInfo.selected_world_info)) return worldInfo.selected_world_info.slice();
         /* 原生：全局启用的世界书就是 #world_info 下拉框里选中的那些。 */
         var options = env.document ? env.document.querySelectorAll('#world_info option:checked') : [];
         return Array.prototype.map.call(options, function (option) { return String(option.textContent || '').trim(); }).filter(Boolean);
@@ -300,11 +316,13 @@
       var get = fn('getCharWorldbookNames');
       try {
         if (!get) {
-          /* 原生：角色卡绑定的主世界书记在 data.extensions.world；附加世界书存在酒馆内部设置里，这里拿不到。 */
           var ctx = context();
           var card = ctx && ctx.characters && ctx.characters[ctx.characterId];
           var world = card && card.data && card.data.extensions && card.data.extensions.world;
-          return { primary: world ? String(world) : null, additional: [] };
+          var file = card && String(card.avatar || '').replace(/\.[^./\\]+$/, '');
+          var records = worldInfo && worldInfo.world_info && worldInfo.world_info.charLore;
+          var record = file && Array.isArray(records) && records.find(function (item) { return item && item.name === file; });
+          return { primary: world ? String(world) : null, additional: record && Array.isArray(record.extraBooks) ? record.extraBooks.map(String) : [] };
         }
         var value = get ? get('current') : null;
         return { primary: value && value.primary ? String(value.primary) : null, additional: value && Array.isArray(value.additional) ? value.additional.map(String) : [] };
@@ -332,26 +350,47 @@
       };
     }
 
+    async function linkedWorldbooks() {
+      var get = fn('getCharWorldbookNames');
+      var native = !get && env.nativeHost && env.nativeHost();
+      if (!get && native) get = native.getCharWorldbookNames;
+      var character;
+      try { character = get && await get('current'); } catch (error) { /* 可用角色卡里的主书 */ }
+      if (!character) character = charWorldbooks();
+      return Array.from(new Set([character.primary].concat(character.additional || [], [chatWorldbook()]).filter(Boolean)));
+    }
+
     function isWorldbookActive(name) {
       var scopes = worldbookScopes();
       return scopes.global.indexOf(name) >= 0 || scopes.character_primary === name
         || scopes.character_additional.indexOf(name) >= 0 || scopes.chat === name;
     }
 
-    async function readWorldbook(name) {
+    async function readWorldbook(name, options) {
       var get = fn('getWorldbook');
       if (get) return list(await get(String(name)));
-      return nativeEntries(await nativeBook(name));
+      var optional = options && options.optional && worldbookNames().indexOf(name) < 0;
+      var data = await nativeBook(name, optional);
+      return data ? nativeEntries(data) : null;
     }
 
     async function createWorldbook(name) {
       var title = String(name || '').trim();
       if (!title) throw new Error('世界书名不能为空');
+      await prepareWorldbooks();
       if (worldbookNames().indexOf(title) >= 0) return false;
       var create = fn('createWorldbook');
       if (create) { await create(title, []); return true; }
-      await nativeSave(title, { entries: {} });
+      /* 原生宿主的目录可能落后于正在保存的书。读取同名书，保留条目以及书级元数据。 */
+      var existing = await nativeBook(title, true);
+      if (existing && (Object.keys(existing.entries).length || Object.keys(existing).length > 1)) return false;
       var ctx = context();
+      var hasCatalog = worldInfo && Array.isArray(worldInfo.world_names) || ctx && typeof ctx.getWorldInfoNames === 'function'
+        || env.document && env.document.getElementById && env.document.getElementById('world_editor_select');
+      if (!existing && !hasCatalog && !worldbookNames().length) {
+        throw new Error('无法确认「' + title + '」是否已存在，请先刷新酒馆世界书目录');
+      }
+      await nativeSave(title, existing || { entries: {} });
       if (ctx && typeof ctx.updateWorldInfoList === 'function') { try { await ctx.updateWorldInfoList(); } catch (error) { /* 列表下次打开会刷新 */ } }
       return true;
     }
@@ -399,15 +438,28 @@
     }
 
     async function mountWorldbook(name, mode) {
+      await prepareWorldbooks();
       if (mode === 'global') {
         var current = globalWorldbooks();
-        if (current.indexOf(name) < 0) await need('rebindGlobalWorldbooks')(current.concat([name]));
+        if (current.indexOf(name) < 0) {
+          var bindGlobal = fn('rebindGlobalWorldbooks');
+          if (bindGlobal) await bindGlobal(current.concat([name]));
+          else if (worldInfo && typeof worldInfo.updateWorldInfoSettings === 'function') {
+            await worldInfo.updateWorldInfoSettings({}, current.concat([name]));
+          } else throw new Error('此宿主没有全局世界书绑定接口，请在世界书面板启用「' + name + '」');
+        }
         return 'global';
       }
       if (mode === 'character') {
         var books = charWorldbooks();
         if (books.primary !== name && books.additional.indexOf(name) < 0) {
-          await need('rebindCharWorldbooks')('current', { primary: books.primary, additional: books.additional.concat([name]) });
+          var bindChar = fn('rebindCharWorldbooks');
+          if (!bindChar) {
+            var native = env.nativeHost && env.nativeHost();
+            if (!worldInfo || !worldInfo.world_info || !native) throw new Error('此宿主没有角色附加世界书绑定接口');
+            bindChar = native.rebindCharWorldbooks;
+          }
+          await bindChar('current', { primary: books.primary, additional: books.additional.concat([name]) });
         }
         return 'character';
       }
@@ -477,7 +529,9 @@
       localRead: localRead,
       localWrite: localWrite,
       worldbookNames: worldbookNames,
+      prepareWorldbooks: prepareWorldbooks,
       worldbookScopes: worldbookScopes,
+      linkedWorldbooks: linkedWorldbooks,
       isWorldbookActive: isWorldbookActive,
       readWorldbook: readWorldbook,
       createWorldbook: createWorldbook,

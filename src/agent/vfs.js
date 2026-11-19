@@ -154,7 +154,7 @@
       };
     }
 
-    async function writeRaw(parsed, target, text, run) {
+    async function writeRaw(parsed, target, text, run, checkContext) {
       var basePath = parsed.mount + ':/' + parsed.segs.map(enc).join('/');
       var before = typeof target.read === 'function' ? await target.read(parsed.segs) : null;
       var next = text;
@@ -174,18 +174,19 @@
         next = JSON.stringify(pointerSet(doc, parsed.pointer, value), null, 1);
       }
       if (journal && run) await journal.capture(run, basePath, before === undefined ? null : before);
+      if (checkContext) checkContext();
       await target.write(parsed.segs, next);
       if (journal && run) await journal.settle(run, basePath, typeof target.read === 'function' ? await target.read(parsed.segs) : next);
       return { path: parsed.canonical, created: before === null || before === undefined, chars: String(text).length };
     }
 
-    async function write(path, text, run) {
+    async function write(path, text, run, checkContext) {
       var parsed = parsePath(path), target = provider(parsed);
       if (target.readonly || typeof target.write !== 'function') throw new Error(parsed.mount + ': 是只读的');
-      return writeRaw(parsed, target, String(text == null ? '' : text), run);
+      return writeRaw(parsed, target, String(text == null ? '' : text), run, checkContext);
     }
 
-    async function remove(path, run) {
+    async function remove(path, run, checkContext) {
       var parsed = parsePath(path), target = provider(parsed);
       if (parsed.pointer) {
         var before = await target.read(parsed.segs);
@@ -193,6 +194,7 @@
         var doc = pointerSet(JSON.parse(before), parsed.pointer, undefined, true);
         var basePath = parsed.mount + ':/' + parsed.segs.map(enc).join('/');
         if (journal && run) await journal.capture(run, basePath, before);
+        if (checkContext) checkContext();
         await target.write(parsed.segs, JSON.stringify(doc, null, 1));
         if (journal && run) await journal.settle(run, basePath, await target.read(parsed.segs));
         return { path: parsed.canonical, removed: true };
@@ -201,6 +203,7 @@
       var old = typeof target.read === 'function' ? await target.read(parsed.segs) : null;
       if (old === null || old === undefined) throw new Error('没有这个文件：' + path);
       if (journal && run) await journal.capture(run, parsed.canonical, old);
+      if (checkContext) checkContext();
       await target.remove(parsed.segs);
       if (journal && run) await journal.settle(run, parsed.canonical, null);
       return { path: parsed.canonical, removed: true };

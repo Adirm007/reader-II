@@ -42,7 +42,9 @@
     var overlay = null;
     var tab = 'chat';
     var running = false;
+    var runningChat = null;
     var pendingConfirms = [];
+    var permissionReview = null;
     var memoryFilter = { type: '', store: '', query: '' };
     var editing = null;
     var unsubscribe = [];
@@ -180,16 +182,100 @@
       return '<details><summary><span class="st">' + icon('spin') + '</span><span>' + esc(label) + '</span></summary><pre>' + esc(detail) + '</pre></details>';
     }
 
+    function reviewPermission(request) {
+      if (!running || !overlay || !overlay.open) return false;
+      clearIndicator();
+      var labels = modules.AGENT_MODES;
+      var node = append('<h4>这一步需要「' + esc(labels[request.requiredMode]) + '」</h4>'
+        + '<div>' + esc(request.description || request.name) + '</div>'
+        + (request.path ? '<pre>' + esc(request.path) + '</pre>' : '')
+        + '<p>当前档位是「' + esc(labels[request.currentMode]) + '」。保存的新档位也会用于后续任务。</p>'
+        + '<div class="ra-row"><button type="button" class="ra-btn is-main" data-review="settings">打开权限设置</button>'
+        + '<button type="button" class="ra-btn" data-review="retry">重新检查并继续</button>'
+        + '<button type="button" class="ra-btn" data-review="skip">本任务保持当前档位</button></div>', 'ra-confirm');
+      if (!node) return false;
+      logNode().scrollTop = logNode().scrollHeight;
+      return new Promise(function (resolve) {
+        var signal = request.signal;
+        var abort = function () { finish(false); };
+        function finish(choice) {
+          if (permissionReview !== finish) return;
+          permissionReview = null;
+          pendingConfirms = pendingConfirms.filter(function (item) { return item !== finish; });
+          if (signal) signal.removeEventListener('abort', abort);
+          node.classList.add('is-done');
+          node.textContent = choice === true ? '已请求重新检查本次调用的权限' : '已结束权限调整';
+          resolve(choice === true);
+        }
+        permissionReview = finish;
+        pendingConfirms.push(finish);
+        if (signal && signal.aborted) { abort(); return; }
+        if (signal) signal.addEventListener('abort', abort, { once: true });
+        node.addEventListener('click', function (event) {
+          var button = event.target.closest('[data-review]');
+          if (!button || permissionReview !== finish) return;
+          var action = button.getAttribute('data-review');
+          if (action === 'settings') {
+            showTab('settings');
+            gotoSection('ra-agent-card', false);
+            var select = $('[data-s="a.mode"]');
+            if (select) select.focus();
+          } else if (action === 'skip') finish(false);
+          else if (action === 'retry' && event.isTrusted) finish(true);
+        });
+      });
+    }
+
+    function requestMoreRounds(request) {
+      if (!running || !overlay || !overlay.isConnected) return 0;
+      clearIndicator();
+      var next = request.tools.slice(0, 6).join('、') || '重新提交上次未写完的调用';
+      var node = append('<h4>已用完 ' + request.rounds + ' 轮，是否继续这项任务？</h4>'
+        + '<div>接下来要做：' + esc(next) + '</div>'
+        + '<div class="ra-row"><label class="ra-num"><span>追加工具轮数</span><input data-extra-rounds type="number" min="1" max="' + modules.AGENT_MAX_STEP_BUDGET + '" step="1" required value="' + request.suggested + '"></label>'
+        + '<button type="button" class="ra-btn is-main" data-budget="continue">继续本任务</button>'
+        + '<button type="button" class="ra-btn" data-budget="finish">汇总并结束</button></div>', 'ra-confirm');
+      if (!node) return 0;
+      var log = logNode();
+      if (log) log.scrollTop = log.scrollHeight;
+      return new Promise(function (resolve) {
+        var signal = request.signal;
+        var abort = function () { finish(0); };
+        function finish(choice) {
+          pendingConfirms = pendingConfirms.filter(function (item) { return item !== finish; });
+          if (signal) signal.removeEventListener('abort', abort);
+          node.classList.add('is-done');
+          node.textContent = choice > 0 ? '已追加 ' + choice + ' 轮' : signal && signal.aborted ? '已停止' : '已结束工具调用';
+          resolve(choice > 0 ? choice : 0);
+        }
+        pendingConfirms.push(finish);
+        if (signal && signal.aborted) { abort(); return; }
+        if (signal) signal.addEventListener('abort', abort, { once: true });
+        node.addEventListener('click', function (event) {
+          var button = event.target.closest('[data-budget]');
+          if (!button) return;
+          if (button.getAttribute('data-budget') === 'finish') { finish(0); return; }
+          if (!event.isTrusted) return;
+          var field = node.querySelector('[data-extra-rounds]');
+          if (field.reportValidity()) finish(field.valueAsNumber);
+        });
+      });
+    }
+
     function onAgentEvent(event) {
-      if (!overlay) return;
-      if (event.type === 'thinking') { showIndicator(event.step ? '继续思考' : '思考中'); return; }
+      if (!overlay || (running && runningChat !== kit.chatKey())) return;
+      if (event.type === 'thinking') { showIndicator(event.step ? '继续思考 · 已用 ' + event.step + '/' + event.limit + ' 轮' : '思考中'); return; }
       if (event.type === 'thought') { clearIndicator(); append(esc(event.text), 'ra-thought'); return; }
       if (event.type === 'protocol') {
         notice('protocol', '原生函数调用这条路没走通' + (event.reason ? '（' + event.reason + '）' : '') + '，已改用文本协议接着做。');
         refreshFoot();
         return;
       }
-      if (event.type === 'nudge') { notice('nudge', '她只是应了一声、还没动手，已经提醒她一次。'); return; }
+      if (event.type === 'nudge') {
+        notice('nudge', event.reason === 'capabilities' ? '已提醒助手核对本次可用的工具。'
+          : event.reason === 'plan' ? '计划里还有待办，已提醒助手继续。' : '她只是应了一声、还没动手，已经提醒她一次。');
+        return;
+      }
       if (event.type === 'tool_start') {
         clearIndicator();
         var node = append(stepHtml(event.description && event.description !== event.name ? event.description : event.name, event.name + ' ' + JSON.stringify(event.args)), 'ra-step');
@@ -227,15 +313,18 @@
       append(rich(text), 'ra-msg ra-user');
       var log = logNode();
       if (log) log.scrollTop = log.scrollHeight;
+      runningChat = kit.chatKey();
       setRunning(true);
       try {
-        var outcome = await agent.run(text, { onEvent: onAgentEvent, confirm: confirmCard });
+        var outcome = await agent.run(text, { onEvent: onAgentEvent, confirm: confirmCard, reviewPermission: reviewPermission, interactiveBudget: true });
         if (outcome.busy) append(esc(outcome.answer), 'ra-thought');
       } catch (error) {
         append(esc('出错：' + message(error)), 'ra-thought');
       } finally {
         clearIndicator();
         setRunning(false);
+        if (runningChat !== kit.chatKey()) renderHistory();
+        runningChat = null;
         refreshFoot();
         /* 触屏上不抢焦点：不然每答完一轮软键盘都弹出来。 */
         if (input && !touchInput()) { try { input.focus(); } catch (error) { /* 面板可能已关闭 */ } }
@@ -269,8 +358,8 @@
       var tool = $('#ra-tool-mode');
       if (tool) {
         tool.setAttribute('data-mode', mode);
-        tool.textContent = '工具：' + TOOL_MODE[mode];
-        tool.title = (status.reason ? status.reason + '。' : '') + '点这里去设置与测试';
+        tool.textContent = '工具：' + TOOL_MODE[mode] + ' · ' + agent.getSettings().maxSteps + ' 轮';
+        tool.title = (status.reason ? status.reason + '。' : '') + '设置工具轮数与调用方式';
       }
       var persona = $('#ra-persona');
       if (persona) persona.textContent = 'READER AGENT · ' + agent.personaContext().name;
@@ -525,7 +614,7 @@
     function agentCardHtml(a) {
       return card('ra-agent-card', '助手', group('权限')
         + '<div class="ra-form">'
-        + '<label>权限档位</label><select data-s="a.mode">' + option('readonly', '只读：只看不改', a.mode) + option('card', '单卡：只改当前聊天和这张卡（推荐）', a.mode) + option('tavern', '酒馆全权：酒馆里的一切', a.mode) + option('device', '设备全权：再加上设备上的文件与命令（需后端伴侣）', a.mode) + '</select>'
+        + '<label>权限档位</label><select data-s="a.mode">' + option('readonly', '只读：查看酒馆，草稿可写入工作区', a.mode) + option('card', '单卡：只改当前聊天和这张卡（推荐）', a.mode) + option('tavern', '酒馆全权：酒馆里的一切', a.mode) + option('device', '设备全权：再加上设备上的文件与命令（需后端伴侣）', a.mode) + '</select>'
         + '<label>确认方式</label><select data-s="a.approval">' + option('ask', '每次写入前询问（推荐）', a.approval) + option('auto', '档位内直接执行，危险操作仍询问', a.approval) + option('yolo', '全部直接执行', a.approval) + '</select>'
         + '</div>'
         + group('对话')
@@ -533,7 +622,7 @@
         + switchField('a.lite', a.lite, '轻聊', '不带任何工具，只聊天')
         + switchField('a.recall', a.recall, '回答前自动带入相关记忆')
         + group('生成参数')
-        + '<div class="ra-nums">' + numberField('a.maxSteps', '最多工具步数', a.maxSteps, 1, 40) + numberField('a.historyTurns', '带入历史轮数', a.historyTurns, 0, 40)
+        + '<div class="ra-nums">' + numberField('a.historyTurns', '带入历史轮数', a.historyTurns, 0, 40)
         + numberField('a.temperature', '温度', a.temperature, 0, 2, 0.05) + numberField('a.maxTokens', '输出上限', a.maxTokens, 256, 64000) + numberField('a.timeoutSec', '单次超时（秒）', a.timeoutSec, 20, 900) + '</div>'
         + '<p class="ra-note">输出上限与温度只对独立 API 生效；走酒馆连接时沿用当前预设。</p>');
     }
@@ -558,7 +647,9 @@
 
     function toolsCardHtml(a) {
       return card('ra-tools-card', '工具调用',
-        '<p class="ra-note">助手靠「工具调用」来读写卡里的东西。多数模型认原生的函数调用；不认的，改让它按约定的文本格式写出来。拿不准就留在「自动」，助手只说不做的时候来这里测一下。</p>'
+        '<div class="ra-nums">' + numberField('a.maxSteps', '每项任务的工具轮数', a.maxSteps, 1, modules.AGENT_MAX_STEP_BUDGET) + '</div>'
+        + '<p class="ra-note">可填 1 至 ' + modules.AGENT_MAX_STEP_BUDGET + '。模型同一批发出的调用合计一轮。保存后用于新任务。对话中用完可追加轮数，保留当前计划和工具结果。</p>'
+        + '<p class="ra-note">助手靠「工具调用」来读写卡里的东西。多数模型认原生的函数调用；不认的，改让它按约定的文本格式写出来。拿不准就留在「自动」，助手只说不做的时候来这里测一下。</p>'
         + '<div class="ra-form"><label>调用方式</label><select data-s="a.toolProtocol">' + option('auto', '自动：能用原生就用，不行退回文本协议（推荐）', a.toolProtocol) + option('native', '只用原生函数调用', a.toolProtocol) + option('text', '只用文本协议', a.toolProtocol) + '</select></div>'
         + toolLineHtml()
         + '<div class="ra-row"><button type="button" class="ra-btn" data-act="probe-tools">测试工具调用</button><span class="ra-note">会向模型发两次很短的请求，不改任何东西。</span></div>'
@@ -872,6 +963,12 @@
     }
 
     function saveSettingsFromForm() {
+      var budget = $('[data-s="a.maxSteps"]');
+      if (budget && (!budget.value || !budget.reportValidity())) {
+        toast('工具轮数应为 1 至 ' + modules.AGENT_MAX_STEP_BUDGET + ' 的整数', true);
+        budget.focus();
+        return;
+      }
       var agentPatch = {}, memoryPatch = {};
       overlay.querySelectorAll('[data-s]').forEach(function (input) {
         var key = input.getAttribute('data-s');
@@ -885,6 +982,7 @@
       renderSettings();
       refreshFoot();
       toast('设置已保存');
+      if (permissionReview) showTab('chat');
     }
 
     /* ---------- 面板 ---------- */
@@ -1035,7 +1133,13 @@
         unsubscribe.push(agent.onChange(function (reason) { if ((reason === 'settings' || reason === 'probe') && overlay && overlay.open) refreshFoot(); }));
         unsubscribe.push(memory.onChange(function (reason) {
           /* 换了聊天：设置页里「这张卡」说的已经是另一张卡了，没保存的改动不再留着，下次进设置页重画。 */
-          if (reason === 'chat') dirty = false;
+          if (reason === 'chat') {
+            dirty = false;
+            if (running && runningChat !== kit.chatKey()) {
+              agent.stop();
+              pendingConfirms.slice().forEach(function (finish) { finish('deny'); });
+            }
+          }
           if (!overlay || !overlay.open) return;
           if (reason === 'chat') { if (!running) renderHistory(); refreshFoot(); refreshBack(); if (tab === 'settings') renderSettings(); }
           if (tab === 'memory' && reason !== 'settings' && !editing) renderMemory();
@@ -1046,6 +1150,7 @@
 
     function close() {
       if (!overlay) return;
+      if (permissionReview) permissionReview(false);
       try { if (overlay.open && typeof overlay.close === 'function') overlay.close(); else overlay.removeAttribute('open'); } catch (error) { overlay.removeAttribute('open'); }
     }
 
@@ -1059,7 +1164,7 @@
       if (theme) theme.remove(doc);
     }
 
-    return { open: open, close: close, dispose: dispose, isOpen: function () { return !!(overlay && overlay.open); } };
+    return { open: open, close: close, dispose: dispose, requestMoreRounds: requestMoreRounds, isOpen: function () { return !!(overlay && overlay.open); } };
   }
 
   modules.createAgentUi = createAgentUi;

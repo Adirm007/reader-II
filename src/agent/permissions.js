@@ -75,24 +75,27 @@
       var effect = request.effect || 'read';
       var scope = SCOPE_RANK[request.scope] === undefined ? 'tavern' : request.scope;
       var rule = matchRule(current.rules, request);
-      if (rule && rule.effect === 'deny') return { decision: 'deny', reason: '用户在权限规则里禁止了这一项（' + rule.pattern + '）。不要绕过，如实告诉用户。' };
+      if (rule && rule.effect === 'deny') return { decision: 'deny', code: 'rule_denied', reason: '权限规则「' + rule.pattern + '」禁止了这项操作。' };
+
+      var needsMode = (effect === 'read' || effect === 'net') ? scope === 'device' && current.mode !== 'device'
+        : SCOPE_RANK[scope] > MODE_RANK[current.mode];
+      if (needsMode) {
+        var required = SCOPE_NEEDS[scope];
+        return { decision: 'deny', code: 'mode_required', currentMode: current.mode, requiredMode: required,
+          reason: '当前权限档位是「' + MODE_LABEL[current.mode] + '」，此操作需要「' + MODE_LABEL[required] + '」。档位可在「设置 → 助手 → 权限」中调整。' };
+      }
 
       if (effect === 'read') {
-        if (scope === 'device' && current.mode !== 'device') return { decision: 'deny', reason: '读取设备上的文件需要「设备全权」档位。请告诉用户可以在助手设置里调整。' };
         return { decision: rule && rule.effect === 'ask' ? 'ask' : 'allow' };
       }
       if (effect === 'net') {
-        if (scope === 'device' && current.mode !== 'device') return { decision: 'deny', reason: '这个操作要经过设备上的后端伴侣，需要「设备全权」档位。请告诉用户可以在助手设置里调整。' };
         if (rule && rule.effect === 'allow') return { decision: 'allow' };
         if (rule && rule.effect === 'ask') return { decision: 'ask' };
         if (current.approval === 'yolo' || session[sessionKey(request)]) return { decision: 'allow' };
         return { decision: 'ask' };
       }
-      if (scope === 'workspace') return { decision: 'allow' };
-      if (SCOPE_RANK[scope] > MODE_RANK[current.mode]) {
-        return { decision: 'deny', reason: '当前权限档位是「' + MODE_LABEL[current.mode] + '」，这个操作需要「' + MODE_LABEL[SCOPE_NEEDS[scope]] + '」。不要换别的办法绕过；告诉用户想让你做的话，可以在助手设置里把档位调高。' };
-      }
       if (rule && rule.effect === 'ask') return { decision: 'ask' };
+      if (scope === 'workspace') return { decision: 'allow' };
       if (rule && rule.effect === 'allow') return { decision: 'allow' };
       if (effect === 'note') return { decision: 'allow' };
       if (current.approval === 'yolo') return { decision: 'allow' };
@@ -107,7 +110,7 @@
       resetSession: function () { session = Object.create(null); },
       describe: function () {
         var current = settings();
-        return '权限档位「' + MODE_LABEL[current.mode] + '」；' + (current.mode === 'readonly' ? '不能改动任何东西'
+        return '权限档位「' + MODE_LABEL[current.mode] + '」；' + (current.mode === 'readonly' ? '可查看酒馆资料、在自己的工作区 ws:/ 写草稿，修改酒馆数据需要更高档位'
           : current.approval === 'ask' ? '每次写入前会请用户确认' : current.approval === 'auto' ? '档位内的写入直接执行，危险操作仍会请用户确认' : '所有操作直接执行');
       },
       mode: function () { return settings().mode; }

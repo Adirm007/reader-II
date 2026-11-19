@@ -81,6 +81,7 @@
 
     agent = modules.createAgent(env, llm, kit, memory, {
       registry: registry, vfs: vfs, journal: journal, connectors: connectors, settingsIo: settingsIo, apiTier: legacy.apiTier,
+      requestMoreRounds: function (request) { return ui ? ui.requestMoreRounds(request) : 0; },
       core: function () { return host.ReaderCore && host.ReaderCore.__reader_core_api ? host.ReaderCore : null; },
       envLines: function () { return [web ? web.brief() : '', mcp ? mcp.brief() : '', companion.brief()]; }
     });
@@ -92,6 +93,7 @@
     });
     /* 设置被别处改了（面板、助手自己）时，MCP 工具箱跟着重新登记。 */
     agent.onChange(function (reason) { if (reason === 'settings') { try { mcp.sync(); } catch (error) { /* 登记失败不影响别的 */ } } });
+    registry.on('run:start', kit.prepareWorldbooks);
     /* 之前放行过、或已经开到「设备全权」时，每轮开始前看一眼伴侣在不在（一分钟内不重复）；别的用户不会因此多发请求。 */
     registry.on('run:start', function () {
       if (companion.hasSaved() || agent.getSettings().mode === 'device') return companion.status(false);

@@ -88,12 +88,88 @@ function makeHost(options = {}) {
   };
   host.window = host;
   host.parent = host;
+  if (options.agentSettings) ctx.extensionSettings.reader_ii = { agent: options.agentSettings };
+  if (options.requestMoreRounds) host.__READER_II_NO_AUTOBOOT__ = true;
   vm.createContext(host);
   vm.runInContext(CODE, host, { filename: 'reader-ii.ext.js' });
+  if (options.requestMoreRounds) {
+    const modules = host.__ReaderIIModules;
+    const createUi = modules.createAgentUi;
+    modules.createAgentUi = (...args) => ({ ...createUi(...args), requestMoreRounds: options.requestMoreRounds });
+    modules.bootReaderII();
+  }
   return { host, api: host.ReaderII, agent: host.ReaderII.agent, vfs: host.ReaderII.vfs, worldbooks, regexes, scripts, vars, chat, llmCalls, ctx };
 }
 
 const call = (name, args) => `<tool_call name="${name}">\n${Object.entries(args).map(([key, value]) => `<arg name="${key}">${value}</arg>`).join('\n')}\n</tool_call>`;
+
+test('误称无工具或列完计划只说要做时能继续，避免反复催促', async () => {
+  const replies = ['我没有可用的工具。', call('capabilities', { query: '世界书' }),
+    call('todo', { items: JSON.stringify([{ text: '核对王都位置', status: 'doing' }]) }), '我这就查看。',
+    call('read', { path: 'wb:/设定集/王都' }), '王都位于北方。'];
+  const { agent, llmCalls } = makeHost({ replies });
+  const result = await agent.run('帮我看看王都在哪里');
+  assert.equal(result.answer, '王都位于北方。');
+  same(result.steps.map((step) => step.name), ['capabilities', 'todo', 'read']);
+  assert.match(llmCalls[1].at(-1).content, /capabilities/);
+  assert.match(llmCalls[4].at(-1).content, /核对王都位置/);
+});
+
+test('助手适配空槽遵守世界书和条目级读规则，受限证据不会送给模型', async () => {
+  const root = { characters: ['关系列表'] };
+  for (const rule of [
+    { effect: 'deny', pattern: 'wb:/设定集/**', reads: 0 },
+    { effect: 'ask', pattern: 'wb:/设定集/变量更新规则', reads: 1 },
+    { effect: 'deny', pattern: 'wb:/设定集/变量更新规则%232', reads: 1 },
+    { effect: 'allow', pattern: 'wb:/设定集/**', reads: 1 },
+  ]) {
+    const fixture = makeHost({
+      replies: [call('adapt_variables', { roots: JSON.stringify(root), use_llm: false }), call('reader_state', {}), '已核对。'],
+      agentSettings: { rules: [{ effect: rule.effect, action: 'read', pattern: rule.pattern }], recall: false, plotContext: false },
+    });
+    const { host, agent, vars, worldbooks, llmCalls } = fixture;
+    fixture.ctx.characters[0].data.extensions.reader_ii = { enabled: true };
+    vars.message.stat_data.关系列表 = {};
+    worldbooks.设定集.push({ uid: 2, name: '变量更新规则', enabled: true, content: '{"关系列表":{"证据角色":{"好感度":50}}}' });
+    const originalRead = host.TavernHelper.getWorldbook;
+    let reads = 0;
+    host.TavernHelper.getWorldbook = async (book) => { reads++; return originalRead(book); };
+    await host.ReaderCore.ready();
+    const result = await agent.run('从这张卡的定义绑定角色槽', { confirm: () => 'allow' });
+    assert.equal(result.error, '');
+    assert.equal(reads, rule.reads, rule.pattern);
+    const allowed = rule.effect === 'allow';
+    assert.equal(result.steps[0].ok, allowed, result.steps[0].summary);
+    assert.equal(host.ReaderCore.getSemanticRouting().characters.status, allowed ? 'active' : 'unbound');
+    assert.equal(result.steps[1].ok, true);
+    const finalFeedback = llmCalls.at(-1).at(-1).content;
+    assert.match(finalFeedback, /"skills": \[/);
+    if (allowed) assert.match(finalFeedback, /stat_data\.关系列表/);
+    if (!allowed) {
+      assert.match(JSON.stringify(llmCalls.at(-1)), /读取权限限制/);
+      assert.doesNotMatch(JSON.stringify(llmCalls), /证据角色/);
+    }
+  }
+});
+
+test('适配和解绑在确认和日志中说明需要手动恢复，不保存无关的楼层镜像', async () => {
+  const { agent, host } = makeHost({ replies: [call('adapt_variables', {}), call('unbind_slot', { slot: 'currency' }), '已完成。'] });
+  host.ReaderCore.autoAdapt = async () => ({ slots: [{ slot: 'currency', changed: true }] });
+  host.ReaderCore.unbindSemanticSlot = async () => ({ status: 'unbound' });
+  const asked = [];
+  const result = await agent.run('绑定并解绑货币', { confirm: async (request) => { asked.push(request); return 'allow'; } });
+  assert.equal(result.error, '');
+  same(result.steps.map((step) => step.ok), [true, true]);
+  assert.equal(asked.length, 2);
+  for (const item of asked) {
+    assert.match(item.description, /手动恢复/);
+    assert.equal(item.path, 'var:/message/latest.json', '保留旧规则的权限匹配目标');
+  }
+  const report = await agent.undo(result.runId);
+  same(report.restored, []);
+  assert.equal(report.notes.length, 2);
+  assert.ok(report.notes.every((note) => note.includes('手动恢复')));
+});
 
 test('启动：全局对象、旧名与挂载点', () => {
   const { host, api, vfs } = makeHost();
@@ -103,7 +179,7 @@ test('启动：全局对象、旧名与挂载点', () => {
   const mounts = vfs.mounts().map((item) => item.id);
   for (const id of ['chat', 'card', 'cards', 'wb', 'regex', 'script', 'preset', 'var', 'ext', 'page', 'ws', 'kb', 'mem']) assert.ok(mounts.includes(id), `缺少挂载点 ${id}`);
   const core = api.agent.listTools().filter((item) => item.toolset === 'core').map((item) => item.name);
-  same(core.sort(), ['edit', 'grep', 'ls', 'read', 'remove', 'run_js', 'skill', 'todo', 'toolbox', 'write']);
+  same(core.sort(), ['capabilities', 'edit', 'grep', 'ls', 'read', 'remove', 'run_js', 'skill', 'todo', 'toolbox', 'write']);
 });
 
 test('VFS：列目录、分段读、检索、精确替换', async () => {
@@ -125,6 +201,59 @@ test('VFS：列目录、分段读、检索、精确替换', async () => {
   const meta = JSON.parse(await vfs.readText('wb:/设定集/王都.meta.json'));
   assert.equal(meta.strategy.keys[0], '王都');
   assert.equal(meta.content, undefined);
+});
+
+test('原生世界书：没有酒馆助手或编辑器下拉框，单卡可改附加书、保留其他绑定和未列出的书', async () => {
+  const wi = { world_names: ['主设定', '附录', '公共资料'], world_info: { charLore: [{ name: 'ailin', extraBooks: ['附录'] }] }, selected_world_info: ['公共资料'] };
+  wi.updateWorldInfoSettings = (_, active) => { wi.selected_world_info = active; };
+  const { host, api, agent, vfs, ctx } = makeHost({ globals: { Function: function (...args) {
+    if (args[1] === 'return import(p)') return (path) => path === '/scripts/world-info.js' ? Promise.resolve(wi) : Promise.reject(new Error(path));
+    return Function(...args);
+  } }, replies: [call('edit', { path: 'wb:/附录/天气', old: '晴', new: '雨' }), call('edit', { path: 'wb:/公共资料/天气', old: '晴', new: '雨' }), '完成。'] });
+  host.generateRaw = host.TavernHelper.generateRaw;
+  delete host.TavernHelper;
+  ctx.characters[0].data.extensions.world = '主设定';
+  const rawBook = () => ({ name: '保留书级数据', entries: { 4: { uid: 4, comment: '天气', content: '晴', custom: '保留条目字段' } } });
+  const books = { 附录: rawBook(), 公共资料: rawBook(), 未列出: rawBook() };
+  ctx.loadWorldInfo = async (name) => clone(books[name]) || null;
+  ctx.saveWorldInfo = async (name, value) => { books[name] = clone(value); };
+  const asks = [];
+  const result = await agent.run('修改世界书', { confirm: (request) => { asks.push(request.scope); return 'allow'; } });
+  assert.equal(result.steps[0].ok, true, JSON.stringify(result));
+  assert.equal(result.steps[1].denied, true);
+  assert.deepEqual(asks, ['card']);
+  assert.equal(books.附录.entries[4].content, '雨');
+  assert.equal(books.公共资料.entries[4].content, '晴');
+  same((await vfs.list('wb:/')).items.map((item) => item.name), wi.world_names);
+  assert.equal(await vfs.readText('wb:/未列出/天气'), '晴');
+  await vfs.write('wb:/未列出/新条目', '已加入');
+  assert.equal(books.未列出.entries[4].content, '晴');
+  assert.equal(books.未列出.entries[4].custom, '保留条目字段');
+  assert.equal(books.未列出.name, '保留书级数据');
+  assert.equal(books.未列出.entries[5].content, '已加入');
+  await api.kit.mountWorldbook('新书', 'character');
+  same(wi.world_info.charLore[0].extraBooks, ['附录', '新书']);
+  await api.kit.mountWorldbook('新书', 'global');
+  same(wi.selected_world_info, ['公共资料', '新书']);
+  ctx.loadWorldInfo = async () => null;
+  await assert.rejects(vfs.write('wb:/附录/另一个条目', '内容'), /读取世界书/);
+  assert.equal(books.附录.entries[4].content, '雨');
+});
+
+test('原生角色变量：兼容卡内对象、键值对和早期字段', async () => {
+  const { host, ctx, vfs } = makeHost();
+  delete host.TavernHelper;
+  const data = ctx.characters[0].data;
+  const variables = { 人物: { 名称: '艾琳' } };
+  for (const extensions of [{ tavern_helper: { variables } }, { tavern_helper: [['scripts', []], ['variables', variables]] }, { TavernHelper_characterScriptVariables: variables }]) {
+    data.extensions = extensions;
+    assert.equal(await vfs.readText('var:/character.json#/人物/名称'), '艾琳');
+    assert.equal(vfs.scope('var:/character.json', 'write'), 'card');
+  }
+  await assert.rejects(vfs.write('var:/character.json', '{}'), /replaceVariables/);
+  assert.equal(await vfs.readText('var:/character.json#/人物/名称'), '艾琳');
+  ctx.characterId = undefined;
+  await assert.rejects(vfs.readText('var:/character.json'), /打开.*角色卡/);
 });
 
 test('VFS：超长单行的脚本用 grep 定位、按列读取', async () => {
@@ -198,6 +327,10 @@ test('权限：档位 × 确认方式 × 规则', () => {
   assert.equal(permissions.evaluate({ effect: 'note', scope: 'chat', tool: 'memory_save' }).decision, 'allow');
   assert.equal(permissions.evaluate({ effect: 'read', scope: 'device', tool: 'read' }).decision, 'deny');
   settings = { mode: 'readonly', approval: 'yolo', rules: [] };
+  assert.match(permissions.describe(), /ws:\//);
+  settings.rules = [{ effect: 'ask', action: 'write', pattern: 'ws:/审核/**' }];
+  assert.equal(permissions.evaluate({ effect: 'write', scope: 'workspace', path: 'ws:/审核/草稿' }).decision, 'ask');
+  assert.equal(permissions.evaluate({ effect: 'write', scope: 'workspace', path: 'ws:/想法' }).decision, 'allow');
   assert.equal(permissions.evaluate({ effect: 'write', scope: 'chat', tool: 'edit' }).decision, 'deny');
   assert.equal(permissions.evaluate({ effect: 'note', scope: 'chat', tool: 'memory_save' }).decision, 'deny');
   settings = { mode: 'tavern', approval: 'auto', rules: [{ effect: 'deny', action: '*', pattern: 'wb:/私密/**' }, { effect: 'ask', action: 'read', pattern: 'chat:/**' }] };
@@ -269,6 +402,50 @@ test('主循环：拒绝、档位不足、撤销冲突', async () => {
   assert.match(worldbooks.设定集[0].content, /人口十万/);
 });
 
+test('调整权限档位后在原任务复核原调用，仍须执行写入确认', async () => {
+  const write = call('edit', { path: 'wb:/公共资料/货币', old: '金币', new: '银币' });
+  const fixture = makeHost({ replies: [write, '已完成。'] });
+  const events = [];
+  const result = await fixture.agent.run('修改公共资料', {
+    reviewPermission(request) {
+      events.push([request.currentMode, request.requiredMode, request.path]);
+      fixture.agent.saveSettings({ mode: 'tavern' });
+      return true;
+    },
+    confirm(request) { events.push(request.name); return 'allow'; },
+  });
+  same(events, [['card', 'tavern', 'wb:/公共资料/货币'], 'edit']);
+  assert.equal(result.steps.length, 1);
+  assert.ok(result.steps[0].ok);
+  assert.match(fixture.worldbooks.公共资料[0].content, /银币/);
+});
+
+test('请求复核不授予权限，跳过、本轮新增禁止规则和换聊天均不能执行原操作', async () => {
+  const path = 'wb:/公共资料/货币';
+  const write = call('edit', { path, old: '金币', new: '银币' });
+  const rule = { effect: 'deny', action: 'write', pattern: 'wb:/公共资料/**' };
+  for (const scenario of ['unchanged', 'skip', 'rule', 'newRule', 'chat']) {
+    const fixture = makeHost({ replies: scenario === 'skip' ? [write, write, '结束。'] : [write, '结束。'] });
+    let reviews = 0;
+    let confirms = 0;
+    if (scenario === 'rule') fixture.agent.saveSettings({ rules: [rule] });
+    const outcome = await fixture.agent.run('核对后修改', {
+      reviewPermission() {
+        reviews++;
+        if (scenario === 'chat') fixture.ctx.getCurrentChatId = () => 'chat-2';
+        if (scenario === 'newRule') fixture.agent.saveSettings({ mode: 'tavern', rules: [rule] });
+        return scenario !== 'skip';
+      },
+      confirm() { confirms++; return 'allow'; },
+    });
+    assert.equal(reviews, scenario === 'rule' ? 0 : 1, scenario);
+    assert.equal(confirms, 0, scenario);
+    if (scenario === 'chat') assert.equal(outcome.aborted, true);
+    else assert.ok(outcome.steps.every((step) => step.denied), scenario);
+    assert.match(fixture.worldbooks.公共资料[0].content, /金币/);
+  }
+});
+
 test('主循环：重复只读调用复用结果、未知工具、步数上限', async () => {
   const same = call('read', { path: 'wb:/设定集/艾琳' });
   const { agent, llmCalls } = makeHost({ replies: [same, same, call('nope', { a: 1 }), '好了。'] });
@@ -282,6 +459,74 @@ test('主循环：重复只读调用复用结果、未知工具、步数上限',
   const capped = await loop.agent.run('一直列', {});
   assert.match(capped.answer, /超出了上限/);
   assert.equal(loop.llmCalls.length, 4);
+});
+
+test('长任务：旧设置保留，可保存超过 60 轮，发送同批工具和协议提醒各自计数', async () => {
+  const lookup = (offset) => call('read', { path: 'wb:/设定集/王都', offset });
+  const replies = ['我会先核对这张卡的变量结构，再逐项转换并验证。', lookup(1) + '\n' + lookup(2),
+    ...Array.from({ length: 65 }, (_, index) => lookup(index + 3)), '核对完毕。'];
+  assert.equal(makeHost().agent.getSettings().maxSteps, 32);
+  const { agent, ctx } = makeHost({ agentSettings: { maxSteps: 16 } });
+  assert.equal(agent.getSettings().maxSteps, 16);
+  agent.saveSettings({ maxSteps: 66 });
+  const restored = makeHost({ agentSettings: ctx.extensionSettings.reader_ii.agent, replies });
+  const result = await restored.agent.run('按顺序核对', { remember: false });
+  assert.equal(result.rounds, 66);
+  assert.equal(result.steps.length, 67);
+  assert.equal(result.answer, '核对完毕。');
+  assert.match(restored.llmCalls[0][0].content, /获配 66 轮/);
+  assert.match(restored.llmCalls[0][0].content, /设置 → 工具调用/);
+  assert.match(restored.llmCalls[1].at(-1).content, /实际上什么都没有执行/);
+});
+
+test('追加预算：只有新调用才询问，同一任务接着读取并保留对写入的独立确认', async () => {
+  const read = call('read', { path: 'wb:/设定集/王都' });
+  const edit = call('edit', { path: 'wb:/设定集/王都', old: '人口十万', new: '人口三十万' });
+  const choices = [];
+  const fixture = makeHost({
+    agentSettings: { maxSteps: 1 },
+    replies: [read, edit, read, '改完并核实了。', read, '查到了。'],
+    requestMoreRounds: (request) => { choices.push([request.rounds, request.suggested, [...request.tools]]); return 2; },
+  });
+  const confirms = [];
+  const options = { interactiveBudget: true, confirm: (request) => { confirms.push(request.name); return 'allow'; } };
+  const first = await fixture.agent.run('修改并回读', options);
+  assert.equal(first.answer, '改完并核实了。');
+  assert.equal(first.rounds, 3);
+  assert.equal(first.changes, 1);
+  assert.equal((await fixture.agent.listRuns()).length, 1);
+  assert.match(fixture.llmCalls[3].at(-1).content, /人口三十万/);
+  assert.equal(fixture.agent.getSettings().maxSteps, 1);
+  const next = await fixture.agent.run('读取即可', options);
+  assert.equal(next.rounds, 1);
+  assert.equal(next.answer, '查到了。');
+  same(choices, [[1, 1, ['edit']]]);
+  same(confirms, ['edit']);
+});
+
+test('用完预算选择汇总后，待执行的写入不会运行，修改默认值只影响下一任务', async () => {
+  const read = call('read', { path: 'wb:/设定集/王都' });
+  const edit = call('edit', { path: 'wb:/设定集/王都', old: '人口十万', new: '人口三十万' });
+  const fixture = makeHost({
+    agentSettings: { maxSteps: 1 }, replies: [() => { fixture.agent.saveSettings({ maxSteps: 200 }); return read; }, edit, '只完成了读取。'],
+    requestMoreRounds: () => 0,
+  });
+  const result = await fixture.agent.run('先读再写', { interactiveBudget: true, confirm: () => 'allow' });
+  assert.equal(result.stopReason, 'step_limit');
+  assert.equal(result.rounds, 1);
+  assert.equal(result.answer, '只完成了读取。');
+  assert.equal(result.changes, 0);
+  assert.match(fixture.worldbooks.设定集[0].content, /人口十万/);
+  assert.match(fixture.llmCalls.at(-1).at(-1).content, /已到本次请求的工具步数上限/);
+});
+
+test('超长预算下连续三次同样的失败会收尾，不继续花费剩余轮数', async () => {
+  const invalid = call('no_such_card_tool', {});
+  const fixture = makeHost({ agentSettings: { maxSteps: 1000 }, replies: [invalid, invalid, invalid, '工具不存在。'] });
+  const result = await fixture.agent.run('核对角色卡');
+  assert.equal(result.stopReason, 'no_progress');
+  assert.equal(result.rounds, 3);
+  assert.match(fixture.llmCalls.at(-1).at(-1).content, /连续三轮相同调用/);
 });
 
 test('省 token：轻聊不带工具；关掉剧情察知；工具箱按需打开', async () => {
@@ -371,4 +616,91 @@ test('协议：标准写法、invoke 写法、块内 JSON、未闭合', () => {
   const open = protocol.parse('先说一句\n<tool_call name="write"><arg name="path">ws:/a</arg><arg name="content">没写完');
   assert.equal(open.truncated, true);
   assert.equal(open.calls.length, 0);
+});
+
+test('主循环：再次打开工具箱、恢复计划均重新执行，也可关闭自动打开的工具箱', async () => {
+  const openReader = call('toolbox', { name: 'reader' });
+  const todo = (text) => call('todo', { items: JSON.stringify([{ text, status: 'doing' }]) });
+  const update = [openReader, call('toolbox', { name: 'reader', action: 'close' }), openReader,
+    call('toolbox', { name: 'example', action: 'close' }), todo('甲'), todo('乙'), todo('甲')].join('\n');
+  const { agent, llmCalls } = makeHost({ replies: [update, '已更新。', '好的。'] });
+  agent.registerToolset({ name: 'example', auto: true, summary: '演示工具箱' });
+  agent.registerTool({ name: 'example_info', toolset: 'example', run() { return '可用'; } });
+  const plans = [];
+  const result = await agent.run('调整计划和工具箱', { onEvent(e) { if (e.type === 'todo') plans.push(e.items[0].text); } });
+  assert.ok(result.steps.every((step) => step.ok));
+  assert.deepEqual(plans, ['甲', '乙', '甲']);
+  await agent.run('确认');
+  assert.match(llmCalls[2][0].content, /【已打开的工具箱：reader】/);
+  assert.doesNotMatch(llmCalls[2][0].content, /【已打开的工具箱：example】/);
+});
+
+test('主循环：结构化失败传给模型和界面，部分写入抛错后重新读取现场', async () => {
+  const read = call('read_count', {});
+  const { agent, llmCalls } = makeHost({ replies: [read, read, call('advance_count', {}), read, '查完了。'] });
+  let attempt = 0, count = 0;
+  agent.registerTool({ name: 'read_count', scope: 'workspace', run() {
+    if (++attempt === 1) return { ok: false, note: '数据正在加载' };
+    return { ok: true, count };
+  } });
+  agent.registerTool({ name: 'advance_count', scope: 'workspace', effect: 'write', run() {
+    count++;
+    throw new Error('第二步写入失败');
+  } });
+  const events = [];
+  agent.on('tool:after', (e) => events.push(e.ok));
+  const result = await agent.run('获取计数并更新');
+  same(result.steps.map((step) => step.ok), [false, true, false, true]);
+  assert.deepEqual(events, [false, true, false, true]);
+  assert.equal(result.steps[0].summary, '数据正在加载');
+  assert.match(llmCalls[1].at(-1).content, /status="error"[\s\S]*数据正在加载/);
+  assert.match(llmCalls[4].at(-1).content, /"count": 1/);
+});
+
+test('主循环：缓存命中也须遵守本轮刚变更的读取规则', async () => {
+  const read = call('read', { path: 'wb:/设定集/王都' });
+  const { agent, llmCalls } = makeHost({ replies: [read, () => {
+    agent.saveSettings({ rules: [{ effect: 'deny', action: 'read', pattern: 'wb:/设定集/**' }] });
+    return read;
+  }, '已停止读取。'] });
+  const result = await agent.run('两次检查世界书');
+  assert.equal(result.steps[0].ok, true);
+  assert.ok(result.steps[1].denied);
+  assert.match(llmCalls[2].at(-1).content, /status="denied"/);
+  assert.doesNotMatch(llmCalls[2].at(-1).content, /守卫队长/);
+});
+
+test('主循环：用户确认期间切换聊天或收回写权限，原调用不能在新环境执行', async () => {
+  const write = call('edit', { path: 'wb:/设定集/王都', old: '人口十万', new: '人口九万' });
+  const switched = makeHost({ replies: [write, '结束。'] });
+  const stopped = await switched.agent.run('修改当前卡', { confirm() {
+    switched.ctx.getCurrentChatId = () => 'chat-2';
+    return 'always';
+  } });
+  assert.ok(stopped.aborted);
+  assert.match(switched.worldbooks.设定集[0].content, /人口十万/);
+  const revoked = makeHost({ replies: [write, '结束。'] });
+  const denied = await revoked.agent.run('修改当前卡', { confirm() {
+    revoked.agent.saveSettings({ mode: 'readonly' });
+    return 'allow';
+  } });
+  assert.ok(denied.steps[0].denied);
+  assert.match(revoked.worldbooks.设定集[0].content, /人口十万/);
+});
+
+test('撤销：插件部分写入后抛错仍保留写后镜像，外部后续修改按冲突处理', async () => {
+  const { agent, vfs } = makeHost({ replies: [call('toolbox', { name: 'example' }), call('partial_write', {}), '结束。'] });
+  const path = 'ws:/note.md';
+  await vfs.write(path, '原稿');
+  agent.registerTool({ name: 'partial_write', toolset: 'example', effect: 'write', scope: 'workspace', paths: () => [path],
+    async run() {
+      await vfs.write(path, '更新');
+      throw new Error('未完成其余更新');
+    } });
+  const report = await agent.run('分步更新');
+  assert.equal(report.steps[1].ok, false);
+  await vfs.write(path, '后续修改');
+  const undo = await agent.undo(report.runId);
+  same(undo.conflicts.map((item) => item.path), [path]);
+  assert.equal(await vfs.readText(path), '后续修改');
 });

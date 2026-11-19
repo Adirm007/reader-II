@@ -263,7 +263,7 @@
     });
 
     tool({
-      name: 'todo', effect: 'read', scope: 'workspace',
+      name: 'todo', effect: 'read', scope: 'workspace', volatile: true,
       summary: '多步骤的任务先列计划，做完一步更新一次。每次都给出完整清单。',
       params: [{
         name: 'items', type: 'json', required: true, desc: '数组，每项 { "text": 步骤, "status": "pending" | "doing" | "done" }',
@@ -291,11 +291,13 @@
     });
 
     tool({
-      name: 'toolbox', effect: 'read', scope: 'workspace',
+      name: 'toolbox', effect: 'read', scope: 'workspace', volatile: true,
       summary: '打开或关闭一个工具箱（见【工具箱】目录）。打开后会得到里面每个工具的说明，之后就能直接调用。',
       params: [{ name: 'name', type: 'string', required: true }, { name: 'action', type: 'string', desc: 'open（默认）或 close' }],
       run: function (args, ctx) {
         var name = String(args.name).trim();
+        if (name === 'core') throw new Error('核心工具始终可用。可打开或关闭的工具箱：' + registry.toolsets().map(function (set) { return set.name; }).join('、'));
+        if (args.action && args.action !== 'open' && args.action !== 'close') throw new Error('action 须为 open 或 close');
         var list = registry.tools(name);
         if (!list.length) throw new Error('没有名为 ' + name + ' 的工具箱。可用：' + registry.toolsets().map(function (set) { return set.name; }).join('、'));
         if (args.action === 'close') { if (ctx && ctx.closeToolset) ctx.closeToolset(name); return '已关闭工具箱 ' + name; }
@@ -321,12 +323,17 @@
       SETS[set].names.forEach(function (name) {
         var def = legacy.find(name);
         if (!def) return;
+        var binding = name === 'adapt_variables' || name === 'unbind_slot';
         registry.registerTool({
-          name: def.name, toolset: set, summary: def.summary, params: def.params || [], describe: def.describe, run: def.run, source: 'builtin',
+          name: def.name, toolset: set, summary: def.summary, params: def.params || [], run: def.run, source: 'builtin',
+          describe: binding ? function (args) { return '绑定变动需手动恢复。' + def.describe(args); } : def.describe,
+          volatile: def.volatile === true,
           effect: def.tier === 'dynamic' ? function (args) { return EFFECT[legacy.tierFor(def, args)] || 'write'; } : EFFECT[def.tier] || 'write',
           scope: set === 'tavern' ? 'tavern' : 'chat',
-          paths: set === 'reader' && def.tier !== 'read' ? function () { return ['var:/message/latest.json']; } : undefined,
-          irreversible: set === 'tavern' && def.tier !== 'read'
+          /* 绑定保存在聊天元数据中；用楼层镜像撤销会还原错误的资源。沿用既有权限目标。 */
+          target: binding ? 'var:/message/latest.json' : undefined,
+          paths: set === 'reader' && def.tier !== 'read' && !binding ? function () { return ['var:/message/latest.json']; } : undefined,
+          irreversible: binding || (set === 'tavern' && def.tier !== 'read')
         });
       });
     });

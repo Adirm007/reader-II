@@ -94,6 +94,18 @@
     function getVariables(option) {
       var type = option && option.type || 'chat';
       if (type === 'message') return clone(slot(messageAt(option.message_id, false), false) || {});
+      if (type === 'character') {
+        var ctx = context();
+        var card = ctx && ctx.characters && ctx.characters[ctx.characterId];
+        if (!card) throw new Error('请先打开要读取变量的角色卡');
+        if (card.shallow) throw new Error('角色卡资料尚未完整加载');
+        var extensions = card.data && card.data.extensions || {};
+        var settings = extensions.tavern_helper;
+        if (Array.isArray(settings)) settings = Object.fromEntries(settings);
+        var variables = settings === undefined ? extensions.TavernHelper_characterScriptVariables : settings && settings.variables;
+        if (variables !== undefined && !isObject(variables)) throw new Error('此角色卡的变量存储格式无法识别');
+        return clone(variables || {});
+      }
       if (type === 'chat') {
         var ctx = context();
         return clone(ctx && ctx.chatMetadata && isObject(ctx.chatMetadata.variables) ? ctx.chatMetadata.variables : {});
@@ -127,6 +139,7 @@
         if (typeof ctx.saveSettingsDebounced === 'function') ctx.saveSettingsDebounced();
         return;
       }
+      if (type === 'character') throw new Error('当前已能读取角色卡变量；写入该卡片字段需要酒馆助手的 replaceVariables 接口');
       throw new Error('没有酒馆助手时不支持 ' + type + ' 类型的变量');
     }
 

@@ -19,8 +19,9 @@
    */
   var mvu = modules.createNativeMvu(env);
   var hookedMvu = null;
-  var runtimeStore = modules.createRuntimeStore(env);
-  var guard = modules.createMvuGuard(env, runtimeStore);
+  var hostKit = modules.createHostKit(env);
+  var runtimeStore = modules.createRuntimeStore(env, hostKit.chatKey);
+  var guard = modules.createMvuGuard(env, runtimeStore, hostKit.chatKey);
   var lwbHost = typeof modules.createLwbHost === 'function' ? modules.createLwbHost(env) : null;
   var queue = Promise.resolve();
   var lastHostKind = 'mvu';
@@ -263,6 +264,7 @@
   var ready = Promise.resolve().then(ensureNamespace);
 
   var controller = {
+    chatKey: hostKit.chatKey,
     snapshot: async function () {
       await ready;
       if (!isEnabled()) return { data: { stat_data: {} }, reader: modules.createDefaultReaderState() };
@@ -292,7 +294,7 @@
   var semanticRouter = modules.createSemanticRouter(controller, runtimeStore, economy);
   var characterKeywordScanner = modules.createCharacterKeywordScanner(semanticRouter, env);
   var llmGateway = modules.createLlmGateway(env);
-  var adaptationLlm = modules.createAdaptationLlm(adapter, semanticRouter, runtimeStore, llmGateway);
+  var adaptationLlm = modules.createAdaptationLlm(adapter, semanticRouter, runtimeStore, llmGateway, hostKit);
 
   function compare(actual, operator, expected) {
     if (operator === 'exists') return actual !== undefined && actual !== null;
@@ -633,6 +635,7 @@
     listCharacterNames: semanticRouter.listCharacterNames,
     refreshCharacterKeywordScan: characterKeywordScanner.refresh,
     listTaskNames: semanticRouter.listTaskNames,
+    listSkillNames: semanticRouter.listSkillNames,
     hasSkill: semanticRouter.hasSkill,
     listStatuses: semanticRouter.listStatuses,
     findStatus: semanticRouter.findStatus,
@@ -678,8 +681,8 @@
   };
   API.getHostKind = currentHostKind;
   API.setHostKind = setHostKind;
-  API.kit = typeof modules.createHostKit === 'function' ? modules.createHostKit(env) : null;
-  var autoAdapt = modules.createAutoAdapt(API, llmGateway);
+  API.kit = hostKit;
+  var autoAdapt = modules.createAutoAdapt(API, llmGateway, adaptationLlm, semanticRouter);
   API.autoAdapt = autoAdapt.run;
 
   /* ---------- 夜梦助手与记忆：同一个扩展包里的 host.ReaderII（agent/boot.js 装配，排在本模块之后） ---------- */

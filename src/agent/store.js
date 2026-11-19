@@ -116,8 +116,9 @@
       if (run.changes || run.notes.length) { await persist(run); await prune(); }
     }
 
-    async function list(limit) {
+    async function list(limit, chat) {
       var runs = (await store.all('runs')) || [];
+      if (chat !== undefined) runs = runs.filter(function (run) { return run.chat === chat; });
       runs.sort(function (left, right) { return right.startedAt - left.startedAt; });
       return runs.slice(0, limit || KEEP_RUNS);
     }
@@ -144,12 +145,14 @@
     }
 
     /*
-     * io: { read(path) → string|null, restore(path, before|null) }
+     * io: { chat, read(path) → string|null, restore(path, before|null) }
      * 返回 { restored: [path], conflicts: [{path, reason}], notes: [不可自动撤销的操作] }
      */
     async function undo(runId, io, options) {
       var force = options && options.force === true;
       var record = await store.get('runs', runId);
+      if (!record) throw new Error('找不到这轮改动的运行记录');
+      if (io.chat !== undefined && record.chat !== io.chat) throw new Error('这轮改动属于另一个聊天，请回到原聊天撤销');
       var items = (await changes(runId)).reverse();
       var report = { restored: [], conflicts: [], notes: record && record.notes || [] };
       for (var index = 0; index < items.length; index += 1) {
@@ -168,7 +171,8 @@
           report.conflicts.push({ path: item.path, reason: String(error && error.message || error).slice(0, 160) });
         }
       }
-      if (record) { record.undone = report.conflicts.length === 0; await store.put('runs', runId, record); }
+      record.undone = items.length > 0 && report.conflicts.length === 0;
+      await store.put('runs', runId, record);
       return report;
     }
 

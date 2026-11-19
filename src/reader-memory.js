@@ -379,6 +379,7 @@
     }
 
     async function ensureOceanBook() {
+      await kit.prepareWorldbooks();
       var name = findOceanBook();
       if (!name) {
         name = settings.oceanBook;

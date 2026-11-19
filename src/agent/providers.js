@@ -308,8 +308,9 @@
       return (entry.enabled === false ? '[关] ' : '') + (strategy.type === 'constant' ? '常驻' : strategy.type === 'vectorized' ? '向量' : '关键词') + (keys ? '：' + keys : '');
     }
 
-    async function locateEntry(segs) {
-      var entries = await kit.readWorldbook(segs[0]);
+    async function locateEntry(segs, optional) {
+      var entries = await kit.readWorldbook(segs[0], { optional: optional === true });
+      if (!entries) return null;
       var meta = /\.meta\.json$/.test(segs[1]);
       var entry = pick(entries, segs[1].replace(/\.meta\.json$/, ''), entryName, entryId);
       return { entries: entries, entry: entry, meta: meta, name: segs[1].replace(/\.meta\.json$/, '') };
@@ -324,6 +325,7 @@
       },
       list: async function (segs, options) {
         if (!segs.length) {
+          await kit.prepareWorldbooks();
           var scopes = kit.worldbookScopes();
           return page(scopes.all.map(function (name) {
             var marks = [];
@@ -339,9 +341,10 @@
       },
       read: async function (segs) {
         if (segs.length < 2) return null;
-        if (kit.worldbookNames().indexOf(segs[0]) < 0) return null;
-        var found = await locateEntry(segs);
-        if (!found.entry) return null;
+        /* 插件能直接确认书名。原生目录可能尚未刷新，按文件名读取已存在的书。 */
+        if (kit.fn('getWorldbookNames') && kit.worldbookNames().indexOf(segs[0]) < 0) return null;
+        var found = await locateEntry(segs, true);
+        if (!found || !found.entry) return null;
         if (!found.meta) return String(found.entry.content || '');
         var meta = modules.clone(found.entry);
         delete meta.content;
@@ -349,6 +352,7 @@
       },
       write: async function (segs, text) {
         if (segs.length < 2) throw new Error('要写到 wb:/<书>/<条目>');
+        await kit.prepareWorldbooks();
         if (kit.worldbookNames().indexOf(segs[0]) < 0) await kit.createWorldbook(segs[0]);
         var found = await locateEntry(segs);
         if (!found.entry) {
@@ -379,6 +383,7 @@
       },
       bulk: async function (segs) {
         if (segs.length > 1) return null;
+        await kit.prepareWorldbooks();
         var books = segs.length ? [segs[0]] : kit.worldbookNames();
         var output = [];
         for (var index = 0; index < books.length; index += 1) {
@@ -640,7 +645,7 @@
 
     vfs.mount({
       id: 'var', title: '变量', hint: 'var:/chat.json · global.json · character.json · message/<楼层|latest>.json · mvu.json（最新楼的 MVU 变量）；用 #/路径 取子树，如 var:/mvu.json#/stat_data/主角',
-      scope: function (segs) { return segs[0] === 'global.json' ? 'tavern' : 'chat'; },
+      scope: function (segs) { return segs[0] === 'global.json' ? 'tavern' : segs[0] === 'character.json' ? 'card' : 'chat'; },
       list: function (segs, options) {
         if (segs[0] === 'message') {
           var total = kit.chatLength();

@@ -44,7 +44,9 @@
       if (!modules.isSemanticSlot(slot)) throw new Error('未知语义槽位：' + slot);
       var segments = economy.normalizeHostRef(input);
       if (!segments) throw new Error('宿主路径引用无效');
+      var stillCurrent = bindingGuard(slot);
       var snapshot = await controller.snapshot();
+      stillCurrent();
       var missing = {};
       var value = economy.getHostValue(snapshot.data, segments, missing);
       if (value === missing) throw new Error('宿主路径当前不存在');
@@ -63,34 +65,68 @@
       return routeFor(slot);
     }
 
+    /* 候选只在内存里试。提交时在写入队列中重读真实容器，同时切换路由、映射和指纹。 */
+    async function activateCandidate(slot, ref, mapping, stillCurrent) {
+      var chat = controller.chatKey();
+      var route = { status: 'active', rootRef: ref, brokenReason: '' };
+      var records = ['routing', 'semanticMappings', 'schemaFingerprints', 'mappingDrafts'];
+      var previous;
+      try {
+        await controller.mutate('confirm_semantic_binding:' + slot, function (data) {
+          stillCurrent();
+          var checked;
+          if (slot === 'location' || slot === 'currency') readBoundValue(data, slot, route);
+          else checked = modules.validateSemanticMapping(slot, mapping, ref, selectedContainer(data, route), { allowEmpty: true });
+          runtimeStore.mutate(function (state) {
+            previous = {};
+            records.forEach(function (key) { previous[key] = state[key][slot]; });
+            state.routing[slot] = route;
+            if (checked) {
+              state.semanticMappings[slot] = checked.mapping;
+              state.schemaFingerprints[slot] = checked.fingerprint;
+              state.mappingDrafts[slot] = checked;
+            }
+          });
+        });
+      } catch (error) {
+        if (previous && controller.chatKey() === chat && routeFor(slot).rootRef === ref && routeFor(slot).status === 'active') {
+          runtimeStore.mutate(function (state) {
+            records.forEach(function (key) {
+              if (previous[key] === undefined) delete state[key][slot];
+              else state[key][slot] = previous[key];
+            });
+          });
+        }
+        throw error;
+      }
+      return routeFor(slot);
+    }
+
+    function bindingGuard(slot) {
+      var chat = controller.chatKey();
+      var before = runtimeStore.read();
+      var signature = function (state) { return JSON.stringify([state.routing[slot], state.mappingDrafts[slot], state.semanticMappings[slot]]); };
+      var expected = signature(before);
+      return function () {
+        if (controller.chatKey() !== chat || signature(runtimeStore.read()) !== expected) throw new Error('聊天或槽位绑定已改变，请重新适配');
+      };
+    }
+
     async function confirmBinding(slot) {
       var route = routeFor(slot);
-      if (!route || route.status !== 'draft') throw new Error('槽位没有待确认草案');
-      var snapshot = await controller.snapshot();
-      if (slot === 'location' || slot === 'currency') readBoundValue(snapshot.data, slot, route);
-      else {
-        var runtimeBefore = runtimeStore.read();
-        var draft = runtimeBefore.mappingDrafts[slot];
-        if (!draft || !draft.mapping) throw new Error('容器映射尚未验证');
-        var checked = modules.validateSemanticMapping(slot, draft.mapping, route.rootRef, selectedContainer(snapshot.data, route), { allowEmpty: true });
-        runtimeStore.mutate(function (runtime) {
-          runtime.semanticMappings[slot] = checked.mapping;
-          runtime.schemaFingerprints[slot] = checked.fingerprint;
-        });
-      }
-      runtimeStore.mutate(function (runtime) {
-        runtime.routing[slot].status = 'active';
-        runtime.routing[slot].brokenReason = '';
-      });
-      await controller.mutate('confirm_semantic_binding:' + slot, function () {});
-      return routeFor(slot);
+      if (route.status !== 'draft') throw new Error('槽位没有待确认草案');
+      var draft = runtimeStore.read().mappingDrafts[slot];
+      if (modules.SEMANTIC_CONTAINER_SLOTS.indexOf(slot) >= 0 && (!draft || !draft.mapping)) throw new Error('容器映射尚未验证');
+      return activateCandidate(slot, route.rootRef, draft && draft.mapping, bindingGuard(slot));
     }
 
     async function validateMappingDraft(slot, input) {
       if (modules.SEMANTIC_CONTAINER_SLOTS.indexOf(slot) < 0) throw new Error('此槽位不需要容器映射');
       var route = routeFor(slot);
       if (route.status !== 'draft') throw new Error('请先手动选择此槽位的宿主根路径');
+      var stillCurrent = bindingGuard(slot);
       var snapshot = await controller.snapshot();
+      stillCurrent();
       var checked = modules.validateSemanticMapping(slot, input, route.rootRef, selectedContainer(snapshot.data, route), { allowEmpty: true });
       runtimeStore.mutate(function (runtime) {
         runtime.mappingDrafts[slot] = {
@@ -123,7 +159,9 @@
         if (allowedSlots.indexOf(slot) < 0) throw new Error('批量映射包含未知槽位：' + slot);
         if (slots.indexOf(slot) < 0) throw new Error('批量映射包含本次未锁定的槽位：' + slot);
       });
+      var checks = slots.map(bindingGuard);
       var snapshot = await controller.snapshot();
+      checks.forEach(function (check) { check(); });
       var checkedBySlot = {};
       slots.forEach(function (slot) {
         if (!Object.prototype.hasOwnProperty.call(input, slot)) throw new Error('批量映射缺少本次锁定槽位：' + slot);
@@ -213,22 +251,8 @@
         }
         return [];
       }
-      try {
-        var runtime = runtimeStore.read();
-        var mapping = runtime.semanticMappings[slot];
-        if (!mapping) throw new Error('已确认映射缺失，请重新适配');
-        var container = selectedContainer(snapshot.data, route);
-        var fingerprint = modules.semanticStructureFingerprint(container);
-        if (runtime.schemaFingerprints[slot] !== fingerprint) {
-          var rechecked = modules.validateSemanticMapping(slot, mapping, route.rootRef, container, { allowEmpty: true });
-          runtimeStore.mutate(function (state) { state.schemaFingerprints[slot] = rechecked.fingerprint; });
-          mapping = rechecked.mapping;
-        }
-        return modules.normalizeSemanticContainer(mapping, container);
-      } catch (error) {
-        markBroken(slot, error.message || String(error));
-        throw error;
-      }
+      var target = boundContainer(snapshot.data, slot, route);
+      return modules.normalizeSemanticContainer(target.mapping, target.container);
     }
 
     async function listCharacterNames() {
@@ -265,26 +289,9 @@
             entry: modules.clone(entry)
           };
         }
-        var runtime = runtimeStore.read();
-        var mapping = runtime.semanticMappings.statuses;
-        if (!mapping) {
-          markBroken('statuses', '宿主状态映射缺失，请重新适配');
-          throw new Error('宿主状态映射缺失，请重新适配');
-        }
-        var container;
-        try {
-          container = selectedContainer(data, route);
-          var beforeFingerprint = modules.semanticStructureFingerprint(container);
-          if (runtime.schemaFingerprints.statuses !== beforeFingerprint) {
-            var checked = modules.validateSemanticMapping('statuses', mapping, route.rootRef, container, { allowEmpty: true });
-            mapping = checked.mapping;
-            runtimeStore.mutate(function (state) { state.schemaFingerprints.statuses = checked.fingerprint; });
-          }
-        } catch (error) {
-          markBroken('statuses', error.message || String(error));
-          throw error;
-        }
-        var result = modules.insertSemanticStatusIfAbsent(mapping, container, canonical);
+        var target = boundContainer(data, 'statuses', route);
+        var container = target.container;
+        var result = modules.insertSemanticStatusIfAbsent(target.mapping, container, canonical);
         if (result.inserted) result.target = {
           kind: 'host_status',
           rootRef: route.rootRef,
@@ -383,12 +390,21 @@
     }
 
     function boundContainer(data, slot, route) {
-      var mapping = runtimeStore.read().semanticMappings[slot];
-      if (!mapping) throw new Error('宿主映射缺失，请在 Reader Core 面板重新适配');
-      var missing = {};
-      var container = economy.getHostValue(data, rootSegments(route), missing);
-      if (container === missing || !container || typeof container !== 'object') throw new Error('宿主容器路径已失效，请在 Reader Core 面板重新适配');
-      return { mapping: mapping, container: container };
+      try {
+        var state = runtimeStore.read();
+        var mapping = state.semanticMappings[slot];
+        if (!mapping) throw new Error('宿主映射缺失，请重新适配');
+        var container = selectedContainer(data, route);
+        var fingerprint = modules.semanticStructureFingerprint(container);
+        if (state.schemaFingerprints[slot] !== fingerprint) {
+          var checked = modules.validateSemanticMapping(slot, mapping, route.rootRef, container, { allowEmpty: true });
+          runtimeStore.mutate(function (runtime) { runtime.schemaFingerprints[slot] = checked.fingerprint; });
+        }
+        return { mapping: mapping, container: container };
+      } catch (error) {
+        markBroken(slot, error.message || String(error));
+        throw error;
+      }
     }
 
     function txCurrencyRead(data) {
@@ -491,6 +507,8 @@
       getRoute: routeFor,
       selectRoot: selectRoot,
       confirmBinding: confirmBinding,
+      bindingGuard: bindingGuard,
+      activateCandidate: activateCandidate,
       unbind: unbind,
       validateMappingDraft: validateMappingDraft,
       validateMappingBatchDraft: validateMappingBatchDraft,
@@ -498,6 +516,7 @@
       listImportantCharacters: function () { return readContainerSlot('characters'); },
       listCharacterNames: listCharacterNames,
       listTaskNames: function () { return readContainerSlot('tasks'); },
+      listSkillNames: function () { return readContainerSlot('skills'); },
       hasSkill: async function (name) {
         var target = String(name || '').trim();
         return target ? (await readContainerSlot('skills')).indexOf(target) >= 0 : false;

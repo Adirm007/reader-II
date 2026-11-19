@@ -133,8 +133,9 @@
     return data;
   }
 
-  function createMvuGuard(env, runtimeStore) {
+  function createMvuGuard(env, runtimeStore, chatKey) {
     var lastReader = null;
+    var lastReaderChat = null;
     var installed = false;
 
     function isKuromaku() {
@@ -147,6 +148,7 @@
 
     function remember(data) {
       if (data && data.stat_data && data.stat_data.READER) {
+        lastReaderChat = chatKey();
         lastReader = normalizeReaderState(data.stat_data.READER, runtimeStore && runtimeStore.read().routing, isKuromaku());
       }
       return data;
@@ -154,7 +156,7 @@
 
     function guard(data, previous) {
       var fallback = previous && previous.stat_data && previous.stat_data.READER;
-      if (!fallback) fallback = lastReader;
+      if (!fallback && lastReaderChat === chatKey()) fallback = lastReader;
       var routing = runtimeStore && runtimeStore.read ? runtimeStore.read().routing : undefined;
       ensureReaderNamespace(data, fallback, routing, isKuromaku());
       remember(data);

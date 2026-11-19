@@ -126,15 +126,8 @@
       run: async function () {
         var reader = core();
         var output = { routing: {} };
-        var routing = reader.getSemanticRouting();
-        Object.keys(routing).forEach(function (slot) {
-          var route = routing[slot];
-          output.routing[slot] = {
-            label: SLOT_LABELS[slot] || slot,
-            status: route.status,
-            target: route.status === 'active' ? modules.readerHostDisplayPath(route.rootRef) : route.status === 'broken' ? '已损坏：' + route.brokenReason : 'Reader 后备变量'
-          };
-        });
+        if (typeof reader.isEnabled === 'function') output.readerEnabled = reader.isEnabled();
+        if (output.readerEnabled === false) output.note = '当前角色卡尚未启用 Reader-II，所列后备值来自休眠状态。可在助手「设置 → 这张卡」启用。';
         var read = async function (key, getter) {
           try { output[key] = await getter(); } catch (error) { output[key] = '读取失败：' + String(error && error.message || error).slice(0, 120); }
         };
@@ -142,6 +135,7 @@
         await read('fp', function () { return reader.getFpBalance(); });
         await read('statuses', function () { return reader.listStatuses(); });
         await read('tasks', function () { return reader.listTaskNames(); });
+        await read('skills', function () { return reader.listSkillNames(); });
         await read('characters', async function () {
           return (await reader.listImportantCharacters()).map(function (item) {
             return { name: item.name, favor: item.favor, present: item.present, identity: item.identity };
@@ -149,6 +143,17 @@
         });
         if (typeof reader.listInventory === 'function') await read('inventory', async function () {
           return (await reader.listInventory()).map(function (item) { return { name: item.name, count: item.count, quality: item.quality, type: item.type }; }).slice(0, 80);
+        });
+        /* 读取槽值时会发现失效的映射，最后取路由才能报告本轮复核后的状态。 */
+        var routing = reader.getSemanticRouting();
+        Object.keys(routing).forEach(function (slot) {
+          var route = routing[slot];
+          output.routing[slot] = {
+            label: SLOT_LABELS[slot] || slot,
+            status: route.status,
+            target: route.rootRef ? modules.readerHostDisplayPath(route.rootRef) : 'Reader 后备变量'
+          };
+          if (route.brokenReason) output.routing[slot].reason = route.brokenReason;
         });
         var names = kit.names();
         output.card = names.char;
@@ -336,16 +341,28 @@
 
     tool({
       name: 'adapt_variables', tier: 'write',
-      summary: '一键适配：自动把这张卡的 MVU 变量接到 Reader-II 的七个语义槽（地点、重要角色、任务、技能、状态、货币、背包）。已启用的槽位不动；逐槽返回绑定到哪条路径或为什么没绑上。',
+      summary: '自动适配当前卡的七个语义槽。已查明准确路径时可用 roots 定向绑定或修正已启用的槽；失败保留原绑定。按槽返回结果，再用 reader_state 回读。',
       params: [
         { name: 'use_llm', type: 'boolean', desc: '是否用一次模型调用做语义寻路（默认 true；false 只用结构启发式）' },
-        { name: 'slots', type: 'json', desc: '只适配这些槽位（数组，可省略）' }
+        { name: 'slots', type: 'json', desc: '只处理这些槽；省略时处理 roots 中的槽或自动发现七槽', schema: { type: 'array', items: { type: 'string', enum: Object.keys(SLOT_LABELS) }, minItems: 1 } },
+        { name: 'roots', type: 'json', desc: '已核实的槽名与路径段数组，如 {"inventory":["人物","背包","道具"]}；可省略开头的 stat_data，路径段中的点号按字面处理', schema: { type: 'object', additionalProperties: { type: 'array', items: { anyOf: [{ type: 'string' }, { type: 'integer', minimum: 0 }] }, minItems: 1 } } },
+        { name: 'mappings', type: 'json', desc: '按槽提供已核对的容器 DSL，用于自动识别不足时；每项须在 roots 指定根，字段来自真实数据或此卡变量更新规则', schema: { type: 'object', additionalProperties: { type: 'object' } } }
       ],
-      describe: function () { return '自动寻找宿主变量并绑定语义槽（已启用的保持不变）'; },
+      describe: function (args) {
+        if (!modules.isObject(args.roots)) return '自动寻找并绑定' + (Array.isArray(args.slots) ? args.slots.map(function (slot) { return SLOT_LABELS[slot] || slot; }).join('、') : '当前卡语义槽');
+        return '按指定路径绑定：' + Object.keys(args.roots).map(function (slot) {
+          return (SLOT_LABELS[slot] || slot) + ' → ' + JSON.stringify(args.roots[slot]);
+        }).join('，');
+      },
       run: async function (args, ctx) {
         var reader = core();
         if (typeof reader.autoAdapt !== 'function') throw new Error('当前主系统版本不支持一键适配，请在 Reader Core 面板手动绑定');
-        return reader.autoAdapt({ useLlm: args.use_llm !== false, slots: Array.isArray(args.slots) ? args.slots : undefined, signal: ctx && ctx.signal });
+        if (args.slots !== undefined && (!Array.isArray(args.slots) || !args.slots.length || args.slots.some(function (slot) { return !Object.prototype.hasOwnProperty.call(SLOT_LABELS, slot); }))) throw new Error('slots 需要非空的语义槽名数组：' + Object.keys(SLOT_LABELS).join(', '));
+        if (args.roots !== undefined && (!modules.isObject(args.roots) || !Object.keys(args.roots).length)) throw new Error('roots 需要按槽名指定至少一个路径段数组');
+        if (args.mappings !== undefined && (!modules.isObject(args.mappings) || Object.keys(args.mappings).some(function (slot) {
+          return !args.roots || !Object.prototype.hasOwnProperty.call(args.roots, slot);
+        }))) throw new Error('mappings 中的每个槽都需要一个明确的 roots 路径');
+        return reader.autoAdapt({ useLlm: args.use_llm !== false, slots: args.slots, roots: args.roots, mappings: args.mappings, signal: ctx && ctx.signal, canReadRule: ctx && ctx.canReadRule });
       }
     });
 
@@ -648,7 +665,7 @@
 
     /* ---------- 界面 ---------- */
     tool({
-      name: 'reader_ui', tier: 'read',
+      name: 'reader_ui', tier: 'read', volatile: true,
       summary: '替用户打开读者的界面：lobby 大厅、gacha 命运抽卡、bookshelf 书架、gallery 相册、chess 棋局、panel 语义适配面板、memory 记忆管理。',
       params: [{ name: 'open', type: 'string', required: true, desc: 'lobby | gacha | bookshelf | gallery | chess | panel | memory' }],
       run: async function (args) {
