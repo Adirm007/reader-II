@@ -88,6 +88,7 @@ function makeHost(options = {}) {
   };
   /* 酒馆主 API：模拟酒馆的 sendOpenAIRequest——组好请求、广播 CHAT_COMPLETION_SETTINGS_READY、再“发出去”。 */
   const openaiModule = {
+    ...options.openaiBuilder,
     sendOpenAIRequest: async (type, messages) => {
       const data = { type, messages: messages.filter(Boolean), model: 'main-model', stream: true, temperature: 1, chat_completion_source: 'openai' };
       await eventSource.emit('chat_completion_settings_ready', data);
@@ -117,6 +118,7 @@ function makeHost(options = {}) {
         const answer = options.backend(body, log.backend.length);
         const status = answer && answer.status ? answer.status : 200;
         const payload = answer && answer.status ? answer.body : answer;
+        if (options.wrapResponse) return options.wrapResponse(Response.json(payload, { status }));
         return { ok: status < 400, status, headers: { get: () => 'application/json' }, text: async () => JSON.stringify(payload), json: async () => clone(payload) };
       }
       return { ok: true, status: 200, headers: { get: () => 'text/plain' }, text: async () => `---\nname: demo\ndescription: 演示\n---\n正文`, json: async () => [] };
@@ -345,6 +347,50 @@ test('模型无视 tools、只说不做：提醒一次 → 仍不动 → 换文�
   assert.equal(finished.answer, '现在开始您可以直接使用了。');
 });
 
+test('工具参数被宿主压成正文：保留上轮已执行的操作，切到文本协议重问当前一步', async () => {
+  const flattened = '我这就检查。\n[object Object],[object Object],[object Object]\n\nreader-ii\n\ncard:/\n100';
+  let writes = 0;
+  const { agent, run, log } = makeHost({
+    backend: (_, turn) => turn === 1
+      ? reply({ tool_calls: [nativeCall('mark_card', {})] })
+      : reply({ content: flattened }),
+    text: (_, turn) => turn === 1 ? textCall('read', { path: 'wb:/设定集/王都' }) : '王都的守卫队长是雷恩。',
+  });
+  agent.registerTool({ name: 'mark_card', toolset: 'core', summary: '做标记', params: [], effect: 'write', scope: 'card',
+    run: () => { writes++; return '已标记'; } });
+  const result = await run('做标记并核对守卫队长。');
+  assert.equal(result.answer, '王都的守卫队长是雷恩。');
+  same(result.steps.map((step) => step.name), ['mark_card', 'read']);
+  assert.equal(writes, 1);
+  assert.equal(log.backend.length, 2);
+  assert.match(log.text[0].prompts.at(-1).content, /action_result name="mark_card" status="ok"/);
+  assert.match(log.text[1].prompts.at(-1).content, /守卫队长是雷恩/);
+  for (const transcript of [log.text, log.events, agent.getHistory()]) {
+    assert.ok(!JSON.stringify(transcript).includes('[object Object]'));
+  }
+});
+
+test('结构缺失时严格模式报告本批未执行，普通正文仍可解释对象字符串', async () => {
+  const strict = makeHost({ settings: { toolProtocol: 'native' }, backend: () => reply({ content: 'card:/\n100' }, 'tool_calls') });
+  const result = await strict.run('列出这张卡。');
+  assert.match(result.error, /本批工具未执行/);
+  assert.equal(result.steps.length, 0);
+  assert.equal(strict.log.backend.length, 1);
+  assert.equal(strict.log.text.length, 0);
+
+  const flattened = '[object Object],[object Object],[object Object]\n\nreader-ii';
+  const broken = makeHost({ backend: () => reply({ content: flattened }), text: () => flattened });
+  const failure = await broken.run('查看资料。');
+  assert.match(failure.error, /本批工具未执行/);
+  assert.equal(broken.log.text.length, 1);
+  assert.equal(broken.agent.getHistory().length, 0);
+
+  const explanation = '数组转成字符串会显示 [object Object],[object Object]。';
+  const chat = makeHost({ backend: () => reply({ content: explanation }) });
+  assert.equal((await chat.run('为什么显示对象字符串？')).answer, explanation);
+  assert.equal(chat.log.text.length, 0);
+});
+
 test('原生调用下的边角：正文里夹带工具块、坏参数、未知工具、步数上限', async () => {
   /* 正文里夹带文本块：这一步按文本协议处理，结果放进 user 消息。 */
   const inline = makeHost({ backend: (body, turn) => (turn === 1
@@ -379,6 +425,85 @@ test('原生调用下的边角：正文里夹带工具块、坏参数、未知�
   assert.equal(last.tool_choice, 'none');
   assert.match(last.messages.at(-1).content, /已到本次请求的工具步数上限/);
   assert.equal(last.messages.at(-1).role, 'tool');
+});
+
+test('酒馆预设消费展示用的 tool_calls 时，助手按原始响应执行三个工具并回传对应结果', async () => {
+  const calls = [
+    nativeCall('todo', { items: ['读卡', '查知识', '核对'].map(text => ({ text, status: 'pending' })) }),
+    nativeCall('skill', { name: 'reader-ii' }),
+    nativeCall('ls', { path: 'card:/', limit: 100 }),
+  ];
+  function wrapResponse(response) {
+    const readJson = response.json.bind(response);
+    Object.defineProperty(response, 'json', { value: async () => {
+      const data = await readJson();
+      const choice = data.choices[0];
+      if (choice.message.tool_calls) {
+        choice.message.content = choice.message.tool_calls.map(call =>
+          Object.values(JSON.parse(call.function.arguments)).map(String).join('\n')).join('\n\n');
+        delete choice.message.tool_calls;
+        choice.finish_reason = 'stop';
+      }
+      return data;
+    } });
+    return response;
+  }
+  const raw = reply({ content: '', tool_calls: calls }, 'tool_calls');
+  const displayed = await wrapResponse(Response.json(raw)).json();
+  assert.equal(displayed.choices[0].message.content, '[object Object],[object Object],[object Object]\n\nreader-ii\n\ncard:/\n100');
+  const settings = { chat_completion_source: 'openai', temperature: 0.35, extensions: { SPreset: {
+    OutputPreprocessing: { enabled: true, consumeToolCalls: true },
+  } } };
+  for (const via of ['backend', 'openai']) {
+    const { run, log, eventSource } = makeHost({
+      preset: via === 'openai' ? null : PRESET,
+      openaiBuilder: {
+        oai_settings: settings,
+        getChatCompletionModel: () => 'fixture-model',
+        createGenerationParameters: async (active, model, type, messages) => ({
+          generate_data: { ...active, model, type, messages, stream: false },
+        }),
+      },
+      backend: (_body, turn) => turn === 1 ? raw : reply({ content: '已核对工具结果。' }),
+      wrapResponse,
+    });
+    eventSource.on('chat_completion_settings_ready', data => { data.preset_hook = 'applied'; });
+    const result = await run('读取这张卡并核对结果');
+    assert.equal(result.error, '', via);
+    assert.equal(result.answer, '已核对工具结果。', via);
+    assert.equal(result.protocol, 'native');
+    same(result.steps.map(step => [step.name, step.ok]), [['todo', true], ['skill', true], ['ls', true]]);
+    assert.equal(log.backend.length, 2);
+    assert.equal(log.text.length, 0);
+    const transcript = log.backend[1].body.messages;
+    same(transcript.find(msg => msg.role === 'assistant').tool_calls, calls);
+    same(transcript.filter(msg => msg.role === 'tool').map(msg => msg.tool_call_id), calls.map(call => call.id));
+    if (via === 'openai') {
+      assert.equal(log.backend[0].body.preset_hook, 'applied');
+      assert.equal(log.backend[0].body.model, 'fixture-model');
+      assert.equal(log.backend[0].body.temperature, settings.temperature);
+    }
+  }
+});
+
+test('使用预设取得原始响应时尊重服务端拒答和截断，写工具不会执行或再次发送', async () => {
+  const settings = { extensions: { SPreset: { OutputPreprocessing: { enabled: true, consumeToolCalls: true } } } };
+  for (const reason of ['refusal', 'length']) {
+    const { run, log } = makeHost({
+      preset: null,
+      openaiBuilder: {
+        oai_settings: settings,
+        getChatCompletionModel: () => 'fixture',
+        createGenerationParameters: async (_settings, model, type, messages) => ({ generate_data: { model, type, messages } }),
+      },
+      backend: () => reply({ content: '', tool_calls: [nativeCall('write', { path: 'fixture', text: 'pending' })] }, reason),
+    });
+    const result = await run('试验中止响应');
+    assert.match(result.error, new RegExp(reason));
+    assert.equal(result.steps.length, 0);
+    assert.equal(log.backend.length, 1);
+    assert.equal(log.text.length, 0);
+  }
 });
 
 test('酒馆主 API：沿用酒馆的连接与预设，只在请求发出前补上 tools；别人的请求不动', async () => {

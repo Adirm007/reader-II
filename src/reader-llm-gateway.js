@@ -16,14 +16,27 @@
   var PANEL_PRESET_ID = 'readerii';
   var TRANSIENT = /\b(?:408|409|425|429|500|502|503|504|520|522|524|529|530)\b|timeout|timed out|超时|overloaded|temporarily|ECONNRESET|network|fetch failed|Failed to fetch|tunnel|未返回可用文本|empty/i;
 
+  function contentText(content) {
+    if (typeof content === 'string') return content;
+    if (!Array.isArray(content)) return '';
+    return content.map(function (part) {
+      if (typeof part === 'string') return part;
+      if (part && (part.type === 'text' || part.type === 'output_text') && typeof part.text === 'string') return part.text;
+      return '';
+    }).join('');
+  }
+
   function responseText(result) {
     if (typeof result === 'string') return result;
     if (!result || typeof result !== 'object') return '';
     if (typeof result.content === 'string') return result.content;
+    var blockText = contentText(result.content);
+    if (blockText) return blockText;
     if (typeof result.text === 'string') return result.text;
     if (typeof result.response === 'string') return result.response;
     if (Array.isArray(result.choices) && result.choices[0]) {
-      return String(result.choices[0].text || result.choices[0].message && result.choices[0].message.content || '');
+      var choice = result.choices[0];
+      return contentText(choice.text) || contentText(choice.message && choice.message.content);
     }
     return '';
   }
@@ -291,8 +304,7 @@
       var response = await fetcher(String(api.apiurl).replace(/\/+$/, '') + '/chat/completions', { method: 'POST', headers: headers, body: JSON.stringify(body), signal: request.signal });
       if (!response.ok) throw new Error('独立 API 返回 HTTP ' + response.status + '：' + String(await response.text()).slice(0, 300));
       var data = await response.json();
-      var choice = data && data.choices && data.choices[0];
-      return choice && choice.message && typeof choice.message.content === 'string' ? choice.message.content : '';
+      return responseText(data);
     }
 
     /*
@@ -406,16 +418,6 @@
       return /tool|function[_ ]?call|functions?\b|not\s+support|unsupported|unknown (?:field|parameter|argument)|unrecognized|extra[_ ]?(?:fields|inputs)|additional properties|不支持|无法识别/i.test(String(text || ''));
     }
 
-    function contentText(content) {
-      if (typeof content === 'string') return content;
-      if (!Array.isArray(content)) return '';
-      return content.map(function (part) {
-        if (typeof part === 'string') return part;
-        if (part && (part.type === 'text' || part.type === 'output_text') && typeof part.text === 'string') return part.text;
-        return '';
-      }).join('');
-    }
-
     function argumentText(value) {
       if (typeof value === 'string') return value;
       try { return JSON.stringify(value == null ? {} : value); } catch (error) { return '{}'; }
@@ -429,7 +431,9 @@
       var out = { text: '', toolCalls: [], reasoning: '', finish: '', message: null };
       if (!modules.isObject(data)) { out.text = typeof data === 'string' ? data : ''; return out; }
       var choice = Array.isArray(data.choices) ? data.choices[0] : null;
-      var message = choice && modules.isObject(choice.message) ? choice.message : null;
+      var message = choice && modules.isObject(choice.message) ? choice.message
+        : Array.isArray(data.tool_calls) || modules.isObject(data.function_call) ? data : null;
+      out.finish = String(choice && choice.finish_reason || data.finish_reason || data.stop_reason || '');
       var wire = [];
       function push(id, name, args, extra) {
         if (!name) return;
@@ -440,7 +444,6 @@
       if (message) {
         out.text = contentText(message.content);
         out.reasoning = String(message.reasoning_content || message.reasoning || '');
-        out.finish = String(choice.finish_reason || '');
         (Array.isArray(message.tool_calls) ? message.tool_calls : []).forEach(function (item) {
           if (!item) return;
           var fn = modules.isObject(item.function) ? item.function : item;
@@ -455,9 +458,8 @@
       /* Claude：content 是块数组，tool_use 块就是调用。 */
       var blocks = Array.isArray(data.content) ? data.content : null;
       if (blocks && !out.toolCalls.length) {
-        if (!out.text) out.text = blocks.filter(function (block) { return block && block.type === 'text'; }).map(function (block) { return String(block.text || ''); }).join('');
+        if (!out.text) out.text = contentText(blocks);
         blocks.forEach(function (block) { if (block && block.type === 'tool_use') push(block.id, block.name, block.input); });
-        if (!out.finish) out.finish = String(data.stop_reason || '');
       }
       /* Gemini：酒馆后端同时给出 choices 与 responseContent；functionCall 在 parts 里。 */
       var candidate = Array.isArray(data.candidates) && data.candidates[0] && data.candidates[0].content;
@@ -530,18 +532,24 @@
         body.custom_url = api.apiurl;
         if (api.key) body.custom_include_headers = 'Authorization: ' + JSON.stringify('Bearer ' + api.key);
       }
+      return sendBackendBody(ctx, fetcher, body, request.signal, '独立 API');
+    }
+
+    async function sendBackendBody(ctx, fetcher, body, signal, label) {
       var headers = Object.assign({ 'Content-Type': 'application/json' }, ctx.getRequestHeaders() || {});
-      var response = await fetcher('/api/backends/chat-completions/generate', { method: 'POST', headers: headers, body: JSON.stringify(body), signal: request.signal, cache: 'no-cache' });
+      var response = await fetcher('/api/backends/chat-completions/generate', { method: 'POST', headers: headers, body: JSON.stringify(body), signal: signal, cache: 'no-cache' });
       if (!response.ok) {
         var detail = await readFailure(response);
         if (body.tools && looksUnsupported(response.status, detail)) throw unsupportedError('这个接口不接受原生函数调用（HTTP ' + response.status + '：' + detail + '）');
-        throw new Error('独立 API 返回 HTTP ' + response.status + '：' + detail);
+        throw new Error(label + ' 返回 HTTP ' + response.status + '：' + detail);
       }
-      var data = await response.json();
+      /* 展示用预设可以改写 Response 实例的 json()，把调用消费为正文；助手需要同一次响应的协议数据。 */
+      var data = body.tools ? JSON.parse(await response.text()) : await response.json();
+      if (data && data.quota_error) throw new Error(label + ' 配额不足');
       if (data && data.error) {
         var message = String(modules.isObject(data.error) ? data.error.message || JSON.stringify(data.error) : data.message || data.response || '接口报错').slice(0, 400);
         if (body.tools && looksUnsupported(400, message)) throw unsupportedError('这个接口不接受原生函数调用（' + message + '）');
-        throw new Error('独立 API 报错：' + message);
+        throw new Error(label + ' 报错：' + message);
       }
       return data;
     }
@@ -558,7 +566,7 @@
         if (body.tools && looksUnsupported(response.status, detail)) throw unsupportedError('这个接口不接受原生函数调用（HTTP ' + response.status + '：' + detail + '）');
         throw new Error('独立 API 返回 HTTP ' + response.status + '：' + detail);
       }
-      return response.json();
+      return body.tools ? JSON.parse(await response.text()) : response.json();
     }
 
     /* 酒馆主 API：酒馆在请求发出前会广播一次 CHAT_COMPLETION_SETTINGS_READY，我们只认自己的那一次，把 tools 补进去。 */
@@ -572,18 +580,48 @@
       if (!api || typeof api.sendOpenAIRequest !== 'function') throw unsupportedError('这个版本的酒馆没有可用的聊天补全接口');
       var types = ctx.eventTypes || ctx.event_types || {};
       var eventName = types.CHAT_COMPLETION_SETTINGS_READY || 'chat_completion_settings_ready';
-      var first = messages[0];
-      var injected = false;
-      var inject = function (data) {
-        if (injected || !data || !Array.isArray(data.messages) || data.messages[0] !== first) return;
-        injected = true;
-        data.messages = messages;
+      function setAgentTools(data) {
         data.stream = false;
         data.include_reasoning = true;
         if (Array.isArray(request.tools) && request.tools.length) {
           data.tools = request.tools;
           data.tool_choice = request.toolChoice || 'auto';
         }
+      }
+      // 部分预设会在 sendOpenAIRequest 内部读取 json() 时把工具参数排版成正文。
+      var settings = ctx.chatCompletionSettings || api.oai_settings;
+      var preset = settings && settings.extensions && settings.extensions.SPreset;
+      var output = preset && preset.OutputPreprocessing;
+      if (output && output.enabled && output.consumeToolCalls) {
+        var fetcher = hostFetch();
+        if (typeof api.createGenerationParameters !== 'function' || typeof api.getChatCompletionModel !== 'function'
+            || !fetcher || typeof ctx.getRequestHeaders !== 'function' || typeof ctx.eventSource.emit !== 'function') {
+          // 这个限制取决于当前预设，只对本次请求切换协议。
+          throw new Error('当前预设会将原生调用转换成正文，这个版本的酒馆主 API 无法返回原始调用');
+        }
+        var model = api.getChatCompletionModel(settings);
+        var prepared = await api.createGenerationParameters(settings, model, 'quiet', messages, { allowToolCalls: false });
+        var body = prepared.generate_data;
+        setAgentTools(body);
+        await ctx.eventSource.emit(eventName, body);
+        body.stream = false;
+        var completion = await sendBackendBody(ctx, fetcher, body, request.signal, '酒馆主 API');
+        var choice = completion && completion.choices && completion.choices[0];
+        var stopReason = completion && completion.stop_reason || choice && choice.finish_reason;
+        if (['refusal', 'content_filter', 'max_tokens', 'length', 'model_context_window_exceeded'].indexOf(stopReason) !== -1) {
+          var stopped = new Error('模型已停止生成（' + stopReason + '），本批工具未执行。');
+          stopped.code = 'provider_stop';
+          throw stopped;
+        }
+        return completion;
+      }
+      var first = messages[0];
+      var injected = false;
+      var inject = function (data) {
+        if (injected || !data || !Array.isArray(data.messages) || data.messages[0] !== first) return;
+        injected = true;
+        data.messages = messages;
+        setAgentTools(data);
       };
       ctx.eventSource.on(eventName, inject);
       try {
@@ -626,7 +664,7 @@
             return mainRequest(messages, request);
           }, '', timeoutMs, request.signal);
           var parsed = parseToolResponse(data);
-          if (!parsed.text.trim() && !parsed.toolCalls.length) throw new Error('LLM 未返回可用文本');
+          if (!parsed.text.trim() && !parsed.toolCalls.length && !/^(?:tool_calls|function_call|tool_use)$/.test(parsed.finish)) throw new Error('LLM 未返回可用文本');
           parsed.via = support.via;
           return parsed;
         } catch (error) {

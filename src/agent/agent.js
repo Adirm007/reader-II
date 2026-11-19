@@ -590,6 +590,7 @@
         route: 'agent', maxTokens: settings.maxTokens, temperature: settings.temperature,
         timeoutMs: settings.timeoutSec * 1000, retries: 2, signal: signal
       };
+      var raw, finish = '', reasoning = '';
       if (proto.mode === 'native') {
         var reply = await llm.chatTools(Object.assign({
           messages: messages, tools: availableTools().map(protocol.toolSchema), toolChoice: forced ? 'none' : 'auto'
@@ -600,12 +601,21 @@
         });
         if (calls.length) return { style: 'native', text: reply.text, prose: String(reply.text || '').trim(), calls: calls, truncated: false, message: reply.message, reasoning: reply.reasoning };
         /* 有的模型仍会把工具块写进正文：这一步照文本协议处理。 */
-        var inline = protocol.parse(reply.text);
-        return { style: 'text', text: reply.text, prose: inline.prose, calls: inline.calls, truncated: inline.truncated, reasoning: reply.reasoning };
+        raw = reply.text;
+        finish = reply.finish;
+        reasoning = reply.reasoning;
+      } else {
+        raw = String(await llm.chat(Object.assign({ messages: plainMessages(messages), generationId: 'reader-agent' }, base)));
       }
-      var raw = String(await llm.chat(Object.assign({ messages: plainMessages(messages), generationId: 'reader-agent' }, base)));
       var parsed = protocol.parse(raw);
-      return { style: 'text', text: raw, prose: parsed.prose, calls: parsed.calls, truncated: parsed.truncated, reasoning: '' };
+      if (!parsed.calls.length && !parsed.truncated) {
+        /* 某些宿主丢弃了工具名及参数名，只留下单独一行对象数组和后续参数值。 */
+        var flattened = /(?:^|\n)\[object Object\](?:,\[object Object\])+(?:(?:\r?\n)+[\w.:/@%+-]+)+$/.test(parsed.prose);
+        if (flattened || /^(?:tool_calls|function_call|tool_use)$/.test(finish)) {
+          throw new Error('工具响应缺少可解析的调用，本批工具未执行。');
+        }
+      }
+      return { style: 'text', text: raw, prose: parsed.prose, calls: parsed.calls, truncated: parsed.truncated, reasoning: reasoning };
     }
 
     /*
@@ -760,7 +770,7 @@
           try { turn = await ask(proto, messages, forced, signal); }
           catch (error) {
             checkActive();
-            if (error && error.name === 'AbortError') throw error;
+            if (error && (error.name === 'AbortError' || error.code === 'provider_stop')) throw error;
             /* 自动模式下，原生调用这条路走不通（接口不认 tools，或带着调用记录的请求被拒）就改走文本协议接着做。 */
             if (proto.mode === 'native' && settings.toolProtocol === 'auto') {
               useText(String(error && error.message || error).slice(0, 200), !!(error && error.code === 'no_native_tools'));
