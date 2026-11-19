@@ -618,6 +618,7 @@
         + '<label>确认方式</label><select data-s="a.approval">' + option('ask', '每次写入前询问（推荐）', a.approval) + option('auto', '档位内直接执行，危险操作仍询问', a.approval) + option('yolo', '全部直接执行', a.approval) + '</select>'
         + '</div>'
         + group('对话')
+        + switchField('a.useAssistantPreset', a.useAssistantPreset, '启用酒馆预设', '默认关闭。开启后，夜梦使用当前预设中启用的提示词和宏；切换预设后，从下一次请求生效。')
         + switchField('a.plotContext', a.plotContext, '让助手了解当前剧情', '做前后端、修脚本时可以关掉，省 token')
         + switchField('a.lite', a.lite, '轻聊', '不带任何工具，只聊天')
         + switchField('a.recall', a.recall, '回答前自动带入相关记忆')

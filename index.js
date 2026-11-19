@@ -6,7 +6,8 @@
  * 入口只有一个去处：读者大厅。扩展菜单里的「Reader-II · 大厅」与不带内容的 /yume 都打开它；
  * 夜梦助手、助手设置、语义适配、记忆都在大厅的「彩蛋服务台」里。
  */
-const base = new URL('.', import.meta.url).href;
+const entry = new URL(import.meta.url);
+const base = new URL('.', entry).href;
 window.__ReaderIIBase = base;
 window.__ReaderIIQueue = window.__ReaderIIQueue || [];
 
@@ -59,7 +60,10 @@ function load() {
   if (window.ReaderII?.ready) { addEntries(); return; }
   if (document.querySelector('script[data-reader-ii]')) return;
   const script = document.createElement('script');
-  script.src = `${base}dist/reader-ii.ext.js`;
+  const bundle = new URL('dist/reader-ii.ext.js', base);
+  const version = entry.searchParams.get('v');
+  if (version) bundle.searchParams.set('v', version);
+  script.src = bundle.href;
   script.dataset.readerIi = '1';
   script.onload = addEntries;
   script.onerror = () => console.error('[ReaderII] 主包加载失败：', script.src);

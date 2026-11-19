@@ -13,6 +13,25 @@ import { loadLocalKeys, findOldLocalKeys, LOCAL_KEY_SITES } from '../build/local
 import fs from 'node:fs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+test('酒馆入口和主包使用同一发布版本作为缓存键', () => {
+  const manifest = JSON.parse(read(path.join(root, 'manifest.json')));
+  const script = read(path.join(root, 'index.js'));
+  const base = 'https://host.test/scripts/extensions/third-party/reader-II/';
+  assert.equal(manifest.js, 'index.js?v=' + manifest.version);
+  for (const version of [manifest.version, '9.9.9-preview.9']) {
+    const entry = new URL('index.js?v=' + version, base);
+    const appended = [];
+    const window = { requestIdleCallback(callback) { callback(); } };
+    const document = {
+      querySelector: () => null, createElement: () => ({ dataset: {} }),
+      head: { appendChild: node => appended.push(node) },
+    };
+    vm.runInNewContext(script.replaceAll('import.meta.url', JSON.stringify(entry.href)), { URL, window, document });
+    assert.equal(appended[0].src, base + 'dist/reader-ii.ext.js?v=' + version);
+    assert.equal(window.__ReaderIIBase, base);
+  }
+});
+
 const up = name => read(path.join(root, 'upstream/reader/source', name));
 const memo = new Map();
 const once = (key, fn) => { if (!memo.has(key)) memo.set(key, fn()); return memo.get(key); };

@@ -346,7 +346,7 @@
         { name: 'use_llm', type: 'boolean', desc: '是否用一次模型调用做语义寻路（默认 true；false 只用结构启发式）' },
         { name: 'slots', type: 'json', desc: '只处理这些槽；省略时处理 roots 中的槽或自动发现七槽', schema: { type: 'array', items: { type: 'string', enum: Object.keys(SLOT_LABELS) }, minItems: 1 } },
         { name: 'roots', type: 'json', desc: '已核实的槽名与路径段数组，如 {"inventory":["人物","背包","道具"]}；可省略开头的 stat_data，路径段中的点号按字面处理', schema: { type: 'object', additionalProperties: { type: 'array', items: { anyOf: [{ type: 'string' }, { type: 'integer', minimum: 0 }] }, minItems: 1 } } },
-        { name: 'mappings', type: 'json', desc: '按槽提供已核对的容器 DSL，用于自动识别不足时；每项须在 roots 指定根，字段来自真实数据或此卡变量更新规则', schema: { type: 'object', additionalProperties: { type: 'object' } } }
+        { name: 'mappings', type: 'json', desc: '通常省略，由工具检查实际数据和本卡变量规则。仅自动识别不足的容器才提供 DSL，如 {"characters":{"name":{"from":"key"},"fields":{"favor":{"path":["好感度"]}}}}。每项须在 roots 指定根。location 和 currency 只填 roots。', schema: modules.readerAdaptMappingsSchema() }
       ],
       describe: function (args) {
         if (!modules.isObject(args.roots)) return '自动寻找并绑定' + (Array.isArray(args.slots) ? args.slots.map(function (slot) { return SLOT_LABELS[slot] || slot; }).join('、') : '当前卡语义槽');

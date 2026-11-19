@@ -33,6 +33,7 @@
     plotContext: true,     /* 让助手了解当前剧情 */
     plotBudget: 1800,      /* 剧情摘要的字数预算 */
     lite: false,           /* 轻聊：完全不带工具 */
+    useAssistantPreset: false,
     toolProtocol: 'auto',  /* 工具调用方式：auto 能用原生函数调用就用，不行退回文本协议 | native 只用原生 | text 只用文本协议 */
     connectors: [],        /* 用户导入的插件对接描述 */
     web: {},               /* 联网：免问的主机、阅读代理（net.js 的 normalizeWebSettings；密钥不在这里，在本机的 secrets） */
@@ -72,6 +73,7 @@
       plotContext: source.plotContext !== false,
       plotBudget: clampInt(source.plotBudget, 200, 20000, DEFAULTS.plotBudget),
       lite: source.lite === true,
+      useAssistantPreset: source.useAssistantPreset === true,
       toolProtocol: ['auto', 'native', 'text'].indexOf(source.toolProtocol) >= 0 ? source.toolProtocol : DEFAULTS.toolProtocol,
       connectors: (Array.isArray(source.connectors) ? source.connectors : []).filter(modules.isObject).slice(0, 40),
       web: section('normalizeWebSettings', source.web),
@@ -385,9 +387,10 @@
       }
       var total = messages.reduce(function (sum, message) { return sum + size(message); }, 0);
       if (total <= budget) return;
-      while (messages[1] && messages[1].history && total > budget) {
-        total -= size(messages.splice(1, 1)[0]);
-        if (messages[1] && messages[1].history && messages[1].role === 'assistant') total -= size(messages.splice(1, 1)[0]);
+      for (var h = 1; h < messages.length && total > budget;) {
+        if (!messages[h].history) { h++; continue; }
+        total -= size(messages.splice(h, 1)[0]);
+        if (messages[h] && messages[h].history && messages[h].role === 'assistant') total -= size(messages.splice(h, 1)[0]);
       }
       for (var index = 1; index < messages.length && total > budget; index += 1) {
         var first = messages[index];
@@ -625,6 +628,7 @@
     async function probeTools() {
       if (current) throw new Error('助手正在运行，请等它结束再测试');
       var ask1 = '请调用 ping 工具，参数 text 填 ok。除了调用之外不需要说别的。';
+      var preset = settings.useAssistantPreset ? await modules.prepareAgentPreset(env, personaContext().name) : [];
       var base = { route: 'agent', maxTokens: 600, temperature: 0, timeoutMs: 90000, retries: 0 };
       var report = { backend: llm.getBackendSummary('agent'), native: { ok: false, detail: '' }, text: { ok: false, detail: '' }, recommend: 'none' };
       var key = backendKey();
@@ -634,7 +638,7 @@
       else {
         try {
           var reply = await llm.chatTools(Object.assign({
-            messages: [{ role: 'system', content: '这是一次工具调用自检。请严格按用户的要求调用工具。' }, { role: 'user', content: ask1 }],
+            messages: modules.applyAgentPreset([{ role: 'system', content: '这是一次工具调用自检。请严格按用户的要求调用工具。' }, { role: 'user', content: ask1 }], preset),
             tools: [{ type: 'function', function: { name: 'ping', description: '自检用：原样返回 text。', parameters: { type: 'object', properties: { text: { type: 'string', description: '填 ok' } }, required: ['text'] } } }],
             toolChoice: 'auto'
           }, base));
@@ -645,10 +649,10 @@
       }
       try {
         var raw = String(await llm.chat(Object.assign({
-          messages: [
+          messages: modules.applyAgentPreset([
             { role: 'system', content: '这是一次工具调用自检。请严格按用户的要求调用工具。\n\n' + protocol.TEXT_FORMAT + '\n\n【工具】\n● ping\n  自检用：原样返回 text。\n  - text（string，必填）：填 ok' },
             { role: 'user', content: ask1 }
-          ],
+          ], preset),
           generationId: 'reader-agent-probe'
         }, base)));
         var parsed = protocol.parse(raw);
@@ -698,6 +702,7 @@
         connectors.refresh();
         var lite = opts.lite === true || (opts.lite === undefined && settings.lite);
         var persona = personaContext(opts.persona);
+        var preset = settings.useAssistantPreset ? await modules.prepareAgentPreset(env, persona.name) : [];
         var recalled = [];
         if (settings.recall && memory && memory.getSettings().enabled) {
           try { recalled = await memory.search(input, { limit: 5 }); } catch (error) { recalled = []; }
@@ -708,9 +713,11 @@
         var history = readHistory();
         var previousTurns = settings.historyTurns ? history.turns.slice(-settings.historyTurns * 2) : [];
         previousTurns.forEach(function (turn) {
-          messages.push({ role: turn.role, history: true, content: turn.text + (turn.tools ? '\n（当时用过的工具：' + turn.tools.join('、') + '）' : '') });
+          var text = turn.role === 'assistant' ? llm.visibleText(turn.text) : turn.text;
+          if (text || turn.tools) messages.push({ role: turn.role, history: true, content: text + (turn.tools ? '\n（当时用过的工具：' + turn.tools.join('、') + '）' : '') });
         });
         messages.push({ role: 'user', content: input });
+        messages = modules.applyAgentPreset(messages, preset);
         emit({ type: 'start', persona: persona.name, recalled: recalled.length, runId: result.runId, protocol: proto.mode });
         await registry.emit('run:start', { input: input, runId: result.runId });
 

@@ -31,7 +31,7 @@ export { PROMPTS_MODULE };
 
 /* 顺序即依赖顺序：后面的模块在加载期会用到前面的。 */
 export const CORE_MODULES = [
-  'src/reader-env.js', 'src/reader-host-kit.js', 'src/reader-native-host.js', 'src/reader-llm-gateway.js',
+  'src/reader-env.js', 'src/reader-host-kit.js', 'src/reader-native-host.js', 'src/reader-agent-transport.js', 'src/reader-llm-gateway.js',
   /* 语义层 */
   'src/reader-mvu-guard.js', 'src/reader-runtime-store.js', 'src/reader-economy.js', 'src/reader-host-adapter.js',
   'src/reader-semantic-codec.js', 'src/reader-semantic-router.js', 'src/reader-character-scan.js',
@@ -40,7 +40,7 @@ export const CORE_MODULES = [
   ASSETS_MODULE, PROMPTS_MODULE, 'src/reader-shell.js', 'src/reader-prompt.js', 'src/reader-core.js',
 ];
 export const AGENT_MODULES = [
-  'src/reader-memory.js',
+  'src/reader-memory.js', 'src/reader-agent-preset.js',
   'src/agent/store.js', 'src/agent/protocol.js', 'src/agent/permissions.js', 'src/agent/vfs.js', 'src/agent/providers.js', 'src/agent/tools.js',
   'src/agent/net.js', 'src/agent/web.js', 'src/agent/device.js', 'src/agent/mcp.js', 'src/agent/connectors.js', 'src/agent/skills.js',
   'src/agent/legacy-tools.js', 'src/agent/personas.js', 'src/agent/agent.js', 'src/agent/updates.js',
@@ -197,6 +197,12 @@ function main() {
   const release = releaseManifest({ version: manifest.version, outputs });
   outputs.push([MANIFEST_FILE, json(release), '发布清单']);
   const check = process.argv.includes('--check');
+  const entry = 'index.js?v=' + manifest.version;
+  if (manifest.js !== entry) {
+    if (check) throw new Error('manifest.json 的入口与版本不一致，请先运行 node build.mjs');
+    manifest.js = entry;
+    writeFileSync(join(ROOT, 'manifest.json'), json(manifest));
+  }
   if (!check) {
     mkdirSync(join(ROOT, 'dist'), { recursive: true });
     for (const [file, text] of outputs) writeFileSync(join(ROOT, file), text);

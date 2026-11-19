@@ -195,6 +195,58 @@ test('历史轮数为零时不会把之前的聊天带入下一次请求', async
   same(log.backend.at(-1).body.messages.slice(1), [{ role: 'user', content: '本次新问题' }]);
 });
 
+test('默认隔离，开启后按当前预设顺序注入角色与宏；整轮复用，切换预设和关闭均从下一次生效', async () => {
+  const { run, agent, ctx, log } = makeHost({ settings: { historyTurns: 0 }, backend: (body, turn) => {
+    if (turn === 2) return reply({ tool_calls: [nativeCall('read', { path: 'wb:/设定集/王都' })] });
+    return reply({ content: '完成。' });
+  } });
+  const preset = label => ({
+    prompts: [
+      { identifier: 'one', role: 'system', content: label + '/{{char}}' },
+      { identifier: 'off', role: 'system', content: 'DISABLED' },
+      { identifier: 'chatHistory', marker: true },
+      { identifier: 'late', role: 'user', content: 'LATE' },
+    ],
+    prompt_order: [{ character_id: 100001, order: ['one', 'off', 'chatHistory', 'late'].map(identifier => ({ identifier, enabled: identifier !== 'off' })) }],
+  });
+  let expansions = 0;
+  ctx.substituteParams = (content, user, persona) => {
+    expansions++; assert.ok(user && persona);
+    return content.replace('{{char}}', persona);
+  };
+  ctx.chatCompletionSettings = preset('PRESET_A');
+  assert.equal(agent.getSettings().useAssistantPreset, false);
+  await run('第一轮');
+  assert.equal(expansions, 0);
+  agent.saveSettings({ useAssistantPreset: true });
+  await run('第二轮');
+  assert.equal(expansions, 2);
+  assert.deepEqual(log.backend[1].body.messages.map(m => m.role), ['system', 'system', 'user', 'user']);
+  assert.match(log.backend[1].body.messages[1].content, /^PRESET_A\/[^{}]+$/);
+  assert.equal(log.backend[1].body.messages.at(-1).content, 'LATE');
+  assert.deepEqual(log.backend[2].body.messages.slice(-2).map(m => m.role), ['assistant', 'tool']);
+  ctx.chatCompletionSettings = preset('PRESET_B');
+  await run('第三轮');
+  assert.match(log.backend[3].body.messages[1].content, /^PRESET_B\//);
+  agent.saveSettings({ useAssistantPreset: false });
+  await run('第四轮');
+  assert.equal(expansions, 4);
+  assert.ok(!JSON.stringify(log.backend[4]).includes('PRESET_'));
+  assert.ok(log.backend.every(entry => !JSON.stringify(entry).includes('DISABLED')));
+});
+
+test('文本补全系统预设可用于轻聊，适配 JSON 保持隔离', async () => {
+  const sample = makeHost({ preset: null, settings: { useAssistantPreset: true }, text: () => '收到。' });
+  sample.ctx.mainApi = 'textgenerationwebui';
+  sample.ctx.powerUserSettings = { sysprompt: { enabled: true, content: 'STORY_SYSTEM', post_history: 'STORY_POST' } };
+  await sample.run('你好', { lite: true });
+  const messages = sample.log.text[0].prompts;
+  assert.ok(messages.some(m => m.content.includes('STORY_SYSTEM')));
+  assert.ok(messages.some(m => m.content.includes('STORY_POST')));
+  await sample.llm.generate({ userInput: 'JSON', route: 'adapt' });
+  assert.ok(!JSON.stringify(sample.log.text[1]).includes('STORY_'));
+});
+
 test('原生函数调用：tools 随请求声明，调用取自 tool_calls，结果用 role: tool 交还；读 → 改（确认）→ 回答', async () => {
   const asked = [];
   const { run, log, worldbooks } = makeHost({
@@ -483,6 +535,60 @@ test('酒馆预设消费展示用的 tool_calls 时，助手按原始响应执�
       assert.equal(log.backend[0].body.model, 'fixture-model');
       assert.equal(log.backend[0].body.temperature, settings.temperature);
     }
+  }
+});
+
+test('预设工具和格式化脚本与助手原生调用、文本回退和适配 JSON 请求隔离', async () => {
+  for (const source of ['custom', 'main']) {
+    const bodies = [];
+    let presetHooks = 0;
+    let nativeAllowed = true;
+    const fixture = makeHost({
+      preset: source === 'main' ? null : PRESET,
+      openaiBuilder: {
+        oai_settings: { chat_completion_source: 'openai', extensions: { SPreset: {} } },
+        getChatCompletionModel: () => 'main-connection',
+        createGenerationParameters: async (_settings, model, type, messages) => ({
+          generate_data: { type, model, messages, stream: true, tools: [nativeCall('soliumbra_reply', {})], tool_choice: 'required' },
+        }),
+      },
+      text: () => '<think_nya>internal reasoning</think_nya>',
+    });
+    fixture.eventSource.on('chat_completion_settings_ready', data => {
+      presetHooks++;
+      data.tools = [nativeCall('soliumbra_reply', {})];
+    });
+    fixture.host.__TAURITAVERN__ = { invoke: { safeInvoke: async (command, { dto }) => {
+      assert.equal(command, 'generate_chat_completion');
+      bodies.push(clone(dto));
+      if (dto.json_schema) return reply({ content: '{"valid":true}' });
+      if (dto.tools) {
+        assert.ok(dto.tools.some(t => t.function.name === 'read'));
+        if (!nativeAllowed) return { error: { message: 'Unsupported tools' } };
+        return dto.messages.at(-1).role === 'tool' ? reply({ content: '读回成功。' })
+          : reply({ content: '', tool_calls: [nativeCall('read', { path: 'wb:/设定集/王都' })] });
+      }
+      assert.equal(dto.tool_choice, undefined);
+      return reply({ content: dto.messages.some(m => m.content?.includes('<action_result name="read"'))
+        ? '文本读回成功。' : textCall('read', { path: 'wb:/设定集/王都' }) });
+    } } };
+    const first = await fixture.run('请核对世界书', { remember: false });
+    assert.equal(first.answer, '读回成功。', source);
+    same(first.steps.map(step => step.name), ['read']);
+    nativeAllowed = false;
+    const second = await fixture.run('继续核对', { remember: false });
+    assert.equal(second.answer, '文本读回成功。', source);
+    assert.equal(second.protocol, 'text');
+    same(second.steps.map(step => step.name), ['read']);
+    const schema = { name: 'mapping', strict: true, value: { type: 'object' } };
+    const compiled = await fixture.llm.generate({ system: 'Return JSON', userInput: 'fixture', route: 'adapt', jsonSchema: schema });
+    assert.deepEqual(JSON.parse(compiled), { valid: true });
+    assert.equal(presetHooks, 0);
+    assert.equal(fixture.log.text.length, 0);
+    assert.equal(fixture.log.backend.length, 0);
+    assert.equal(bodies.length, 6);
+    assert.ok(bodies.every(b => b.stream === false && !JSON.stringify(b).includes('soliumbra_reply')));
+    same(bodies.at(-1).json_schema, schema);
   }
 });
 

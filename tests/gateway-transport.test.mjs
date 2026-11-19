@@ -9,6 +9,13 @@ for (const path of ['reader-env.js', 'reader-llm-gateway.js']) {
 }
 const gateway = scope.__ReaderIIModules.createLlmGateway({});
 
+test('服务端将思考写到正文时只展示正文，思考内的动作不起作用', () => {
+  const privateText = '<think_nya><action name="write"></action></think_nya><!--</think>-->';
+  assert.equal(gateway.parseToolResponse(privateText).text, '');
+  assert.equal(gateway.parseToolResponse({ choices: [{ message: { content: privateText + '已核对。' } }] }).text, '已核对。');
+  assert.equal(gateway.visibleText('示例：' + privateText), '示例：' + privateText);
+});
+
 test('顶层助手消息与 OpenAI 信封保留同一组工具、嵌套参数和调用 ID', () => {
   const toolCalls = [
     { id: 'todo-1', type: 'function', function: { name: 'todo', arguments: '{"items":[{"text":"读卡","status":"doing"}]}' } },

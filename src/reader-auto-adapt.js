@@ -493,7 +493,8 @@
         if (SLOTS.indexOf(slot) < 0 || !Array.isArray(roots[slot]) || !roots[slot].length) throw new Error('无效的指定槽位或路径：' + slot);
       });
       Object.keys(opts.mappings || {}).forEach(function (slot) {
-        if (targeted.indexOf(slot) < 0 || CONTAINER_SLOTS.indexOf(slot) < 0 || !modules.isObject(opts.mappings[slot])) throw new Error('指定容器映射时需要同时指定其根路径：' + slot);
+        if (CONTAINER_SLOTS.indexOf(slot) < 0) throw new Error(slot + ' 不接受容器映射。地点和货币只需 roots；请省略对应的 mappings 后重试。');
+        if (targeted.indexOf(slot) < 0 || !modules.isObject(opts.mappings[slot])) throw new Error('指定容器映射时需要同时指定其根路径：' + slot);
       });
       var slots = Array.isArray(opts.slots) && opts.slots.length ? opts.slots : targeted.length ? targeted : SLOTS;
       if (targeted.some(function (slot) { return slots.indexOf(slot) < 0; })) throw new Error('指定根路径的槽位没有列入本次 slots');

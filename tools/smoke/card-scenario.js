@@ -72,8 +72,12 @@ async function main() {
     await window.__smokeView('cafe', 'settings');
     const mode = $('select[data-s="a.toolProtocol"]');
     assert(mode && ['auto', 'native', 'text'].every((value) => [...mode.options].some((o) => o.value === value)), '缺少工具调用方式');
+    const preset = $('[data-s="a.useAssistantPreset"]');
+    assert(preset && !preset.checked, '预设开关应默认关闭');
+    preset.click();
     mode.value = 'text'; $('[data-act="save-settings"]').click();
     await until(() => window.ReaderII.agent.getSettings().toolProtocol === 'text' && $('[data-ra-status="settings"]')?.textContent.includes('设置已保存'), '设置保存');
+    assert(window.ReaderII.agent.getSettings().useAssistantPreset === true, '预设选项未保存');
     const toggle = () => $('#ra-reader-card [data-act="card-toggle"]');
     assert(toggle()?.getAttribute('aria-checked') === 'true', '卡开关应开启'); toggle().click();
     await until(() => !window.ReaderII.lobby.isEnabled() && toggle()?.getAttribute('aria-checked') === 'false', '卡停用');

@@ -1,12 +1,12 @@
 {
   "format": 2,
   "name": "reader-ii",
-  "version": "4.1.0-alpha.3",
+  "version": "4.1.0-alpha.4",
   "hash": "SHA-256（UTF-8，换行统一为 LF 后计算）",
   "files": {
     "dist/reader-ii.ext.js": {
-      "sha256": "5e85ecf486dd72a46ba1b5105860fbfe86a8936dbf7a0af8f0dcdd960849b605",
-      "bytes": 1703415
+      "sha256": "ca9be5e4dd6929587e64afb270060ad68c8e1b0cc41a60990711ab607aa38030",
+      "bytes": 1718950
     }
   }
 }

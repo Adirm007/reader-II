@@ -115,6 +115,92 @@ test('误称无工具或列完计划只说要做时能继续，避免反复催�
   assert.match(llmCalls[4].at(-1).content, /核对王都位置/);
 });
 
+test('助手从楼层 MVU 探测七槽，确认后绑定，并用读回的逐项结果作答', async () => {
+  const statData = {
+    世界: { 位置: '灯塔' }, 任务列表: { 修灯: {} }, 关系列表: { 小舟: { 好感度: 52 } },
+    主角: { 金币: 37, 状态效果: { 清醒: { 效果: '不易入睡', 持续时间: '一小时' } }, 技能列表: [{ 名称: '航海' }], 背包: { 灯油: { 数量: 3 } } },
+  };
+  let report, state;
+  function result(config, name) {
+    const feedback = config.ordered_prompts.at(-1).content;
+    const match = new RegExp('<action_result name="' + name + '" status="ok">\\n([\\s\\S]*?)\\n</action_result>').exec(feedback);
+    assert.ok(match, feedback);
+    return JSON.parse(match[1]);
+  }
+  const { host, agent, ctx, vars } = makeHost({
+    agentSettings: { toolProtocol: 'text', plotContext: false, recall: false },
+    replies: [
+      call('ls', { path: 'var:/' }),
+      config => {
+        assert.match(config.ordered_prompts.at(-1).content, /mvu\.json/);
+        return call('read', { path: 'var:/mvu.json#/stat_data' });
+      },
+      config => {
+        assert.match(config.ordered_prompts.at(-1).content, /灯塔/);
+        return call('toolbox', { name: 'reader' });
+      },
+      config => {
+        assert.match(config.ordered_prompts.at(-1).content, /adapt_variables/);
+        return call('adapt_variables', { use_llm: false });
+      },
+      config => {
+        report = result(config, 'adapt_variables');
+        return call('reader_state', {});
+      },
+      config => {
+        state = result(config, 'reader_state');
+        return report.slots.map(slot => slot.label + ' → ' + state.routing[slot.slot].target).join('\n');
+      },
+    ],
+  });
+  ctx.characters[0].data.description = '';
+  ctx.characters[0].data.extensions.reader_ii = { enabled: true };
+  vars.message.stat_data = clone(statData);
+  await host.ReaderCore.ready();
+  const confirmed = [];
+  const run = await agent.run('核对这张卡的七个语义槽并逐项报告', { confirm: req => { confirmed.push(req.name); return 'allow'; } });
+  assert.equal(run.error, '');
+  same(confirmed, ['adapt_variables']);
+  same(run.steps.map(step => step.name), ['ls', 'read', 'toolbox', 'adapt_variables', 'reader_state']);
+  assert.ok(run.steps.every(step => step.ok));
+  assert.equal(report.boundCount, 7, JSON.stringify(report));
+  assert.equal(run.answer.split('\n').length, 7);
+  for (const slot of report.slots) {
+    assert.equal(slot.changed, true);
+    assert.equal(state.routing[slot.slot].target, slot.path);
+    assert.equal(state.routing[slot.slot].status, 'active');
+    assert.equal(vars.chat.reader_ii_runtime.routing[slot.slot].status, 'active');
+  }
+  assert.equal(state.location, '灯塔');
+  assert.equal(state.fp, 37);
+  assert.equal(state.inventory[0].count, 3);
+  assert.equal(state.characters[0].favor, 52);
+  const { READER, ...untouched } = vars.message.stat_data;
+  same(untouched, statData);
+});
+
+test('助手声明的语义映射与实际 DSL 对齐，误传标量映射会提示可重试参数', async () => {
+  const { host, ctx, vars } = makeHost();
+  ctx.characters[0].data.extensions.reader_ii = { enabled: true };
+  vars.message.stat_data.位置 = '码头';
+  await host.ReaderCore.ready();
+  const modules = host.__ReaderIIModules;
+  const def = modules.createAgentTools({}, {}, { core: () => host.ReaderCore }).find('adapt_variables');
+  const mapping = modules.agentProtocol.toolSchema(def).function.parameters.properties.mappings;
+  assert.equal(mapping.additionalProperties, false);
+  same(Object.keys(mapping.properties).sort(), ['characters', 'inventory', 'skills', 'statuses', 'tasks']);
+  const characters = mapping.properties.characters;
+  assert.equal(characters.additionalProperties, false);
+  assert.ok(characters.required.includes('name'));
+  assert.ok(characters.properties.fields.required.includes('favor'));
+  const roots = { location: ['位置'] };
+  await assert.rejects(def.run({ roots, mappings: { location: { type: 'string' } } }), /location.*roots.*mappings/);
+  assert.equal(host.ReaderCore.getSemanticRouting().location.status, 'unbound');
+  const retry = await def.run({ roots, use_llm: false });
+  assert.equal(retry.boundCount, 1);
+  assert.equal(await host.ReaderCore.getLocation(), '码头');
+});
+
 test('助手适配空槽遵守世界书和条目级读规则，受限证据不会送给模型', async () => {
   const root = { characters: ['关系列表'] };
   for (const rule of [

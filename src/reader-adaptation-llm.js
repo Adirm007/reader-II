@@ -105,7 +105,7 @@
     var properties = {
       version: { type: 'integer', enum: [1] },
       slot: { type: 'string', enum: [slot] },
-      rootRef: { type: 'string', enum: [rootRef] },
+      rootRef: rootRef === undefined ? { type: 'string' } : { type: 'string', enum: [rootRef] },
       containerKind: { type: 'string', enum: ['object', 'array'] },
       name: {
         type: 'object',
@@ -115,7 +115,10 @@
       },
       fields: { type: 'object', additionalProperties: false, required: fieldsRequired, properties: fieldsProperties }
     };
-    var required = ['version', 'slot', 'rootRef', 'containerKind', 'name', 'fields'];
+    // 助手传的是映射草案；版本、槽、根和容器类型由 adapt_variables 从实际目标补齐。
+    var required = rootRef === undefined
+      ? (fieldsRequired.length ? ['name', 'fields'] : ['name'])
+      : ['version', 'slot', 'rootRef', 'containerKind', 'name', 'fields'];
     if (slot === 'inventory') properties.entryKind = { type: 'string', enum: ['object', 'count', 'name'] };
     if (slot === 'statuses' || slot === 'inventory') {
       properties.construct = {
@@ -441,5 +444,10 @@
 
   modules.READER_ADAPTATION_SYSTEM_PROMPT = SYSTEM_PROMPT;
   modules.READER_ADAPTATION_KNOWLEDGE = KNOWLEDGE;
+  modules.readerAdaptMappingsSchema = function () {
+    var properties = {};
+    CONTAINER_SLOTS.forEach(function (slot) { properties[slot] = mappingSchema(slot); });
+    return { type: 'object', additionalProperties: false, properties: properties };
+  };
   modules.createAdaptationLlm = createAdaptationLlm;
 })(typeof globalThis !== 'undefined' ? globalThis : window);
