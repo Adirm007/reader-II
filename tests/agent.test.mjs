@@ -89,13 +89,23 @@ function makeHost(options = {}) {
   host.window = host;
   host.parent = host;
   if (options.agentSettings) ctx.extensionSettings.reader_ii = { agent: options.agentSettings };
-  if (options.requestMoreRounds) host.__READER_II_NO_AUTOBOOT__ = true;
+  if (options.requestMoreRounds || options.inspectHistory) host.__READER_II_NO_AUTOBOOT__ = true;
   vm.createContext(host);
   vm.runInContext(CODE, host, { filename: 'reader-ii.ext.js' });
-  if (options.requestMoreRounds) {
+  if (options.requestMoreRounds || options.inspectHistory) {
     const modules = host.__ReaderIIModules;
-    const createUi = modules.createAgentUi;
-    modules.createAgentUi = (...args) => ({ ...createUi(...args), requestMoreRounds: options.requestMoreRounds });
+    if (options.requestMoreRounds) {
+      const createUi = modules.createAgentUi;
+      modules.createAgentUi = (...args) => ({ ...createUi(...args), requestMoreRounds: options.requestMoreRounds });
+    }
+    if (options.inspectHistory) {
+      const createHistory = modules.createThreadHistory;
+      modules.createThreadHistory = (...args) => {
+        const history = createHistory(...args);
+        options.inspectHistory(history);
+        return history;
+      };
+    }
     modules.bootReaderII();
   }
   return { host, api: host.ReaderII, agent: host.ReaderII.agent, vfs: host.ReaderII.vfs, worldbooks, regexes, scripts, vars, chat, llmCalls, ctx };
@@ -265,7 +275,7 @@ test('启动：全局对象、旧名与挂载点', () => {
   const mounts = vfs.mounts().map((item) => item.id);
   for (const id of ['chat', 'card', 'cards', 'wb', 'regex', 'script', 'preset', 'var', 'ext', 'page', 'ws', 'kb', 'mem']) assert.ok(mounts.includes(id), `缺少挂载点 ${id}`);
   const core = api.agent.listTools().filter((item) => item.toolset === 'core').map((item) => item.name);
-  same(core.sort(), ['capabilities', 'edit', 'grep', 'ls', 'read', 'remove', 'run_js', 'skill', 'todo', 'toolbox', 'write']);
+  same(core.sort(), ['capabilities', 'delegate_task', 'edit', 'grep', 'ls', 'read', 'remove', 'run_js', 'skill', 'todo', 'toolbox', 'write']);
 });
 
 test('VFS：列目录、分段读、检索、精确替换', async () => {
@@ -557,6 +567,7 @@ test('长任务：旧设置保留，可保存超过 60 轮，发送同批工具�
   assert.equal(agent.getSettings().maxSteps, 16);
   agent.saveSettings({ maxSteps: 66 });
   const restored = makeHost({ agentSettings: ctx.extensionSettings.reader_ii.agent, replies });
+  restored.agent.saveModelSettings({ contextWindow: 1000000 });
   const result = await restored.agent.run('按顺序核对', { remember: false });
   assert.equal(result.rounds, 66);
   assert.equal(result.steps.length, 67);
@@ -632,15 +643,15 @@ test('默认欢迎语保持临时显示，主动保存后成为首条助手消�
   assert.equal(edited.llmCalls[0].filter(t => t.content === '新的欢迎语').length, 1);
 });
 
-test('双方旧消息可编辑，保留工具记录与长原文，下一轮模型读取修订稿', async () => {
-  const { agent, ctx, vars, llmCalls } = makeHost({ replies: ['继续。'] });
+test('线程双方消息可编辑，保留工具记录与长原文，下一轮模型读取修订稿', async () => {
+  let history;
+  const { agent, llmCalls } = makeHost({ replies: ['继续。'], inspectHistory: store => { history = store; } });
   const original = '长'.repeat(13000) + '旧结尾';
-  vars.chat.reader_ii_agent = { v: 1, extracted: 1, turns: [
-    { role: 'user', text: '原问题', at: 1 },
-    { role: 'assistant', text: original, at: 1, tools: ['read'] },
-  ] };
-  let saves = 0;
-  ctx.saveMetadata = async () => { saves++; };
+  await history.ready();
+  await history.write({ extracted: 2, turns: [
+    { id: 'u', role: 'user', text: '原问题', at: 1 },
+    { id: 'a', role: 'assistant', text: original, at: 1, tools: ['read'] },
+  ] });
   const [user, ai] = agent.getHistory();
   assert.equal(ai.text, original);
   assert.notEqual(user.id, ai.id);
@@ -648,16 +659,15 @@ test('双方旧消息可编辑，保留工具记录与长原文，下一轮模�
   await agent.editHistoryTurn(user.id, '修订的问题', snapshot('原问题'));
   const revised = '修订的回答\n' + original;
   await agent.editHistoryTurn(ai.id, revised, snapshot(original));
-  assert.equal(saves, 2);
   assert.equal(llmCalls.length, 0);
-  same(vars.chat.reader_ii_agent.turns.map(t => t.id), [user.id, ai.id]);
-  assert.equal(vars.chat.reader_ii_agent.extracted, 2, '旧聊天整段保留在新整理游标之前');
+  same(history.read().turns.map(t => t.id), [user.id, ai.id]);
+  assert.equal(history.read().extracted, 2);
   const run = await agent.run('继续', { lite: true });
   assert.equal(run.answer, '继续。');
   assert.equal(llmCalls[0].find(t => t.role === 'user').content, '修订的问题');
   const answerInPrompt = llmCalls[0].find(t => t.role === 'assistant').content;
   assert.match(answerInPrompt, /^修订的回答/);
-  assert.doesNotMatch(answerInPrompt, /旧结尾/);
+  assert.match(answerInPrompt, /旧结尾/);
   assert.match(answerInPrompt, /当时用过的工具：read/);
   const turns = agent.getHistory();
   assert.equal(turns[1].text, revised);
@@ -666,7 +676,11 @@ test('双方旧消息可编辑，保留工具记录与长原文，下一轮模�
 });
 
 test('消息改动冲突、聊天切换、存盘失败都保留其余记录', async () => {
-  const { agent, ctx } = makeHost({ replies: ['回答。'] });
+  let diskFailure = false;
+  const { agent, ctx } = makeHost({ replies: ['回答。'], inspectHistory(history) {
+    const write = history.write;
+    history.write = (...args) => { if (diskFailure) throw new Error('磁盘不可写'); return write(...args); };
+  } });
   await agent.run('问题', { lite: true });
   const [user, ai] = agent.getHistory();
   const snapshot = { chatKey: '0|chat-1', originalText: user.text };
@@ -675,7 +689,7 @@ test('消息改动冲突、聊天切换、存盘失败都保留其余记录', as
   ctx.getCurrentChatId = () => 'chat-2';
   await assert.rejects(agent.editHistoryTurn(user.id, '另一聊天', snapshot), /聊天已切换/);
   ctx.getCurrentChatId = () => 'chat-1';
-  ctx.saveMetadata = async () => { throw new Error('磁盘不可写'); };
+  diskFailure = true;
   await assert.rejects(agent.editHistoryTurn(ai.id, '未落盘', { ...snapshot, originalText: ai.text }), /磁盘不可写/);
   same(agent.getHistory().map(t => t.text), ['先保存的内容', ai.text]);
 });
@@ -893,7 +907,8 @@ test('旧世界书改名和切聊天后只停用挂载书中的 Reader 标记，
 });
 
 test('正文消息与生成事件不触发助手记忆整理；手动、自动与工具共用助手历史游标', async () => {
-  const { host, api, agent, llmCalls, vars, ctx } = makeHost({ replies: ['好的，我之后会尽量简短。', '{"memories":[{"op":"add","type":"fact","title":"简短回答","content":"用户喜欢简短回答。","keys":["简短"]}]}'] });
+  let history;
+  const { host, api, agent, llmCalls, vars, ctx } = makeHost({ inspectHistory: store => { history = store; }, replies: ['好的，我之后会尽量简短。', '{"memories":[{"op":"add","type":"fact","title":"简短回答","content":"用户喜欢简短回答。","keys":["简短"]}]}'] });
   const modules = host.__ReaderIIModules;
   const events = new Map();
   const env = modules.createEnv(host);
@@ -906,9 +921,10 @@ test('正文消息与生成事件不触发助手记忆整理；手动、自动�
   assert.equal((await separate.consolidate()).window, 0);
   assert.equal(vars.chat[separate.chatKey], undefined);
   assert.equal(llmCalls.length, 0);
-  vars.chat.reader_ii_agent = { v: 1, extracted: 0, turns: [
-    { role: 'user', text: '升级前尚未整理的用户消息' }, { role: 'assistant', text: '升级前尚未整理的助手回复' }
-  ] };
+  await history.ready();
+  await history.write({ extracted: 2, turns: [
+    { id: 'history-u', role: 'user', text: '之前已整理的用户消息' }, { id: 'history-a', role: 'assistant', text: '之前已整理的助手回复' }
+  ] });
   assert.equal(agent.getHistory().length, 2);
   assert.equal((await api.memory.consolidate()).window, 0);
   assert.equal(llmCalls.length, 0);
@@ -921,9 +937,8 @@ test('正文消息与生成事件不触发助手记忆整理；手动、自动�
   assert.equal(inputs.length, 1);
   assert.match(inputs[0][1].content, /真实用户：以后请说简短一点。/);
   assert.match(inputs[0][1].content, /夜梦助手：好的/);
-  assert.doesNotMatch(JSON.stringify(inputs), /升级前尚未整理|正文主角名字|酒馆的门|清晨，王都/);
-  assert.equal(vars.chat.reader_ii_agent.v, 2);
-  assert.equal(vars.chat.reader_ii_agent.extracted, 4);
+  assert.doesNotMatch(JSON.stringify(inputs), /之前已整理|正文主角名字|酒馆的门|清晨，王都/);
+  assert.equal(history.read().extracted, 4);
   assert.equal((await api.memory.list({ store: 'chat' }))[0].title, '简短回答');
   assert.equal((await api.memory.status()).pending.turns, 0);
   const tool = modules.createAgentTools(env, api.kit, { memory: api.memory }).find('memory_consolidate');
@@ -975,6 +990,38 @@ test('助手记忆仅在当前批次成功落盘后前移：编辑、模型格�
   answer = () => '{"memories":[]}';
   assert.equal((await memory.consolidate()).ok, true);
   assert.equal(history.read().extracted, 4);
+});
+
+test('整理期间在同一张卡切换助手对话，旧请求不能推进另一段对话的整理游标', async () => {
+  let history, started, release;
+  const entered = new Promise(resolve => { started = resolve; });
+  const response = new Promise(resolve => { release = resolve; });
+  const { host, api, agent } = makeHost({ inspectHistory: value => { history = value; } });
+  await history.ready();
+  await history.write({ ...history.read(), turns: [
+    { id: 'u', role: 'user', text: '我喜欢蓝色' }, { id: 'a', role: 'assistant', text: '记下了' }
+  ] });
+  const modules = host.__ReaderIIModules;
+  const memory = modules.createMemorySystem(modules.createEnv(host), { chat: () => { started(); return response; } }, api.kit, history);
+  const pending = memory.consolidate();
+  await entered;
+  await agent.threads.create();
+  release('{"memories":[{"op":"add","title":"颜色","content":"喜欢蓝色","type":"fact"}]}');
+  assert.equal((await pending).ok, false);
+  assert.equal(history.read().extracted, 0);
+  assert.equal((await memory.list({ store: 'chat' })).length, 0);
+});
+
+test('无卡助手记忆随酒馆账号保存，打开卡后有独立的聊天记忆', async () => {
+  const { api, ctx, vars } = makeHost();
+  ctx.characterId = undefined;
+  ctx.getCurrentChatId = () => undefined;
+  await api.memory.add({ title: '无卡偏好', content: '偏爱短篇', type: 'fact' }, { store: 'chat' });
+  assert.equal((await api.memory.list({ store: 'chat' })).length, 1);
+  assert.equal(vars.chat[api.memory.chatKey], undefined);
+  ctx.characterId = 0;
+  ctx.getCurrentChatId = () => 'chat-1';
+  assert.equal((await api.memory.list({ store: 'chat' })).length, 0);
 });
 
 test('知识：目录只列名字，skill 才读正文；kb:/ 可读参考文件', async () => {

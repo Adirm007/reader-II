@@ -49,7 +49,7 @@ function capital() {
 
 async function ask(text, replies, onConfirm) {
   mock.replies.push(...replies);
-  const input = await until(() => $('#ra-text'), '输入框');
+  const input = await until(() => $('#ra-text:not(:disabled)'), '输入框');
   input.value = text;
   $('#ra-send').click();
   if (onConfirm) {
@@ -67,6 +67,36 @@ async function main() {
   });
   const agent = window.ReaderII.agent;
   const vfs = window.ReaderII.vfs;
+
+  if (params.has('unbound')) {
+    const answer = '这是无卡助手的回复。';
+    const marker = 'reader-smoke-unbound-reload';
+    await step('从扩展设置进入无卡助手', async () => {
+      (await until(() => $('#reader-ii-agent-settings'), '扩展设置按钮')).click();
+      await until(() => $('#reader-agent-overlay')?.open && $('#ra-text'), '无卡助手');
+      assert(!window.ReaderII.lobby.isEnabled(), '无卡打开助手触发了读者大厅');
+    });
+    if (!sessionStorage.getItem(marker)) {
+      await step('在无卡会话中发送消息', async () => {
+        agent.saveSettings({ lite: true, plotContext: false, recall: false });
+        await ask('测试无卡会话', [answer]);
+        await until(() => agent.getHistory().some(turn => turn.text === answer), '回复存入历史');
+      });
+      if (!results.some(item => !item.ok)) {
+        sessionStorage.setItem(marker, '1');
+        location.reload();
+        return;
+      }
+    } else {
+      await step('刷新后恢复同一无卡会话及回复', async () => {
+        await until(() => $('#ra-log')?.textContent.includes(answer), '无卡回复重载');
+        assert(agent.getHistory().some(turn => turn.role === 'user' && turn.text === '测试无卡会话'), '未恢复用户消息');
+      });
+    }
+    const failures = report();
+    document.title = failures.length ? 'SMOKE FAIL ' + failures.length : 'SMOKE PASS ' + results.length;
+    return;
+  }
 
   await step('启动期间没有报错', async () => {
     const errors = (window.__readerIIProbe && window.__readerIIProbe.errors || []).map((item) => item.text);
@@ -148,6 +178,7 @@ async function main() {
     assert($('#ra-log .ra-step[data-state="ok"]'), '编辑后丢失本轮工具详情');
     agent.close();
     agent.open('chat');
+    await until(() => $('#ra-text:not(:disabled)') && $('#ra-log').textContent.includes('用过的工具'), '从 IndexedDB 重载历史工具记录');
     const [user, ai] = agent.getHistory().slice(-2);
     assert(user.text === '请核对王都人口。' && ai.text === '核对完毕，人口三十万。', '重开后消息不符');
     assert(ai.tools.includes('edit') && $('#ra-log').textContent.includes('用过的工具'), '重开后丢失工具记录');

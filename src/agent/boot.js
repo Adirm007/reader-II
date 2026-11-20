@@ -16,7 +16,7 @@
 
     var kit = modules.createHostKit(env);
     var llm = modules.createLlmGateway(env);
-    var history = modules.createAgentHistory(env, kit);
+    var history = modules.createThreadHistory(env, kit);
     var memory = modules.createMemorySystem(env, llm, kit, history);
     var store = modules.createStore(env);
     var journal = modules.createJournal(store);
@@ -92,6 +92,22 @@
       settings: function () { return agentSettings().mcp; },
       save: function (value) { agent.saveSettings({ mcp: value }); }
     });
+    /* 与面板共用同一套切换约束。运行中的自动交接由引擎在自己的检查点完成。 */
+    var threadActions = {
+      ready: history.ready, refresh: history.refresh, list: history.list, currentId: history.currentId, canRun: history.canRun,
+      isUnbound: history.isUnbound, persistent: history.persistent,
+      checkpoint: history.checkpoint
+    };
+    ['create', 'select', 'remove'].forEach(function (action) {
+      threadActions[action] = async function (value) {
+        if (agent.isBusy()) throw new Error('请先停止当前任务，再切换或删除对话');
+        var result = await history[action](action === 'create' ? undefined : value);
+        if (agent.resetThreadState) agent.resetThreadState();
+        if (ui && ui.refreshThreads) ui.refreshThreads();
+        return result;
+      };
+    });
+    agent.threads = threadActions;
     /* 设置被别处改了（面板、助手自己）时，MCP 工具箱跟着重新登记。 */
     agent.onChange(function (reason) { if (reason === 'settings') { try { mcp.sync(); } catch (error) { /* 登记失败不影响别的 */ } } });
     registry.on('run:start', kit.prepareWorldbooks);
@@ -152,8 +168,8 @@
       open: async function (page) {
         var core = currentCore();
         var shell = host.ReaderShell;
+        if ((!core && !kit.names().chat) || (core && !core.hasChat())) { ui.open('chat'); return true; }
         if (!core || !shell || typeof shell.open !== 'function') { toast('warning', '读者界面还没有就绪，请稍等一下再试'); return false; }
-        if (!core.hasChat()) { toast('info', '请先打开一个聊天，再进读者大厅'); return false; }
         if (!core.isEnabled()) {
           var choice = await askEnable();
           if (choice === 'agent') { ui.open('chat'); return false; }

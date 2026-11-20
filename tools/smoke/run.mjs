@@ -24,7 +24,7 @@ for (let i = 0; i < args.length; i++) {
 }
 const MODES = SUITE === 'card'
   ? [['有酒馆助手与 MVU', 'auto=1'], ['原生宿主：没有酒馆助手、没有 MVU', 'auto=1&native=1']]
-  : [['有酒馆助手', 'auto=1'], ['没有酒馆助手', 'auto=1&th=0']];
+  : [['有酒馆助手', 'auto=1'], ['没有酒馆助手', 'auto=1&th=0'], ['无卡启动与刷新恢复', 'auto=1&unbound=1&th=0']];
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8', '.json': 'application/json', '.md': 'text/markdown; charset=utf-8', '.css': 'text/css' };
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));

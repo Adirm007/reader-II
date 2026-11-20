@@ -274,6 +274,12 @@
     /* ---------- 对话页 ---------- */
     '{R} .ra-pane{flex:1;min-height:0;display:none;flex-direction:column}',
     '{R} .ra-pane.is-on{display:flex}',
+    '{A} .ra-threads{display:flex;align-items:center;gap:8px;padding:10px 16px;border-bottom:1px solid var(--rt-line);color:var(--rt-ink2);font-size:13px}',
+    '{A} .ra-threads select{flex:1 1 0;width:0;min-width:50px;overflow:hidden;text-overflow:ellipsis}',
+    '{A} .ra-threads button{flex:none}',
+    '{A} #ra-thread-status{margin:4px 16px 0;font-size:12px;color:var(--rt-ink3)}',
+    '{A} .ra-generated{display:block;max-width:100%;height:auto;max-height:60vh;object-fit:contain;margin-top:6px;border-radius:var(--rt-r)}',
+    '{A} .ra-checkpoint{border-left:3px solid var(--rt-focus);background:var(--rt-sunk);padding:7px 12px;color:var(--rt-ink2);font-size:13px;white-space:pre-wrap;overflow-wrap:anywhere}',
     '{R} .ra-log{flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:10px;padding:20px 22px 12px;overscroll-behavior:contain}',
     '{R} .ra-msg{max-width:82%;padding:9px 14px;border-radius:var(--rt-rb);line-height:1.7;white-space:pre-wrap;word-break:break-word}',
     '{R} .ra-msg[data-turn-id]:not(.is-editing){display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:start;gap:6px}',

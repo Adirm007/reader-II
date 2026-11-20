@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import vm from 'node:vm';
 
-const scope = vm.createContext({ setTimeout, clearTimeout });
+const scope = vm.createContext({ setTimeout, clearTimeout, AbortController });
 for (const path of ['reader-env.js', 'reader-llm-gateway.js']) {
   vm.runInContext(readFileSync(new URL('../src/' + path, import.meta.url), 'utf8'), scope);
 }
@@ -117,4 +117,179 @@ test('带工具调用结束原因的空响应只发送一次，保留结束原�
   assert.equal(requests, 1);
   assert.equal(reply.finish, 'tool_calls');
   assert.equal(reply.toolCalls.length, 0);
+});
+
+function proxyGateway(handler, ctx) {
+  let preset = { enabled: true, apiurl: 'https://example.test/secret-route/v1', key: 'fixture-key', model: 'alias', source: 'openai' };
+  const requests = [];
+  const local = scope.__ReaderIIModules.createLlmGateway({
+    storage: { getItem: key => key === 'reader_ii_llm_settings_v1' ? JSON.stringify(preset) : null },
+    host: { SillyTavern: ctx && { getContext: () => ctx }, fetch: async (url, options) => {
+      const body = options.body ? JSON.parse(options.body) : null;
+      requests.push({ url, body, options });
+      return Response.json(await handler(url, body, options));
+    } },
+  });
+  return { local, requests, select: update => { preset = { ...preset, ...update }; } };
+}
+
+const ask = { route: 'agent', messages: [{ role: 'user', content: '画一只鲸鱼' }], retries: 0 };
+
+test('根据所选端点、模型和代理提供的元数据选择窗口；不继承其他模型的设置或密钥', async () => {
+  const { local, select, requests } = proxyGateway(() => ({ data: [
+    { id: 'alias', context_length: 20000 }, { id: 'large', context_window: 1000000 },
+    { id: 'gpt-4.1', context_length: 32000 }, { id: 'mystery' },
+  ] }));
+  const small = await local.resolveModelCapabilities('agent');
+  assert.equal(small.contextWindow, 20000);
+  assert.equal(small.origin, 'metadata');
+  assert.doesNotMatch(JSON.stringify(small), /secret-route|fixture-key/);
+  assert.equal((await local.resolveModelCapabilities('agent')).contextWindow, 20000);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url, 'https://example.test/secret-route/v1/models');
+  select({ model: 'large' });
+  const large = await local.resolveModelCapabilities('agent');
+  assert.equal(large.contextWindow, 1000000);
+  assert.notEqual(small.profileKey, large.profileKey);
+  assert.equal((await local.resolveModelCapabilities('agent', { contextWindow: 65536 })).contextWindow, 65536);
+  select({ model: 'gpt-4.1' });
+  assert.equal(local.getModelCapabilities('agent').origin, 'catalog');
+  assert.equal((await local.resolveModelCapabilities('agent')).contextWindow, 32000);
+  select({ model: 'mystery' });
+  assert.equal((await local.resolveModelCapabilities('agent')).origin, 'fallback');
+});
+
+test('主连接使用实际模型列表，路由切换后不复用别的窗口', async () => {
+  const settings = { chat_completion_source: 'custom', custom_model: 'a', openai_max_context: 4000 };
+  const local = scope.__ReaderIIModules.createLlmGateway({
+    host: { SillyTavern: { getContext: () => ({ mainApi: 'openai', chatCompletionSettings: settings }) } },
+    hostImport: async () => ({ model_list: [{ id: 'a', context_length: 20000 }, { id: 'b', inputTokenLimit: 1048576 }],
+      getChatCompletionModel: s => s.custom_model }),
+  });
+  assert.equal((await local.resolveModelCapabilities('agent')).contextWindow, 20000);
+  settings.custom_model = 'b';
+  assert.equal((await local.resolveModelCapabilities('agent')).contextWindow, 1048576);
+  settings.custom_model = 'unknown';
+  assert.equal(local.getModelCapabilities('agent').contextWindow, 4000);
+});
+
+test('独立 OpenAI 兼容方案的思考档和代理参数能穿过酒馆 custom body 转发；默认请求不加字段', async () => {
+  const ctx = { getRequestHeaders: () => ({ 'X-CSRF-Token': 'test' }) };
+  const { local, requests } = proxyGateway(() => ({ choices: [{ message: { content: 'ok' } }] }), ctx);
+  await local.chatTools({ ...ask, reasoningEffort: 'xhigh', modelParameters: { proxy_feature: true } });
+  const wire = requests[0].body;
+  assert.equal(wire.chat_completion_source, 'custom');
+  assert.equal(wire.custom_url, 'https://example.test/secret-route/v1');
+  assert.deepEqual(JSON.parse(wire.custom_include_body), { reasoning_effort: 'xhigh', proxy_feature: true });
+  assert.match(wire.custom_include_headers, /fixture-key/);
+  await local.chatReply(ask);
+  assert.equal(requests[1].body.custom_include_body, undefined);
+  assert.equal(requests[1].body.reasoning_effort, undefined);
+  assert.equal(requests[1].body.chat_completion_source, 'openai');
+  await assert.rejects(local.chatReply({ ...ask, modelParameters: { messages: [] } }), /不能覆盖/);
+  assert.equal(requests.length, 2);
+});
+
+test('原生 Claude / Gemini 请求使用酒馆后端支持的档位；Gemini 图片走原生 response modalities', async () => {
+  const { local, requests, select } = proxyGateway(() => ({ candidates: [{ content: { parts: [{ inlineData: { mimeType: 'image/png', data: 'YQ==' } }] } }] }),
+    { getRequestHeaders: () => ({}) });
+  select({ source: 'makersuite', model: 'gemini-2.5-flash-image' });
+  const image = await local.chatReply({ ...ask, reasoningEffort: 'minimal' });
+  assert.equal(image.images[0].url, 'data:image/png;base64,YQ==');
+  assert.equal(requests[0].body.request_images, true);
+  assert.equal(requests[0].body.reasoning_effort, 'min');
+  select({ source: 'claude', model: 'claude-opus-4-6' });
+  await local.chatReply({ ...ask, reasoningEffort: 'max' });
+  assert.equal(requests[1].body.chat_completion_source, 'claude');
+  assert.equal(requests[1].body.reasoning_effort, 'max');
+  assert.equal(requests[1].body.request_images, undefined);
+});
+
+test('生成图片专用端点只发用户提示，返回 URL/b64 图片；只含图的聊天响应无需重试', async () => {
+  const { local, requests, select } = proxyGateway((url) => url.endsWith('/images/generations')
+    ? { data: [{ url: 'https://images.test/whale.png' }, { b64_json: 'YQ==' }] }
+    : { choices: [{ message: { images: [{ type: 'image_url', image_url: { url: 'https://images.test/whale.png' } }] } }] });
+  select({ model: 'gpt-image-1' });
+  const images = await local.chatTools({ ...ask, messages: [{ role: 'system', content: 'secret context' }, ...ask.messages], tools: [{}] });
+  assert.equal(images.images.length, 2);
+  assert.equal(images.images[1].url, 'data:image/png;base64,YQ==');
+  assert.deepEqual(requests[0].body, { model: 'gpt-image-1', prompt: '画一只鲸鱼', n: 1 });
+  select({ model: 'alias' });
+  const multimodal = await local.chatReply({ ...ask, imageMode: 'chat', reasoningEffort: 'high' });
+  assert.equal(multimodal.images.length, 1);
+  assert.deepEqual(requests[1].body.modalities, ['image', 'text']);
+  assert.equal(requests[1].body.reasoning_effort, 'high');
+  const none = local.parseToolResponse({ choices: [{ message: { images: [
+    { image_url: 'javascript:alert(1)' }, { image_url: 'data:image/svg+xml;base64,YQ==' },
+  ] } }] });
+  assert.equal(none.images.length, 0);
+});
+
+test('目录只匹配已知规格，可识别代理的图像别名；模型切换不会误发上一次的参数', async () => {
+  const { local, requests, select } = proxyGateway(url => url.endsWith('/models')
+    ? { data: [{ id: 'artist', architecture: { output_modalities: ['image'] } }] }
+    : { choices: [{ message: { content: '![画作](https://images.test/art.png)' } }] });
+  for (const [model, size] of [
+    ['gpt-5.4', 1050000], ['gpt-5.4-mini', 400000], ['gpt-5.3-codex', 400000],
+    ['claude-opus-4-6', 1000000], ['claude-sonnet-4-5-20250929', 200000], ['gemini-3.1-pro-preview', 1048576],
+  ]) {
+    select({ model });
+    assert.equal(local.getModelCapabilities('agent').contextWindow, size);
+  }
+  select({ model: 'artist' });
+  const artist = await local.resolveModelCapabilities('agent');
+  assert.equal(artist.imageChatModel, true);
+  const art = await local.chatReply({ ...ask, profileKey: artist.profileKey });
+  assert.deepEqual(requests.at(-1).body.modalities, ['image']);
+  assert.equal(art.text, '');
+  assert.equal(art.images[0].url, 'https://images.test/art.png');
+  select({ model: 'other' });
+  const before = requests.length;
+  await assert.rejects(local.chatReply({ ...ask, profileKey: artist.profileKey, modelParameters: { onlyArtist: true } }), { code: 'model_changed' });
+  assert.equal(requests.length, before);
+});
+
+test('无卡切换助手连接只改 agent 路由；专用方案密钥不回显、换地址不沿用', () => {
+  const key = 'reader_ii_independent_api_v2';
+  const shared = { id: 'shared', name: '计划', model: 'alias', apiurl: 'https://other.test/v1', key: 'other-key', custom: { preserve: true } };
+  const storage = new Map([[key, JSON.stringify({ version: 2, presets: [shared], defaultId: 'shared', routes: { memory: 'shared', adapt: 'tavern' } })]]);
+  const local = scope.__ReaderIIModules.createLlmGateway({ storage: { getItem: k => storage.get(k), setItem: (k, v) => storage.set(k, v) } });
+  assert.equal(JSON.stringify(local.getAgentConnection().presets), JSON.stringify([{ id: 'shared', name: '计划', model: 'alias' }]));
+  const dedicated = { apiurl: 'https://artist.test/v1/', model: 'artist', source: 'openai', key: 'private-key' };
+  const result = local.saveAgentConnection({ dedicated });
+  assert.equal(result.selected, result.dedicatedId);
+  assert.equal(result.dedicated.hasKey, true);
+  assert.doesNotMatch(JSON.stringify(result), /private-key|other-key/);
+  assert.equal(local.resolveApi('agent').key, 'private-key');
+  assert.equal(local.resolveApi('memory').key, 'other-key');
+  local.saveAgentConnection({ dedicated: { ...dedicated, model: 'artist2', key: '' } });
+  assert.equal(local.resolveApi('agent').key, 'private-key');
+  local.saveAgentConnection({ dedicated: { ...dedicated, apiurl: 'https://other-host.test/v1', key: '' } });
+  assert.equal(local.resolveApi('agent').key, undefined);
+  for (const selected of ['tavern', 'shared', 'default']) {
+    local.saveAgentConnection({ selected });
+    assert.equal(local.resolveApi('agent')?.model, selected === 'tavern' ? undefined : 'alias');
+  }
+  const current = JSON.parse(storage.get(key));
+  assert.equal(current.defaultId, 'shared');
+  assert.deepEqual(current.presets[0], shared);
+  assert.equal(current.routes.adapt, 'tavern');
+  assert.equal(current.routes.memory, 'shared');
+  assert.throws(() => local.saveAgentConnection({ selected: 'removed' }), /不存在/);
+});
+
+test('无卡首次保存助手设置保留旧单方案；其他任务开始共享助手方案后新建独立副本', () => {
+  const v2 = 'reader_ii_independent_api_v2', storage = new Map([
+    ['reader_ii_llm_settings_v1', JSON.stringify({ enabled: true, apiurl: 'https://old.test/v1', model: 'old', key: 'old-key' })],
+  ]);
+  const local = scope.__ReaderIIModules.createLlmGateway({ storage: { getItem: k => storage.get(k), setItem: (k, v) => storage.set(k, v) } });
+  const first = local.saveAgentConnection({ dedicated: { apiurl: 'https://first.test/v1', model: 'first' } });
+  assert.equal(local.resolveApi('memory').model, 'old');
+  const state = JSON.parse(storage.get(v2));
+  state.routes.memory = first.selected;
+  storage.set(v2, JSON.stringify(state));
+  const second = local.saveAgentConnection({ dedicated: { apiurl: 'https://second.test/v1', model: 'second' } });
+  assert.notEqual(first.selected, second.selected);
+  assert.equal(local.resolveApi('memory').model, 'first');
+  assert.equal(local.resolveApi('adapt').model, 'old');
 });

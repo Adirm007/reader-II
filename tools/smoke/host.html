@@ -24,6 +24,7 @@
 -->
 <h3>假酒馆宿主</h3>
 <div id="extensionsMenu"></div>
+<div id="extensions_settings2"></div>
 <select id="world_editor_select" hidden></select>
 <select id="world_info" multiple hidden><option value="0" selected>公共资料</option></select>
 <div id="chat"></div>
@@ -104,6 +105,17 @@
     SlashCommandParser: { addCommandObject: (command) => state.slash.push(command) },
     SlashCommand: { fromProps: (props) => props },
   };
+  if (params.has('unbound')) {
+    ctx.characterId = undefined;
+    ctx.chatId = undefined;
+    ctx.getCurrentChatId = () => undefined;
+    ctx.name2 = '';
+    ctx.chat = [];
+    ctx.chatMetadata = {};
+    const accountKey = 'reader-smoke-account';
+    ctx.extensionSettings = JSON.parse(sessionStorage.getItem(accountKey) || '{}');
+    ctx.saveSettingsDebounced = () => sessionStorage.setItem(accountKey, JSON.stringify(ctx.extensionSettings));
+  }
   window.SillyTavern = { getContext: () => ctx };
   window.confirm = () => true;
   window.toastr = { error: (message) => state.toasts.push(String(message)), warning() {}, info() {}, success() {} };

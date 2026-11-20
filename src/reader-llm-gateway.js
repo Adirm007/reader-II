@@ -77,9 +77,151 @@
     return preset;
   }
 
+  function tokenLimit(value) {
+    var number = Number(value);
+    return Number.isSafeInteger(number) && number > 0 ? number : 0;
+  }
+
+  function metadataLimit(record) {
+    if (!record) return 0;
+    var limits = [record.context_length, record.contextLength, record.context_window, record.contextWindow, record.max_context_length, record.max_model_len,
+      record.max_input_tokens, record.inputTokenLimit, record.input_token_limit, record.top_provider && record.top_provider.context_length,
+      record.limits && record.limits.context_window, record.limit && record.limit.context, record.metadata && record.metadata.context_length];
+    for (var i = 0; i < limits.length; i++) if (tokenLimit(limits[i])) return tokenLimit(limits[i]);
+    return 0;
+  }
+
+  function catalogWindow(model) {
+    var id = String(model || '').toLowerCase().split('/').pop().replace(/-(?:\d{4}-\d\d-\d\d|\d{8})$/, '');
+    if (/^gpt-4\.1(?:-(?:mini|nano))?$/.test(id)) return 1047576;
+    if (/^gpt-4o(?:-mini)?$/.test(id)) return 128000;
+    if (/^(?:o3(?:-mini)?|o4-mini)$/.test(id)) return 200000;
+    if (/^gpt-5(?:[.]1|[.]2)?(?:-(?:mini|nano|codex|codex-max))?$/.test(id)) return 400000;
+    if (/^(?:gpt-5\.3-codex|gpt-5\.4-(?:nano|mini))$/.test(id)) return 400000;
+    if (/^gpt-5\.(?:4|5)(?:-pro)?$/.test(id)) return 1050000;
+    if (/^claude-(?:(?:opus|sonnet)-4[-.]6|opus-4[-.][78]|(?:opus|sonnet)-5(?:[-.]5)?|haiku-5[-.]5|(?:fable|mythos)-5(?:[-.][12])?)$/.test(id)) return 1000000;
+    if (/^claude-(?:(?:opus|sonnet|haiku)-4(?:[-.]1|[-.]5)?|3[-.][57]-sonnet)$/.test(id)) return 200000;
+    if (/^gemini-2\.5-(?:pro|flash|flash-lite)$/.test(id)) return 1048576;
+    if (/^gemini-(?:3\.1-pro|3-flash)-preview$/.test(id)) return 1048576;
+    if (id === 'gemini-2.5-flash-image') return 32768;
+    return 0;
+  }
+
+  function tokenProfileKey(route, source, endpoint, model) {
+    // Endpoint URLs may contain a credential in their path. Persist only an opaque identifier.
+    return [route || '', source, modules.hashText(endpoint), model].join('|');
+  }
+
+  function imageModel(model) {
+    return /^(?:gpt-image(?:-[\w.-]+)?|chatgpt-image-latest|dall-e-[23])$/i.test(String(model || '').split('/').pop());
+  }
+
+  function imageChatModel(model) {
+    return /(?:^|\/)gemini-[\w.-]*image(?:-[\w.-]+)?$/i.test(String(model || ''));
+  }
+
+  function outputModalities(record) {
+    var modalities = record && (record.output_modalities || record.architecture && record.architecture.output_modalities);
+    return Array.isArray(modalities) ? modalities.filter(function (item) { return item === 'text' || item === 'image'; }) : [];
+  }
+
+  function generationEndpoint(record) {
+    return !!(record && Array.isArray(record.endpoints) && record.endpoints.some(function (url) { return /\/images\/generations$/.test(url); }) &&
+      !record.endpoints.some(function (url) { return /\/chat\/completions$/.test(url); }));
+  }
+
+  function findRecord(data, model) {
+    var records = Array.isArray(data) ? data : data && (data.data || data.models);
+    return Array.isArray(records) && records.find(function (record) {
+      return record && String(record.id || record.name || '').replace(/^models\//, '') === String(model).replace(/^models\//, '');
+    });
+  }
+
   function createLlmGateway(env) {
     var memory = normalizeSettings({});
     var sequence = 0;
+    var modelCache = new Map();
+    var hostChatModule, hostTextModule;
+
+    function modelProfile(route, options) {
+      var api = resolveApi(route), ctx = nativeContext() || {};
+      var text = !api && ctx.mainApi === 'textgenerationwebui';
+      var settings = text ? ctx.textCompletionSettings || hostTextModule && hostTextModule.textgenerationwebui_settings || {}
+        : ctx.chatCompletionSettings || hostChatModule && hostChatModule.oai_settings || {};
+      var source = String(api ? api.source : text ? settings.type || ctx.mainApi : settings.chat_completion_source || ctx.mainApi || 'main');
+      var model = String(api ? api.model : settings[(source === 'makersuite' ? 'google' : source) + '_model'] || '');
+      if (!api && text && hostTextModule && hostTextModule.getTextGenModel) model = String(hostTextModule.getTextGenModel(settings) || '');
+      if (!api && !text && hostChatModule && hostChatModule.getChatCompletionModel) model = String(hostChatModule.getChatCompletionModel(settings) || '');
+      var endpoint = String(api ? api.apiurl : settings.custom_url && source === 'custom' ? settings.custom_url : settings.reverse_proxy || '');
+      if (text && hostTextModule && hostTextModule.getTextGenServer && settings.type) endpoint = String(hostTextModule.getTextGenServer(settings.type) || '');
+      var connection = (api ? api.presetId || 'legacy' : 'main') + '|' + endpoint;
+      var key = tokenProfileKey(route, (api ? 'preset/' : 'main/') + source, connection, model);
+      var cached = modelCache.get(key);
+      if (cached && (cached.expires <= Date.now() || api && cached.account !== modules.hashText(api.key || ''))) cached = null;
+      var record = !api && !text && hostChatModule && findRecord(hostChatModule.model_list, model);
+      var modalities = record ? outputModalities(record) : cached && cached.modalities || [];
+      var hostLimit = !api && (tokenLimit(text ? ctx.maxContext : settings.openai_max_context) || tokenLimit(ctx.maxContext));
+      var size = tokenLimit(options && options.contextWindow), origin = 'override';
+      if (!size) { size = metadataLimit(record) || cached && cached.size; origin = 'metadata'; }
+      if (!size && !text) { size = catalogWindow(model); origin = 'catalog'; }
+      if (!size) { size = hostLimit; origin = 'host'; }
+      if (!size) { size = 32768; origin = 'fallback'; }
+      return { model: model, source: source, contextWindow: size, origin: origin, profileKey: key,
+        imageGenerationOnly: imageModel(model) || generationEndpoint(record) || !!(cached && cached.imageEndpoint),
+        imageChatModel: imageChatModel(model) || modalities.indexOf('image') >= 0, outputModalities: modalities.slice() };
+    }
+
+    function assertModelRoute(request) {
+      if (request.profileKey && modelProfile(request.route).profileKey !== request.profileKey) {
+        var error = new Error('模型连接已切换，请在新模型上重新发送');
+        error.code = 'model_changed';
+        throw error;
+      }
+    }
+
+    async function resolveModelCapabilities(route, options) {
+      var signal = options && options.signal;
+      if (signal && signal.aborted) throw abortError();
+      var api = resolveApi(route), ctx = nativeContext() || {};
+      if (!api && env.hostImport) {
+        try {
+          if (ctx.mainApi === 'openai' && !hostChatModule) hostChatModule = await env.hostImport('/scripts/openai.js');
+          if (ctx.mainApi === 'textgenerationwebui' && !hostTextModule) hostTextModule = await env.hostImport('/scripts/textgen-settings.js');
+        } catch (_) { /* Older hosts still expose the active settings in their context. */ }
+      }
+      var profile = modelProfile(route, options);
+      if (!api || profile.origin === 'override') return profile;
+      var cached = modelCache.get(profile.profileKey), fetcher = hostFetch();
+      var account = modules.hashText(api.key || '');
+      if (!fetcher || cached && cached.account === account && cached.expires > Date.now()) return profile;
+      var record = null, controller = typeof AbortController === 'function' ? new AbortController() : null;
+      var cancel = function () { if (controller) controller.abort(); };
+      var timer = controller && setTimeout(cancel, 3500);
+      if (signal) signal.addEventListener('abort', cancel, { once: true });
+      try {
+        var response;
+        var metadataSignal = controller ? controller.signal : signal;
+        if (ctx.getRequestHeaders) {
+          var config = { chat_completion_source: api.source, reverse_proxy: api.apiurl, proxy_password: api.key || '' };
+          if (api.source === 'custom') {
+            config.custom_url = api.apiurl;
+            config.custom_include_headers = 'Authorization: ' + JSON.stringify(api.key ? 'Bearer ' + api.key : '');
+          }
+          response = await fetcher('/api/backends/chat-completions/status', { method: 'POST', headers: Object.assign({ 'Content-Type': 'application/json' }, ctx.getRequestHeaders()), body: JSON.stringify(config), signal: metadataSignal });
+        } else if (['openai', 'custom'].indexOf(api.source) >= 0) {
+          response = await fetcher(api.apiurl.replace(/\/+$/, '') + '/models', { headers: api.key ? { Authorization: 'Bearer ' + api.key } : {}, signal: metadataSignal, redirect: 'error' });
+        }
+        if (response && response.ok) record = findRecord(await response.json(), api.model);
+      } catch (_) { /* Some proxies expose model IDs only, or omit discovery entirely. */ }
+      finally {
+        if (timer) clearTimeout(timer);
+        if (signal) signal.removeEventListener('abort', cancel);
+      }
+      if (signal && signal.aborted) throw abortError();
+      modelCache.set(profile.profileKey, { size: metadataLimit(record), account: account, modalities: outputModalities(record),
+        imageEndpoint: generationEndpoint(record), expires: Date.now() + (record ? 300000 : 60000) });
+      return modelProfile(route, options);
+    }
 
     function resolveFunction(name) {
       if (env && typeof env.resolveFunction === 'function') {
@@ -141,7 +283,70 @@
       if (!usablePreset(preset)) return null;
       var api = { apiurl: preset.apiurl, model: preset.model, source: preset.source || 'openai' };
       if (preset.key) api.key = preset.key;
+      Object.defineProperty(api, 'presetId', { value: preset.id });
       return api;
+    }
+
+    function connectionState() {
+      var raw = readJson(PRESET_KEY);
+      if (modules.isObject(raw) && Array.isArray(raw.presets)) return raw;
+      // Creating a route must preserve the former default even before the lobby has migrated the v1 table.
+      var previous = readJson(LEGACY_KEY) || readJson(modules.localKey('dream_independent_api_v1')) || legacySettings();
+      var preset = previous.apiurl ? cleanPreset(Object.assign({}, previous, { id: PANEL_PRESET_ID, name: '默认方案' })) : null;
+      return { version: 2, routes: {}, presets: preset ? [preset] : [], defaultId: usablePreset(preset) && previous.enabled !== false ? preset.id : '' };
+    }
+
+    function dedicatedId(state) {
+      var shared = function (id) {
+        return state.defaultId === id || Object.keys(state.routes || {}).some(function (route) { return route !== 'agent' && state.routes[route] === id; });
+      };
+      var existing = state.presets.filter(function (item) {
+        return item && /^readerii-agent(?:-\d+)?$/.test(item.id) && item.name === '夜梦助手专用' && !shared(item.id);
+      });
+      if (existing.length) return (existing.find(function (item) { return state.routes && state.routes.agent === item.id; }) || existing[0]).id;
+      for (var n = 1; n <= state.presets.length + 1; n++) {
+        var id = 'readerii-agent' + (n === 1 ? '' : '-' + n);
+        if (!state.presets.some(function (item) { return item && item.id === id; })) return id;
+      }
+    }
+
+    function getAgentConnection() {
+      var state = connectionState(), id = dedicatedId(state);
+      var dedicated = state.presets.find(function (item) { return item && item.id === id; });
+      var presets = state.presets.filter(usablePreset).map(function (item) {
+        return { id: item.id, name: item.name || item.model, model: item.model };
+      });
+      return {
+        selected: state.routes && state.routes.agent || 'default', presets: presets, dedicatedId: id,
+        dedicated: dedicated ? { apiurl: dedicated.apiurl, model: dedicated.model, source: dedicated.source || 'openai', hasKey: !!dedicated.key } : null
+      };
+    }
+
+    function saveAgentConnection(input) {
+      if (!modules.isObject(input)) throw new Error('请选择助手连接');
+      var state = connectionState(), selected = String(input.selected || '');
+      if (modules.isObject(input.dedicated)) {
+        var next = input.dedicated;
+        selected = dedicatedId(state);
+        var index = state.presets.findIndex(function (item) { return item && item.id === selected; });
+        var old = state.presets[index];
+        var apiurl = String(next.apiurl || '').trim().replace(/\/+$/, ''), key = String(next.key || '').trim();
+        var model = String(next.model || '').trim(), source = String(next.source || 'openai');
+        validateEndpoint({ apiurl: apiurl, model: model }, true);
+        if (apiurl.length > 500 || key.length > 500 || model.length > 200 || !/^[a-zA-Z0-9_-]{1,40}$/.test(source)) throw new Error('连接信息超出方案表支持的长度或格式');
+        if (!key && !next.clearKey && old && old.apiurl.replace(/\/+$/, '') === apiurl) key = old.key || '';
+        var preset = { id: selected, name: '夜梦助手专用', apiurl: apiurl, model: model, source: source, key: key };
+        if (index >= 0) state.presets[index] = preset;
+        else {
+          if (state.presets.length >= 30) throw new Error('方案表已满，请选择已有方案');
+          state.presets.push(preset);
+        }
+      } else if (selected !== 'default' && selected !== 'tavern' && !state.presets.some(function (item) { return usablePreset(item) && item.id === selected; })) {
+        throw new Error('选择的方案已不存在或缺少模型、地址');
+      }
+      state.routes = Object.assign({}, state.routes || {}, { agent: selected });
+      if (!writeJson(PRESET_KEY, state)) throw new Error('无法保存助手模型连接，请检查本机存储');
+      return getAgentConnection();
     }
 
     /* 返回 custom_api 配置；null 表示走酒馆当前插头。 */
@@ -217,7 +422,7 @@
       var result = await getModelList({ apiurl: candidate.apiurl, key: candidate.key });
       if (!Array.isArray(result)) throw new Error('模型列表返回格式无效');
       var seen = Object.create(null);
-      return result.map(function (item) { return String(item || '').trim(); }).filter(function (item) {
+      return result.map(function (item) { return String(typeof item === 'string' ? item : item && (item.id || item.name) || '').trim(); }).filter(function (item) {
         if (!item || seen[item]) return false;
         seen[item] = true;
         return true;
@@ -310,28 +515,13 @@
       return text;
     }
 
-    /* OpenAI 兼容端点的直连调用（没有酒馆助手时的独立 API 通道）。 */
-    async function directChat(api, messages, request) {
-      var fetcher = env && env.host && env.host.fetch ? env.host.fetch.bind(env.host) : root.fetch;
-      if (typeof fetcher !== 'function') throw new Error('当前环境不能直连独立 API');
-      var headers = { 'Content-Type': 'application/json' };
-      if (api.key) headers.Authorization = 'Bearer ' + api.key;
-      var body = { model: api.model, messages: messages, stream: false };
-      if (Number(request.maxTokens) > 0) body.max_tokens = Math.trunc(Number(request.maxTokens));
-      if (typeof request.temperature === 'number' && Number.isFinite(request.temperature)) body.temperature = request.temperature;
-      var response = await fetcher(String(api.apiurl).replace(/\/+$/, '') + '/chat/completions', { method: 'POST', headers: headers, body: JSON.stringify(body), signal: request.signal });
-      if (!response.ok) throw new Error('独立 API 返回 HTTP ' + response.status + '：' + String(await response.text()).slice(0, 300));
-      var data = await response.json();
-      return responseText(data);
-    }
-
     /* 宿主的文本补全参数构造器会展开正文停止词、负面提示和 DRY 分隔符里的宏。
      * 助手只借用已选的连接、模型和数值采样参数，仍由酒馆后端处理鉴权。 */
     async function isolatedTextCompletion(ctx, textApi, messages, request) {
       var script = await env.hostImport('/script.js');
       var settings = textApi.textgenerationwebui_settings;
       var type = settings.type;
-      var limit = script.amount_gen || request.maxTokens;
+      var limit = request.maxTokens || script.amount_gen;
       var body = {
         api_type: type, api_server: textApi.getTextGenServer(type), model: textApi.getTextGenModel(settings),
         prompt: messages.map(function (message) { return message.role + ': ' + message.content; }).join('\n\n') + '\n\nassistant:',
@@ -341,7 +531,7 @@
       };
       if (settings.seed >= 0) body.seed = settings.seed;
       if (type === 'ollama' || type === 'llamacpp') {
-        body.num_ctx = script.max_context;
+        body.num_ctx = tokenLimit(request.contextWindow) || script.max_context;
         body.repeat_penalty = settings.rep_pen;
         body.repeat_last_n = settings.rep_pen_range;
         if (type === 'ollama') body.num_predict = limit;
@@ -366,11 +556,14 @@
      *   messages [{role, content}]  route  maxTokens  temperature  timeoutMs  retries  signal  jsonSchema
      * 返回文本；空回复与瞬时错误按 retries 重试。
      */
-    async function chat(input) {
-      var request = modules.isObject(input) ? input : {};
+    async function chat(input, rich) {
+      var request = Object.assign({}, input || {});
+      assertModelRoute(request);
+      if (!rich) request.textOnly = true;
       var messages = normalizeMessages(request.messages);
       if (!messages.length) throw new Error('Reader LLM 调用缺少消息');
       var api = Object.prototype.hasOwnProperty.call(request, 'api') ? request.api : resolveApi(request.route);
+      if (rich && wantsImageEndpoint(request, api)) return generateImages(api, messages, request);
       var generateRaw = resolveFunction('generateRaw');
       var retries = Math.max(0, Math.min(5, request.retries === undefined ? 2 : Math.trunc(Number(request.retries) || 0)));
       var timeoutMs = Math.max(0, Number(request.timeoutMs === undefined ? 180000 : request.timeoutMs) || 0);
@@ -384,14 +577,9 @@
               var ctx = nativeContext();
               if (ctx && typeof ctx.getRequestHeaders === 'function' && (api || ctx.mainApi === 'openai')) {
                 var options = Object.assign({}, request, { timeoutMs: timeoutMs, tools: undefined, toolChoice: undefined });
-                var pending = api ? backendRequest(api, messages, options) : mainRequest(messages, options);
-                return pending.then(function (raw) {
-                  var parsed = parseToolResponse(raw);
-                  if (parsed.toolCalls.length) throw new Error('模型为文本请求返回了未声明的工具调用，本次没有执行');
-                  return parsed.text;
-                });
+                return api ? backendRequest(api, messages, options) : mainRequest(messages, options);
               }
-              if (api && hostFetch()) return directChat(api, messages, request);
+              if (api && hostFetch()) return directRequest(api, messages, request);
               if (ctx && ctx.mainApi === 'textgenerationwebui' && typeof ctx.getRequestHeaders === 'function' && env.hostImport && hostFetch()) {
                 var textApi = await env.hostImport('/scripts/textgen-settings.js').catch(function () { return null; });
                 if (textApi && textApi.textgenerationwebui_settings && typeof textApi.getTextGenModel === 'function' && typeof textApi.getTextGenServer === 'function') {
@@ -405,9 +593,9 @@
                 var plain = { maxTokens: request.maxTokens, temperature: request.temperature, signal: request.signal };
                 var backendCtx = nativeContext();
                 if (backendCtx && typeof backendCtx.getRequestHeaders === 'function' && hostFetch()) {
-                  return backendRequest(api, messages, plain).then(function (data) { return parseToolResponse(data).text; });
+                  return backendRequest(api, messages, plain);
                 }
-                return directChat(api, messages, request);
+                return directRequest(api, messages, request);
               }
               var native = nativeContext();
               if (native && typeof native.generateRaw === 'function') {
@@ -435,8 +623,14 @@
             }
             return generateRaw(config);
           }, generationId, timeoutMs, request.signal);
+          if (isolatedRoute(request) || rich) {
+            var parsed = parseToolResponse(result, !!rich && !request.textOnly);
+            if (parsed.toolCalls.length) throw new Error('模型为文本请求返回了未声明的工具调用，本次没有执行');
+            if (rich && (parsed.text.trim() || parsed.images.length)) return parsed;
+            if (!parsed.text.trim()) throw new Error('LLM 未返回可用文本');
+            return parsed.text;
+          }
           var text = responseText(result);
-          if (request.route === 'agent' || request.route === 'adapt') text = visibleText(text);
           if (!text.trim()) throw new Error('LLM 未返回可用文本');
           return text;
         } catch (error) {
@@ -498,16 +692,67 @@
       try { return JSON.stringify(value == null ? {} : value); } catch (error) { return '{}'; }
     }
 
+    function addImage(images, url) {
+      if (typeof url !== 'string') return false;
+      if (!/^https?:\/\/[^\s/]+(?:[/?#][^\s]*)?$/i.test(url) && !/^data:image\/(?:png|jpeg|webp|gif);base64,[a-z0-9+/]+=*$/i.test(url)) return false;
+      if (!images.some(function (item) { return item.url === url; })) images.push({ url: url });
+      return true;
+    }
+
+    function responseImages(data, message, parts) {
+      var images = [];
+      function add(url) { return addImage(images, url); }
+      function inline(mime, bytes) { if (typeof bytes === 'string' && bytes) add('data:' + mime + ';base64,' + bytes); }
+      function imageBlock(part) {
+        if (!part || part.thought) return;
+        var blob = part.inlineData || part.inline_data;
+        if (blob) inline(blob.mimeType || blob.mime_type, blob.data);
+        var ref = part.image_url;
+        if (ref) add(typeof ref === 'string' ? ref : ref.url);
+        if (part.type === 'image' && part.source) {
+          if (part.source.type === 'base64') inline(part.source.media_type, part.source.data);
+          else if (part.source.type === 'url') add(part.source.url);
+        }
+      }
+      [message && message.images, message && message.content, data.content, parts].forEach(function (blocks) {
+        if (Array.isArray(blocks)) blocks.forEach(imageBlock);
+      });
+      if (Array.isArray(data.data)) data.data.forEach(function (item) {
+        if (!item) return;
+        if (item.b64_json) inline('image/' + (item.output_format || data.output_format || 'png').replace(/^jpg$/, 'jpeg'), item.b64_json);
+        else add(item.url);
+      });
+      if (Array.isArray(data.output)) data.output.forEach(function (item) {
+        if (item && item.type === 'image_generation_call') inline('image/' + (item.output_format || 'png'), item.result);
+      });
+      return images;
+    }
+
+    function collectMarkdownImages(reply) {
+      if (reply.text.indexOf('![') < 0) return;
+      var fenced = false;
+      reply.text = reply.text.split('\n').filter(function (line) {
+        if (/^\s*(?:```|~~~)/.test(line)) { fenced = !fenced; return true; }
+        if (fenced) return true;
+        var match = /^\s*!\[[^\]]*\]\(([^\s)]+)\)\s*$/.exec(line);
+        return !match || !addImage(reply.images, match[1]);
+      }).join('\n').trim();
+    }
+
     /*
      * 把各家的响应规整成 { text, toolCalls: [{ id, name, arguments(JSON 文本) }], reasoning, finish, message }。
      * message 是下一轮要原样带回去的 assistant 消息（OpenAI 形状；酒馆后端会替 Claude、Gemini 转换）。
      */
-    function parseToolResponse(data) {
-      var out = { text: '', toolCalls: [], reasoning: '', finish: '', message: null };
-      if (!modules.isObject(data)) { out.text = typeof data === 'string' ? visibleText(data) : ''; return out; }
+    function parseToolResponse(data, markdownImages) {
+      var out = { text: '', images: [], toolCalls: [], reasoning: '', finish: '', message: null };
+      if (!modules.isObject(data)) {
+        out.text = typeof data === 'string' ? visibleText(data) : '';
+        if (markdownImages) collectMarkdownImages(out);
+        return out;
+      }
       var choice = Array.isArray(data.choices) ? data.choices[0] : null;
       var message = choice && modules.isObject(choice.message) ? choice.message
-        : Array.isArray(data.tool_calls) || modules.isObject(data.function_call) ? data : null;
+        : Array.isArray(data.tool_calls) || modules.isObject(data.function_call) || Array.isArray(data.images) ? data : null;
       out.finish = String(choice && choice.finish_reason || data.finish_reason || data.stop_reason || '');
       var wire = [];
       function push(id, name, args, extra) {
@@ -540,6 +785,7 @@
       var candidate = Array.isArray(data.candidates) && data.candidates[0] && data.candidates[0].content;
       var parts = modules.isObject(data.responseContent) && Array.isArray(data.responseContent.parts) ? data.responseContent.parts
         : candidate && Array.isArray(candidate.parts) ? candidate.parts : null;
+      out.images = responseImages(data, message, parts);
       if (parts && !out.toolCalls.length) {
         if (!out.text) out.text = parts.filter(function (part) { return part && typeof part.text === 'string' && !part.thought; }).map(function (part) { return part.text; }).join('');
         parts.forEach(function (part) {
@@ -550,6 +796,7 @@
       }
       if (!out.text && !out.toolCalls.length) out.text = responseText(data);
       out.text = visibleText(out.text);
+      if (markdownImages) collectMarkdownImages(out);
       out.message = { role: 'assistant', content: out.text };
       if (wire.length) out.message.tool_calls = wire;
       /* 思考型模型在同一轮的多步调用里要把思考原样带回（DeepSeek、Kimi 等）；对方没给这个字段时不带，免得严格的接口拒收。 */
@@ -589,11 +836,141 @@
       var body = { model: api.model, messages: messages, stream: false };
       if (Number(request.maxTokens) > 0) body.max_tokens = Math.trunc(Number(request.maxTokens));
       if (typeof request.temperature === 'number' && Number.isFinite(request.temperature)) body.temperature = request.temperature;
+      if (['openai', 'custom'].indexOf(api.source || 'openai') >= 0 && /^(?:openai\/)?(?:o[1-4](?:-|$)|gpt-[56](?:[.-]|$))/i.test(body.model)) {
+        if (body.max_tokens !== undefined) body.max_completion_tokens = body.max_tokens;
+        delete body.max_tokens;
+        delete body.temperature;
+      }
       if (Array.isArray(request.tools) && request.tools.length) {
         body.tools = request.tools;
         body.tool_choice = request.toolChoice || 'auto';
       }
       return body;
+    }
+
+    // These are upstream model parameters. Transport, credentials, history and tool permissions belong to the gateway.
+    function modelParameters(request) {
+      var parameters = request.modelParameters;
+      if (parameters == null) return {};
+      if (!modules.isObject(parameters)) throw new Error('模型附加参数必须是 JSON 对象');
+      var reserved = /^(?:__proto__|prototype|constructor|model|messages|prompt|input|instructions|tools?|tool_choice|functions?|function_call|stream|reverse_proxy|proxy_password|chat_completion_source|custom_.*|headers|authorization|api[_-]?key|secret_id|max(?:_completion)?_tokens)$/i;
+      Object.keys(parameters).forEach(function (key) {
+        if (reserved.test(key)) throw new Error('附加参数不能覆盖请求字段 ' + key);
+      });
+      return modules.clone(parameters);
+    }
+
+    function wantsImageEndpoint(request, api) {
+      return !request.textOnly && (request.imageMode === 'generation' ||
+        request.imageMode !== 'chat' && (api && imageModel(api.model) || modelProfile(request.route).imageGenerationOnly));
+    }
+
+    async function generateImages(api, messages, request) {
+      var ctx = nativeContext() || {}, settings = ctx.chatCompletionSettings || hostChatModule && hostChatModule.oai_settings || {};
+      var model = api ? api.model : modelProfile(request.route).model;
+      var lastUser = messages.slice().reverse().find(function (item) { return item.role === 'user'; });
+      if (!lastUser) throw new Error('图像生成需要用户提示词');
+      var headers = { 'Content-Type': 'application/json' }, url;
+      if (api && ['openai', 'custom'].indexOf(api.source || 'openai') >= 0) {
+        url = api.apiurl.replace(/\/+$/, '') + '/images/generations';
+        if (api.key) headers.Authorization = 'Bearer ' + api.key;
+      } else if (!api && settings.chat_completion_source === 'openai' && !settings.reverse_proxy && ctx.getRequestHeaders) {
+        url = '/api/openai/generate-image';
+        Object.assign(headers, ctx.getRequestHeaders());
+      } else {
+        throw new Error('此图片端点需要使用独立 API 的 OpenAI 兼容方案，或酒馆的官方 OpenAI 连接');
+      }
+      var fetcher = hostFetch();
+      if (!fetcher) throw new Error('当前环境无法请求图片接口');
+      var body = Object.assign({ model: model, prompt: lastUser.content, n: 1 }, modelParameters(request));
+      var controller = typeof AbortController === 'function' ? new AbortController() : null;
+      var stopImage = function () { if (controller) controller.abort(); };
+      var signal = request.signal;
+      if (signal && signal.aborted) throw abortError();
+      if (signal) signal.addEventListener('abort', stopImage, { once: true });
+      var timeout = request.timeoutMs === undefined ? 180000 : Number(request.timeoutMs);
+      var timer = timeout > 0 && controller && setTimeout(stopImage, timeout);
+      try {
+        var response = await fetcher(url, { method: 'POST', headers: headers, body: JSON.stringify(body), signal: controller ? controller.signal : signal, redirect: 'error' });
+        if (!response.ok) throw new Error('图片接口返回 HTTP ' + response.status + '：' + await readFailure(response));
+        var parsed = parseToolResponse(await response.json());
+        if (!parsed.images.length) throw new Error('图片接口未返回可显示的图片');
+        parsed.via = 'images';
+        return parsed;
+      } catch (error) {
+        if (controller && controller.signal.aborted && !(signal && signal.aborted)) throw new Error('图片生成超时');
+        throw error;
+      } finally {
+        if (timer) clearTimeout(timer);
+        if (signal) signal.removeEventListener('abort', stopImage);
+      }
+    }
+
+    function requestedEffort(request) {
+      var effort = request.reasoningEffort;
+      if (!effort || effort === 'auto') return '';
+      if (!/^(none|minimal|low|medium|high|xhigh|max)$/.test(effort)) throw new Error('未知的思考档位');
+      return effort;
+    }
+
+    function imageChat(request, model) {
+      return !request.textOnly && (request.imageMode === 'chat' || imageChatModel(model) || modelProfile(request.route).imageChatModel);
+    }
+
+    // Chat Completions compatible proxies receive the wire value even for model aliases unknown to SillyTavern.
+    function compatibleParameters(model, request) {
+      var options = modelParameters(request), effort = requestedEffort(request);
+      if (effort && options.reasoning_effort === undefined && options.reasoning === undefined) {
+        options.reasoning_effort = effort === 'max' && /^(?:.*\/)?(?:gpt-|o[1-9]|codex)/i.test(model) ? 'xhigh' : effort;
+      }
+      if (request.textOnly) delete options.modalities;
+      else if (imageChat(request, model) && !options.modalities) {
+        var modalities = modelProfile(request.route).outputModalities;
+        options.modalities = modalities.indexOf('image') >= 0 ? modalities : ['image', 'text'];
+      }
+      return options;
+    }
+
+    function applyBackendParameters(body, request, independent, yaml) {
+      var source = body.chat_completion_source, effort = requestedEffort(request);
+      var extra = modelParameters(request), wantsImages = imageChat(request, body.model);
+      if (request.textOnly) delete body.request_images;
+      var isCompatibleProxy = source === 'custom' || source === 'openai' && body.reverse_proxy;
+      if (isCompatibleProxy) {
+        var options = compatibleParameters(body.model, request);
+        if (!Object.keys(options).length) return;
+        if (source === 'openai') {
+          body.chat_completion_source = 'custom';
+          body.custom_url = body.reverse_proxy;
+          // The custom backend may have a different saved secret. Override its Authorization even for keyless proxies.
+          body.custom_include_headers = 'Authorization: ' + JSON.stringify(body.proxy_password ? 'Bearer ' + body.proxy_password : '');
+        }
+        var previous = {};
+        if (!independent && body.custom_include_body) {
+          try { previous = JSON.parse(body.custom_include_body); }
+          catch (_) {
+            if (!yaml || !yaml.parse) throw new Error('当前宿主无法合并自定义端点已有的 YAML 请求参数');
+            previous = yaml.parse(body.custom_include_body) || {};
+          }
+          if (Array.isArray(previous)) previous = Object.assign.apply(Object, [{}].concat(previous));
+        }
+        body.custom_include_body = JSON.stringify(Object.assign({}, previous, options));
+        if (effort) delete body.reasoning_effort; // Some hosts would rewrite the supplied value a second time.
+        return;
+      }
+      if (Object.keys(extra).length) throw new Error('此连接不转发自定义模型参数，请选择 OpenAI 兼容反代或自定义端点');
+      if (wantsImages && (source === 'makersuite' || source === 'vertexai')) body.request_images = true;
+      if (!effort) return;
+      if (source === 'claude' || source === 'makersuite' || source === 'vertexai') {
+        if (effort === 'none') {
+          if (source === 'claude' && /^claude-(?:(?:fable|mythos|opus|sonnet|haiku)-5|mythos-preview)/.test(body.model)) throw new Error('此 Claude 模型强制启用思考，请选择思考档位');
+          if (source !== 'claude' && !/^gemini-2\.5-flash(?:-|$)/.test(body.model)) throw new Error('此 Gemini 模型无法通过宿主关闭思考，请选择最低档位');
+          body.reasoning_effort = source === 'claude' ? 'auto' : 'min';
+          body.include_reasoning = false;
+        } else body.reasoning_effort = effort === 'minimal' ? 'min' : effort === 'xhigh' ? 'max' : effort;
+        return;
+      }
+      body.reasoning_effort = effort === 'max' && (source === 'openai' || source === 'openrouter') ? 'xhigh' : effort;
     }
 
     /* 独立 API 经酒馆后端代发：与酒馆助手的 custom_api 同一种写法（reverse_proxy + proxy_password）。 */
@@ -606,8 +983,9 @@
       });
       if (source === 'custom') {
         body.custom_url = api.apiurl;
-        if (api.key) body.custom_include_headers = 'Authorization: ' + JSON.stringify('Bearer ' + api.key);
+        body.custom_include_headers = 'Authorization: ' + JSON.stringify(api.key ? 'Bearer ' + api.key : '');
       }
+      applyBackendParameters(body, request, true);
       if (request.jsonSchema) body.json_schema = modules.clone(request.jsonSchema);
       return sendBackendBody(ctx, fetcher, body, request, '独立 API');
     }
@@ -650,6 +1028,7 @@
       var headers = { 'Content-Type': 'application/json' };
       if (api.key) headers.Authorization = 'Bearer ' + api.key;
       var body = requestBody(api, messages, request);
+      Object.assign(body, compatibleParameters(api.model, request));
       var response = await fetcher(String(api.apiurl).replace(/\/+$/, '') + '/chat/completions', { method: 'POST', headers: headers, body: JSON.stringify(body), signal: request.signal });
       if (!response.ok) {
         var detail = await readFailure(response);
@@ -673,6 +1052,10 @@
       function setAgentTools(data) {
         data.stream = false;
         data.include_reasoning = true;
+        if (Number(request.maxTokens) > 0) {
+          var outputField = data.max_completion_tokens !== undefined ? 'max_completion_tokens' : 'max_tokens';
+          data[outputField] = Math.trunc(request.maxTokens);
+        }
         if (Array.isArray(request.tools) && request.tools.length) {
           data.tools = request.tools;
           data.tool_choice = request.toolChoice || 'auto';
@@ -684,6 +1067,12 @@
         delete data.function_call;
       }
       var settings = ctx.chatCompletionSettings || api.oai_settings;
+      hostChatModule = api;
+      var yaml = env.host && env.host.YAML;
+      if (!yaml && settings && settings.chat_completion_source === 'custom' && settings.custom_include_body &&
+          (requestedEffort(request) || Object.keys(modelParameters(request)).length || imageChat(request, settings.custom_model))) {
+        try { yaml = (await env.hostImport('/lib.js')).yaml; } catch (_) { /* JSON presets do not need a YAML parser. */ }
+      }
       var isolated = isolatedRoute(request);
       var canPrepare = typeof api.createGenerationParameters === 'function' && typeof api.getChatCompletionModel === 'function';
       if (canPrepare) {
@@ -691,7 +1080,9 @@
         var model = api.getChatCompletionModel(settings);
         var prepared = await api.createGenerationParameters(settings, model, 'quiet', messages, { allowToolCalls: false, jsonSchema: request.jsonSchema || null });
         var body = prepared.generate_data;
+        assertModelRoute(request);
         setAgentTools(body);
+        applyBackendParameters(body, request, false, yaml);
         if (isolated) delete body.stop;
         if (request.jsonSchema) body.json_schema = modules.clone(request.jsonSchema);
         if (!isolated && ctx.eventSource && ctx.eventSource.emit) await ctx.eventSource.emit(eventName, body);
@@ -712,8 +1103,10 @@
       var inject = function (data) {
         if (injected || !data || !Array.isArray(data.messages) || data.messages[0] !== first) return;
         injected = true;
+        assertModelRoute(request);
         data.messages = messages;
         setAgentTools(data);
+        applyBackendParameters(data, request, false, yaml);
       };
       ctx.eventSource.on(eventName, inject);
       try {
@@ -739,11 +1132,13 @@
      */
     async function chatTools(input) {
       var request = modules.isObject(input) ? input : {};
+      assertModelRoute(request);
       var messages = wireMessages(request.messages);
       if (!messages.length) throw new Error('Reader LLM 调用缺少消息');
+      var api = resolveApi(request.route);
+      if (wantsImageEndpoint(request, api)) return generateImages(api, messages, request);
       var support = toolSupport(request.route);
       if (!support.native) throw unsupportedError(support.reason || '当前通道没有原生函数调用');
-      var api = resolveApi(request.route);
       var retries = Math.max(0, Math.min(5, request.retries === undefined ? 2 : Math.trunc(Number(request.retries) || 0)));
       var timeoutMs = Math.max(0, Number(request.timeoutMs === undefined ? 180000 : request.timeoutMs) || 0);
       var lastError = null;
@@ -755,8 +1150,8 @@
             if (support.via === 'direct') return directRequest(api, messages, request);
             return mainRequest(messages, Object.assign({ timeoutMs: timeoutMs }, request));
           }, '', timeoutMs, request.signal);
-          var parsed = parseToolResponse(data);
-          if (!parsed.text.trim() && !parsed.toolCalls.length && !/^(?:tool_calls|function_call|tool_use)$/.test(parsed.finish)) throw new Error('LLM 未返回可用文本');
+          var parsed = parseToolResponse(data, !request.textOnly);
+          if (!parsed.text.trim() && !parsed.images.length && !parsed.toolCalls.length && !/^(?:tool_calls|function_call|tool_use)$/.test(parsed.finish)) throw new Error('LLM 未返回可用文本');
           parsed.via = support.via;
           return parsed;
         } catch (error) {
@@ -823,11 +1218,16 @@
       presetKey: PRESET_KEY,
       getSettings: readSettings,
       saveSettings: saveSettings,
+      getAgentConnection: getAgentConnection,
+      saveAgentConnection: saveAgentConnection,
       getBackendSummary: backendSummary,
+      getModelCapabilities: modelProfile,
+      resolveModelCapabilities: resolveModelCapabilities,
       resolveApi: resolveApi,
       listModels: listModels,
       generate: generate,
       chat: chat,
+      chatReply: function (request) { return chat(request, true); },
       chatTools: chatTools,
       toolSupport: toolSupport,
       parseToolResponse: parseToolResponse,

@@ -237,8 +237,16 @@
     }
 
     /* ---------- 聊天库 ---------- */
+    function hasCardContext() {
+      var ctx = kit.context() || {};
+      var chat = typeof ctx.getCurrentChatId === 'function' ? ctx.getCurrentChatId() : ctx.chatId;
+      return !!chat && ((ctx.characterId != null && ctx.characterId !== -1) || (ctx.groupId != null && ctx.groupId !== ''));
+    }
+
     function readChatData() {
-      var raw = kit.readChatValue(CHAT_KEY);
+      var ctx = kit.context() || {};
+      var raw = hasCardContext() ? kit.readChatValue(CHAT_KEY)
+        : ctx.extensionSettings && ctx.extensionSettings.reader_ii && ctx.extensionSettings.reader_ii.unboundMemory;
       var data = { v: MEMORY_VERSION, items: {}, cfg: {}, last: null };
       if (!modules.isObject(raw) || raw.v !== MEMORY_VERSION) return data;
       if (modules.isObject(raw.items)) Object.keys(raw.items).forEach(function (id) {
@@ -253,6 +261,13 @@
     }
 
     function writeChatData(data) {
+      if (!hasCardContext()) {
+        var ctx = kit.context() || {};
+        if (!ctx.extensionSettings || typeof ctx.saveSettingsDebounced !== 'function') throw new Error('酒馆无法保存无卡助手记忆');
+        ctx.extensionSettings.reader_ii = Object.assign({}, ctx.extensionSettings.reader_ii, { unboundMemory: data });
+        ctx.saveSettingsDebounced();
+        return;
+      }
       if (!kit.writeChatValue(CHAT_KEY, data)) throw new Error('当前聊天不可写入助手记忆');
     }
 
@@ -511,6 +526,7 @@
     }
 
     function originLabel() {
+      if (!hasCardContext()) return '无卡助手';
       var names = kit.names();
       return names.char + (names.chat ? ' · ' + names.chat : '');
     }
@@ -741,14 +757,24 @@
       return parsed;
     }
 
-    function consolidate(options) {
+    function conversationKey() {
+      return JSON.stringify([kit.chatKey(), history.currentId ? history.currentId() : '']);
+    }
+
+    async function consolidate(options) {
       var opts = options || {};
-      var key = kit.chatKey();
+      if (history.ready) await history.ready();
+      var key = conversationKey();
       if (jobs.has(key)) return jobs.get(key);
       var saved = history.read();
       var turns = saved.turns.slice(saved.extracted);
       var replies = turns.filter(function (turn) { return turn.role === 'assistant'; }).length;
       var report = { ok: true, reason: opts.automatic ? 'agent-auto' : 'agent-manual', at: Date.now(), proposed: 0, added: [], updated: [], skipped: 0, errors: [], window: 0 };
+      if (history.canRun && !history.canRun()) {
+        report.ok = false;
+        report.error = '请在这段助手对话所属的酒馆聊天中整理记忆';
+        return report;
+      }
       if (!settings.enabled || !turns.some(function (turn) { return turn.role === 'user'; }) || !replies
           || (opts.automatic && (!settings.agentExtract || replies < settings.agentEveryTurns))) {
         report.note = settings.enabled ? '没有需要整理的助手交流' : '助手记忆已关闭';
@@ -756,7 +782,7 @@
       }
 
       function assertCurrent() {
-        if (kit.chatKey() !== key || !settings.enabled || (opts.automatic && !settings.agentExtract)) throw new Error('聊天或记忆设置已变更，本次整理已停止');
+        if (conversationKey() !== key || !settings.enabled || (opts.automatic && !settings.agentExtract)) throw new Error('聊天或记忆设置已变更，本次整理已停止');
         if (opts.signal && opts.signal.aborted) throw new Error('已取消');
       }
 
@@ -796,12 +822,12 @@
               if (!await history.write(latest, { saveNow: true })) throw new Error('助手对话的整理进度保存失败');
             } catch (error) {
               /* 宿主先更新内存变量再异步存盘。失败时仅退回本批的游标，保留用户新消息。 */
-              if (kit.chatKey() === key) {
+              if (conversationKey() === key) {
                 var live = history.read();
                 var head = live.turns.findIndex(function (item) { return item.id === batchTurns[0].id; });
                 if (head >= 0 && live.extracted === head + batchTurns.length) {
                   live.extracted = head;
-                  history.write(live);
+                  await history.write(live);
                 }
               }
               throw error;
@@ -812,7 +838,7 @@
           report.ok = false;
           report.error = String(error && error.message || error).slice(0, 300);
         }
-        if (kit.chatKey() === key) {
+        if (conversationKey() === key) {
           var data = readChatData();
           data.last = { at: report.at, reason: report.reason, ok: report.ok, added: report.added.length, updated: report.updated.length, error: report.error || '' };
           writeChatData(data);
@@ -830,6 +856,7 @@
     }
 
     async function status() {
+      if (history.ready) await history.ready();
       var data = readChatData();
       var saved = history.read();
       var pending = saved.turns.slice(saved.extracted);
@@ -841,7 +868,7 @@
         chatCount: Object.keys(data.items).length, oceanCount: ocean.length,
         oceanBook: book || settings.oceanBook, oceanExists: !!book,
         pending: { turns: pending.filter(function (turn) { return turn.role === 'assistant'; }).length },
-        last: data.last, running: jobs.has(kit.chatKey())
+        last: data.last, running: jobs.has(conversationKey())
       };
     }
 

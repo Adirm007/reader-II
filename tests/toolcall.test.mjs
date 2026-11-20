@@ -176,18 +176,20 @@ test('普通制卡请求从能力查询找到插件、预检同一权限，再�
 
 test('长调用整轮压缩，实际执行记录保留，原生协议无孤立工具消息', async () => {
   const large = '长文本'.repeat(22000);
-  const { run, log } = makeHost({ backend: (body, turn) => {
+  const { agent, run, log } = makeHost({ text: () => '已写入 ws:/长稿 并列出工作区。下一步回读核验。', backend: (body, turn) => {
     if (turn === 1) return reply({ tool_calls: [nativeCall('write', { path: 'ws:/长稿', content: large }), nativeCall('ls', { path: 'ws:/' })] });
-    if (turn === 2) return reply({ tool_calls: [nativeCall('read', { path: 'ws:/长稿', limit: 1 })] });
+    if (turn === 2) return reply({ tool_calls: [nativeCall('read', { path: 'ws:/长稿', limit: 1, column: large.length - 50 })] });
     return reply({ content: '写入后已回读。' });
   } });
+  agent.saveModelSettings({ contextWindow: 20000 });
   const result = await run('请写稿并回读');
   assert.equal(result.error, '');
   same(result.steps.map((item) => item.ok), [true, true, true]);
   const messages = log.backend[1].body.messages;
   assert.ok(!JSON.stringify(messages).includes(large));
   assert.ok(messages.some((item) => item.content.includes('请写稿并回读')));
-  assert.match(messages.at(-1).content, /ws:\/长稿/);
+  assert.ok(messages.some((item) => item.content.includes('ws:/长稿')));
+  assert.match(log.text[0].prompts[0].content, /交接单/);
   assert.ok(!messages.some((item) => item.role === 'tool' || item.tool_calls));
   const last = log.backend[2].body.messages;
   assert.equal(last.at(-1).tool_call_id, last.at(-2).tool_calls[0].id);
@@ -198,6 +200,128 @@ test('历史轮数为零时不会把之前的聊天带入下一次请求', async
   await run('旧聊天内容应留在面板');
   await run('本次新问题');
   same(log.backend.at(-1).body.messages.slice(1), [{ role: 'user', content: '本次新问题' }]);
+});
+
+test('百万窗口保留长旧输入；缩为两万后新对话从交接结论接手，重新打开原对话仍可查原文', async () => {
+  const marker = '日志定位#481';
+  const document = '原始记录甲'.repeat(9000) + marker;
+  const handoff = '已核对日志定位#481，守卫交班时间 17:30，下一步排班。';
+  const { agent, run, log } = makeHost({ text: () => handoff, backend: () => reply({ content: '记录好了。' }) });
+  await agent.threads.ready();
+  const old = agent.threads.currentId();
+  agent.saveModelSettings({ contextWindow: 1000000 });
+  assert.equal((await run(document)).error, '');
+  for (let n = 0; n < 11; n++) assert.equal((await run('续问' + n)).error, '');
+  assert.ok(log.backend.at(-1).body.messages.some((message) => message.content === document));
+  assert.equal(log.events.find((event) => event.type === 'context').contextWindow, 1000000);
+  agent.saveModelSettings({ contextWindow: 20000 });
+  agent.saveSettings({ contextStrategy: 'handoff' });
+  const continued = await run('根据结论排班');
+  assert.equal(continued.error, '');
+  const current = agent.threads.currentId();
+  assert.notEqual(current, old);
+  assert.equal(log.events.filter((event) => event.type === 'handoff').length, 1);
+  assert.equal(log.events.filter((event) => event.type === 'context').at(-1).contextWindow, 20000);
+  const body = JSON.stringify(log.backend.at(-1).body.messages);
+  assert.match(body, /17:30/);
+  assert.doesNotMatch(body, /原始记录甲/);
+  assert.ok(log.text.some((call) => JSON.stringify(call.prompts).includes(marker)));
+  same(agent.getHistory().map((turn) => turn.text), ['根据结论排班', '记录好了。']);
+  assert.equal(agent.threads.checkpoint().text, handoff);
+  await agent.threads.select(old);
+  assert.equal(agent.getHistory()[0].text, document);
+  await agent.threads.select(current);
+  assert.equal((await run('继续')).error, '');
+  assert.match(JSON.stringify(log.backend.at(-1).body.messages), /17:30/);
+});
+
+test('子代理只接收分配的资料和任务，使用单独的无工具请求，结论交还父代理', async () => {
+  const { agent, run, log } = makeHost({ text: () => '两种记载一致，地点为北门。', backend: (body, number) =>
+    number === 2 ? reply({ tool_calls: [nativeCall('delegate_task', { task: '校对地点', material: '甲本和乙本都写北门。' })] })
+      : reply({ content: number === 1 ? '知道了。' : '核对完成。' }) });
+  await run('没有分给子代理的私密旧话题');
+  const result = await run('请分别核对两版');
+  assert.equal(result.error, '');
+  assert.equal(result.steps[0].name, 'delegate_task');
+  assert.equal(log.text.length, 1);
+  assert.match(JSON.stringify(log.text[0].prompts), /甲本和乙本都写北门/);
+  assert.doesNotMatch(JSON.stringify(log.text[0].prompts), /私密旧话题|请分别核对两版|tool_call/);
+  assert.match(log.backend.at(-1).body.messages.at(-1).content, /地点为北门/);
+  assert.equal(agent.getHistory().length, 4);
+});
+
+test('图片回复无文字时也保存和发出，后续模型只看到附件数量', async () => {
+  const url = 'data:image/png;base64,AQIDBA==';
+  const { agent, run, log } = makeHost({ backend: (body, number) => number === 1
+    ? reply({ content: '', images: [{ type: 'image_url', image_url: { url } }] }) : reply({ content: '刚才发了一张图。' }) });
+  const image = await run('画一张小猫');
+  assert.equal(image.error, '');
+  assert.equal(image.answer, '');
+  same(image.images, [{ url }]);
+  same(log.events.find((event) => event.type === 'final').images, [{ url }]);
+  same(agent.getHistory().at(-1).images, [{ url }]);
+  await run('你发了几张图？');
+  assert.match(JSON.stringify(log.backend.at(-1).body.messages), /1 张图片/);
+  assert.doesNotMatch(JSON.stringify(log.backend.at(-1).body.messages), /base64/);
+});
+
+test('生成摘要失败不创建交接对话，源历史可继续使用', async () => {
+  const long = '札记'.repeat(20000);
+  const { run, agent } = makeHost({ backend: () => reply({ content: '收到。' }),
+    text: () => { throw new Error('摘要服务未响应'); } });
+  agent.saveModelSettings({ contextWindow: 1000000 });
+  await run(long);
+  const source = agent.threads.currentId();
+  agent.saveModelSettings({ contextWindow: 20000 });
+  agent.saveSettings({ contextStrategy: 'handoff' });
+  const interrupted = await run('整理内容');
+  assert.match(interrupted.error, /摘要服务未响应/);
+  assert.equal(agent.threads.currentId(), source);
+  assert.equal(agent.threads.list().length, 1);
+  assert.equal(agent.getHistory()[0].text, long);
+  assert.equal(agent.threads.checkpoint(), undefined);
+});
+
+test('上游返回真实窗口比配置小，摘要每一块和重试主请求使用缩小后的预算', async () => {
+  const long = '待核对的资料。'.repeat(3700) + '最后一个定位';
+  const { run, agent, log } = makeHost({ text: () => '已核实资料，交接时间六点。', backend: (body, number) => {
+    if (number === 2) return { status: 400, body: { error: { message: "This model's maximum context length is 8,000 tokens" } } };
+    return reply({ content: '已核对。' });
+  } });
+  agent.saveModelSettings({ contextWindow: 1000000 });
+  await run(long);
+  const answer = await run('根据资料整理结论');
+  assert.equal(answer.error, '');
+  assert.ok(log.text.length > 1);
+  for (const chunk of log.text) assert.ok(chunk.prompts.map(x => x.content).join('').length < 8000);
+  assert.match(JSON.stringify(log.text.at(-1).prompts), /最后一个定位/);
+  assert.ok(log.backend.at(-1).body.max_tokens < 4000);
+  assert.match(JSON.stringify(log.backend.at(-1).body.messages), /交接时间六点/);
+  assert.doesNotMatch(JSON.stringify(log.backend.at(-1).body.messages), /待核对的资料/);
+  assert.equal(log.events.filter(event => event.type === 'context').at(-1).contextWindow, 8000);
+});
+
+test('新建交接对话后中断再打开，保留精确用户任务和已读结论', async () => {
+  const task = '按附录 R-374 核对两地时差';
+  const { run, agent, log } = makeHost({ text: () => '乙地时间比甲地早两小时。', backend: (body, number) =>
+    number === 2 ? { status: 403, body: { error: { message: '当前请求被拒绝' } } } : reply({ content: '已处理。' }) });
+  agent.saveModelSettings({ contextWindow: 1000000 });
+  await run('原始读数'.repeat(7000));
+  const old = agent.threads.currentId();
+  agent.saveModelSettings({ contextWindow: 20000 });
+  agent.saveSettings({ contextStrategy: 'handoff', toolProtocol: 'native' });
+  const stopped = await run(task);
+  assert.match(stopped.error, /拒绝/);
+  const next = agent.threads.currentId();
+  assert.notEqual(old, next);
+  await agent.threads.select(old);
+  await agent.threads.select(next);
+  const resumed = await run('继续');
+  assert.equal(resumed.error, '');
+  const wire = JSON.stringify(log.backend.at(-1).body.messages);
+  assert.ok(wire.includes(task));
+  assert.match(wire, /早两小时/);
+  assert.doesNotMatch(wire, /原始读数/);
 });
 
 test('旧预设开关失效，当前人格和助手专用文本随请求和工具续轮发送', async () => {

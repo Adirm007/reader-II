@@ -35,6 +35,14 @@
     }).join('');
   }
 
+  function imageHtml(images) {
+    return (Array.isArray(images) ? images : []).map(function (item, index) {
+      var url = item && item.url;
+      if (typeof url !== 'string' || !/^(?:https?:\/\/[^\s"'<>]+|data:image\/(?:png|jpeg|webp|gif);base64,[a-z0-9+/=]+)$/i.test(url)) return '';
+      return '<img class="ra-generated" loading="lazy" referrerpolicy="no-referrer" alt="生成的图片 ' + (index + 1) + '" src="' + esc(url) + '">';
+    }).join('');
+  }
+
   function createAgentUi(env, kit, agent, memory, llm, deps) {
     var doc = env.document;
     var host = env.host || root;
@@ -44,6 +52,9 @@
     var running = false;
     var runningChat = null;
     var pendingUserNode = null;
+    var pendingInput = '', contextUsage = null, loadingThreads = false;
+    var threadRefresh = 0;
+    var threads = agent.threads;
     var pendingConfirms = [];
     var permissionReview = null;
     var memoryFilter = { type: '', store: '', query: '' };
@@ -112,18 +123,18 @@
     function showTurn(node, turn) {
       if (!node) return;
       node.dataset.turnId = turn.id;
-      node.__raSnapshot = { chatKey: kit.chatKey(), originalText: turn.text };
+      node.__raSnapshot = { chatKey: kit.chatKey(), threadId: threads.currentId(), originalText: turn.text };
       node.classList.remove('is-editing');
       var label = turn.role === 'user' ? '编辑用户消息' : '编辑夜梦消息';
-      node.innerHTML = '<div class="ra-msg-text">' + rich(turn.text) + '</div>'
-        + '<button type="button" class="ra-msg-edit" data-act="turn-edit" aria-label="' + label + '" title="' + label + '">' + icon('pencil') + '</button>';
+      node.innerHTML = '<div class="ra-msg-text">' + rich(turn.text) + '</div>' + imageHtml(turn.images)
+        + (threads.canRun() ? '<button type="button" class="ra-msg-edit" data-act="turn-edit" aria-label="' + label + '" title="' + label + '">' + icon('pencil') + '</button>' : '');
     }
 
     async function editTurn(action, button) {
       var node = button.closest('.ra-msg');
       if (!node || !node.__raSnapshot) return;
       var snapshot = node.__raSnapshot;
-      if (kit.chatKey() !== snapshot.chatKey) { renderHistory(); return; }
+      if (kit.chatKey() !== snapshot.chatKey || threads.currentId() !== snapshot.threadId) { renderHistory(); return; }
       var id = node.dataset.turnId;
       if (action === 'turn-edit') {
         node.classList.add('is-editing');
@@ -150,7 +161,7 @@
         turn = id === 'greeting' && !history.length ? agent.getGreeting() : history.find(function (item) { return item.id === id; });
       }
       if (!node.isConnected) return;
-      if (!turn || kit.chatKey() !== snapshot.chatKey) { renderHistory(); return; }
+      if (!turn || kit.chatKey() !== snapshot.chatKey || threads.currentId() !== snapshot.threadId) { renderHistory(); return; }
       showTurn(node, turn);
       node.querySelector('[data-act="turn-edit"]').focus({ preventScroll: true });
     }
@@ -160,8 +171,18 @@
       if (!log) return;
       log.innerHTML = '';
       var turns = agent.getHistory();
+      var checkpoint = threads.checkpoint();
+      if (checkpoint) {
+        var handoff = checkpoint.task ? '<p>任务：' + esc(checkpoint.task) + '</p>' : '';
+        append('<details><summary>上下文摘要</summary>' + handoff + '<div>' + rich(checkpoint.text) + '</div></details>', 'ra-checkpoint');
+      }
+      var rows = threads.list(), currentId = threads.currentId();
+      var active = rows.find(function (row) { return row.id === currentId; });
+      if (active && active.nextId && rows.some(function (row) { return row.id === active.nextId; })) {
+        append('<button type="button" class="ra-btn is-small" data-act="thread-next" data-thread-target="' + esc(active.nextId) + '">打开交接后的对话</button>', 'ra-thought');
+      }
       if (!turns.length) {
-        showTurn(append('', 'ra-msg ra-ai'), agent.getGreeting());
+        if (!checkpoint) showTurn(append('', 'ra-msg ra-ai'), agent.getGreeting());
         return;
       }
       turns.forEach(function (turn) {
@@ -169,6 +190,55 @@
         if (turn.tools && turn.tools.length) append(esc('用过的工具：' + turn.tools.join('、')), 'ra-thought');
       });
       log.scrollTop = log.scrollHeight;
+    }
+
+    function threadControls() {
+      var select = $('#ra-thread-select');
+      if (!select) return;
+      var id = threads.currentId();
+      select.innerHTML = threads.list().map(function (row) {
+        return option(esc(row.id), esc(row.owner.label + ' · ' + (row.title || '新对话')), id);
+      }).join('');
+      var locked = running || agent.isBusy() || loadingThreads;
+      select.disabled = locked;
+      $('[data-act="thread-new"]').disabled = locked;
+      $('[data-act="thread-delete"]').disabled = locked || !id;
+      var note = $('#ra-thread-status');
+      note.textContent = loadingThreads ? '正在打开对话…' : !threads.canRun() ? '正在查看历史。回到所属卡和聊天后可以继续，无卡对话可在酒馆首页继续。' : !threads.persistent() ? '本地数据库不可用，本次对话仅保存在此页面。' : '';
+      note.hidden = !note.textContent;
+      $('#ra-send').disabled = !running && (locked || !threads.canRun());
+      $('#ra-text').disabled = locked || !threads.canRun();
+      $('[data-act="clear"]').disabled = locked || !threads.canRun();
+      overlay.querySelectorAll('[data-quick]').forEach(function (button) { button.disabled = locked || !threads.canRun(); });
+    }
+
+    async function refreshThreads(reload) {
+      var seq = ++threadRefresh;
+      loadingThreads = true;
+      threadControls();
+      try {
+        if (reload) await threads.refresh();
+        else await threads.ready();
+        if (threadRefresh !== seq || !overlay) return;
+        contextUsage = null;
+        if (!running) renderHistory();
+      } catch (error) { notice('thread', message(error)); }
+      finally {
+        if (threadRefresh === seq && overlay) { loadingThreads = false; threadControls(); refreshFoot(); }
+      }
+    }
+
+    async function threadAction(action, target) {
+      if (loadingThreads || running || agent.isBusy()) return;
+      if (action === 'remove' && !host.confirm('删除这条助手对话及其中的图片？')) return;
+      loadingThreads = true;
+      threadControls();
+      try {
+        await threads[action](target);
+        var input = $('#ra-text');
+        if (input) { input.value = ''; fitInput(); }
+      } catch (error) { notice('thread', message(error)); }
+      finally { loadingThreads = false; threadControls(); }
     }
 
     function fitInput() {
@@ -185,6 +255,7 @@
       if (send) { send.textContent = value ? '停止' : '发送'; send.classList.toggle('is-main', !value); send.classList.toggle('is-bad', value); }
       var input = $('#ra-text');
       if (input) input.disabled = value;
+      threadControls();
     }
 
     function confirmCard(request) {
@@ -308,6 +379,16 @@
 
     function onAgentEvent(event) {
       if (!overlay || (running && runningChat !== kit.chatKey())) return;
+      if (event.type === 'context') { contextUsage = event; refreshFoot(); return; }
+      if (event.type === 'summarizing') { showIndicator(event.strategy === 'handoff' ? '正在整理交接摘要' : '正在压缩上下文'); return; }
+      if (event.type === 'compact') { notice('compact', '已压缩上下文，正在继续当前任务。'); return; }
+      if (event.type === 'handoff') {
+        renderHistory();
+        pendingUserNode = append(rich(pendingInput), 'ra-msg ra-user');
+        threadControls();
+        notice('handoff', '已在新对话中接续任务。');
+        return;
+      }
       if (event.type === 'thinking') { showIndicator(event.step ? '继续思考 · 已用 ' + event.step + '/' + event.limit + ' 轮' : '思考中'); return; }
       if (event.type === 'thought') { clearIndicator(); append(esc(event.text), 'ra-thought'); return; }
       if (event.type === 'protocol') {
@@ -341,7 +422,7 @@
       }
       if (event.type === 'final') {
         clearIndicator();
-        var replyNode = append(rich(event.text), 'ra-msg ra-ai');
+        var replyNode = append(rich(event.text) + (event.turns ? '' : imageHtml(event.images)), 'ra-msg ra-ai');
         if (event.turns) {
           var greeting = $('#ra-log [data-turn-id="greeting"]:not(.is-editing)');
           if (greeting) greeting.remove();
@@ -360,11 +441,13 @@
         agent.stop();
         return;
       }
+      if (loadingThreads || !threads.canRun()) return;
       var input = $('#ra-text');
       var text = String(textOverride !== undefined ? textOverride : input && input.value || '').trim();
       if (!text) return;
       if (input && textOverride === undefined) { input.value = ''; fitInput(); }
       pendingUserNode = append(rich(text), 'ra-msg ra-user');
+      pendingInput = text;
       var log = logNode();
       if (log) log.scrollTop = log.scrollHeight;
       runningChat = kit.chatKey();
@@ -380,6 +463,7 @@
         if (runningChat !== kit.chatKey()) renderHistory();
         runningChat = null;
         pendingUserNode = null;
+        pendingInput = '';
         refreshFoot();
         /* 触屏上不抢焦点：不然每答完一轮软键盘都弹出来。 */
         if (input && !touchInput()) { try { input.focus(); } catch (error) { /* 面板可能已关闭 */ } }
@@ -406,8 +490,11 @@
       var memorySettings = memory.getSettings();
       var tag = function (text) { return '<span class="ra-tag">' + esc(text) + '</span>'; };
       node.innerHTML = tag('模型：' + (backend.mode === 'custom' ? backend.model : '酒馆当前连接'))
-        + tag('记忆：' + (memorySettings.enabled ? (memory.targetStore() === 'ocean' ? '《' + memorySettings.oceanBook + '》' : '当前聊天') : '关闭'))
+        + tag('记忆：' + (!memorySettings.enabled ? '关闭' : threads.isUnbound() ? '无卡 · 手动整理' : memory.targetStore() === 'ocean' ? '《' + memorySettings.oceanBook + '》' : '当前聊天'))
         + tag('权限：' + footPermission());
+      if (contextUsage) {
+        node.innerHTML += tag('上下文约 ' + Number(contextUsage.used).toLocaleString() + ' / ' + Number(contextUsage.contextWindow).toLocaleString() + ' tokens');
+      }
       var status = toolStatus();
       var mode = TOOL_MODE[status.mode] ? status.mode : 'none';
       var tool = $('#ra-tool-mode');
@@ -458,15 +545,18 @@
     async function renderMemory() {
       var pane = $('[data-pane="memory"] .ra-scroll');
       if (!pane) return;
-      var status, list;
+      var status, list, threadId;
       try {
+        await threads.ready();
+        threadId = threads.currentId();
+        if (!threads.canRun()) { pane.innerHTML = '<p class="ra-note">回到此助手对话所属的卡和聊天后，可以查看和整理记忆。</p>'; return; }
         status = await memory.status();
         list = await memory.list({ type: memoryFilter.type || undefined, store: memoryFilter.store || undefined, query: memoryFilter.query || undefined, fresh: true });
       } catch (error) {
         pane.innerHTML = '<div class="ra-card">读取记忆失败：' + esc(message(error)) + '</div>';
         return;
       }
-      if (!overlay || tab !== 'memory') return;
+      if (!overlay || tab !== 'memory' || threadId !== threads.currentId()) return;
       var chip = function (group, value, label) {
         return '<button type="button" class="ra-chip" data-act="mem-filter" data-group="' + group + '" data-value="' + value + '" aria-pressed="' + (memoryFilter[group] === value) + '">' + label + '</button>';
       };
@@ -537,6 +627,7 @@
     }
 
     async function memoryAction(action, element) {
+      if (!threads.canRun()) { renderMemory(); return; }
       var item = element.closest('[data-id]');
       var id = item ? item.getAttribute('data-id') : '';
       try {
@@ -715,7 +806,9 @@
         + switchField('a.lite', a.lite, '轻聊', '不带任何工具，只聊天')
         + switchField('a.recall', a.recall, '回答前自动带入相关记忆')
         + group('生成参数')
-        + '<div class="ra-nums">' + numberField('a.historyTurns', '带入历史轮数', a.historyTurns, 0, 40)
+        + '<div class="ra-form"><label for="ra-context-strategy">接近上下文上限时</label><select id="ra-context-strategy" data-s="a.contextStrategy">'
+        + option('compact', '在本对话中压缩', a.contextStrategy) + option('handoff', '写摘要并交接到新对话', a.contextStrategy) + '</select></div>'
+        + '<div class="ra-nums">' + numberField('a.historyTurns', '历史轮数（−1 自动，0 关闭）', a.historyTurns, -1, 1000)
         + numberField('a.temperature', '温度', a.temperature, 0, 2, 0.05) + numberField('a.maxTokens', '输出上限', a.maxTokens, 256, 64000) + numberField('a.timeoutSec', '单次超时（秒）', a.timeoutSec, 20, 900) + '</div>'
         + '<p class="ra-note">输出上限与温度只对独立 API 生效；走酒馆连接时沿用当前预设。</p>');
     }
@@ -802,14 +895,70 @@
         + '<div class="ra-nums">' + numberField('m.injectDepth', '注入深度', m.injectDepth, 0, 40) + numberField('m.injectMax', '最多带几条', m.injectMax, 1, 30) + numberField('m.injectBudget', '字数预算', m.injectBudget, 200, 20000) + '</div>');
     }
 
+    function connectionHtml() {
+      var lobby = lobbyApi();
+      if (lobby && lobby.isEnabled()) {
+        return '<div class="ra-row"><button type="button" class="ra-btn" data-act="open-api">打开独立 API 设置</button><button type="button" class="ra-btn" data-act="open-panel">打开语义适配</button></div>';
+      }
+      var config = llm.getAgentConnection(), own = config.dedicated || {};
+      var selected = config.selected === config.dedicatedId ? '@dedicated' : config.selected;
+      var sources = { openai: 'OpenAI', custom: '自定义（OpenAI 兼容）', claude: 'Anthropic Claude', makersuite: 'Google Gemini' };
+      if (own.source && !sources[own.source]) sources[own.source] = own.source;
+      return '<details class="ra-fold" id="ra-agent-connection"><summary>配置助手连接</summary><div class="ra-form">'
+        + '<label for="ra-agent-route">助手对话使用</label><select id="ra-agent-route">' + option('default', '跟随默认方案', selected) + option('tavern', '酒馆当前连接', selected)
+        + config.presets.filter(function (item) { return item.id !== config.dedicatedId; }).map(function (item) { return option(esc(item.id), esc(item.name + ' · ' + item.model), selected); }).join('')
+        + option('@dedicated', '助手专用方案', selected) + '</select>'
+        + '<div class="ra-form wide" id="ra-dedicated-fields"' + (selected === '@dedicated' ? '' : ' hidden') + '>'
+        + '<label for="ra-agent-endpoint">API 地址</label><input id="ra-agent-endpoint" type="text" inputmode="url" spellcheck="false" placeholder="https://example.com/v1" value="' + esc(own.apiurl || '') + '">'
+        + '<label for="ra-agent-source">接口类型</label><select id="ra-agent-source">' + Object.keys(sources).map(function (key) { return option(esc(key), esc(sources[key]), own.source || 'custom'); }).join('') + '</select>'
+        + '<label for="ra-agent-model">模型名称</label><input id="ra-agent-model" type="text" spellcheck="false" value="' + esc(own.model || '') + '">'
+        + '<label for="ra-agent-key">API Key</label><input id="ra-agent-key" type="password" autocomplete="new-password" placeholder="' + (own.hasKey ? '同一地址留空保留原密钥' : '按接口需要填写') + '">'
+        + (own.hasKey ? '<label class="ra-check wide"><input type="checkbox" id="ra-agent-forget"><span class="ra-switch" aria-hidden="true"></span><span>清除已保存的密钥</span></label>' : '') + '</div>'
+        + '<div class="ra-row wide"><button type="button" class="ra-btn" data-act="agent-route-save">保存助手连接</button></div></div></details>';
+    }
+
+    function saveConnection() {
+      var route = $('#ra-agent-route').value, fields = $('#ra-model-fields');
+      if (fields.dataset.edited === '1' && !host.confirm('保存连接会重新载入模型参数。放弃尚未保存的模型参数？')) return;
+      var request = { selected: route };
+      if (route === '@dedicated') {
+        var clear = $('#ra-agent-forget');
+        request = { dedicated: { apiurl: $('#ra-agent-endpoint').value.trim(), model: $('#ra-agent-model').value.trim(),
+          source: $('#ra-agent-source').value, key: $('#ra-agent-key').value, clearKey: !!(clear && clear.checked) } };
+      }
+      try {
+        llm.saveAgentConnection(request);
+        replaceCard('ra-model-card', modelCardHtml());
+        refreshFoot();
+        resolveDisplayedModel();
+        toast('助手连接已保存');
+      } catch (error) { toast(message(error), true); }
+    }
+
     function modelCardHtml() {
       var route = function (key, label) {
         var backend = llm.getBackendSummary(key);
         return '<dt>' + label + '</dt><dd>' + esc(backend.mode === 'custom' ? backend.model + ' · ' + backend.apiurl : '酒馆当前连接') + '</dd>';
       };
+      var profile = agent.getModelSettings();
+      var caps = llm.getModelCapabilities('agent', profile);
+      var origin = { override: '手动指定', metadata: '模型接口', catalog: '已知模型规格', host: '酒馆设置', fallback: '估算值' };
+      var effort = { auto: '跟随模型', none: '关闭', minimal: '最低 · minimal', low: '低 · low', medium: '中 · medium', high: '高 · high', xhigh: '极高 · xhigh', max: '最高 · max' };
       return card('ra-model-card', '模型', '<dl class="ra-kv">' + route('agent', '助手对话') + route('memory', '记忆整理') + route('adapt', '语义适配') + '</dl>'
         + '<p class="ra-note">三项各自对应「独立 API」里的调用类型；没有单独设置时用默认方案，默认方案也没有时走酒馆当前连接。</p>'
-        + '<div class="ra-row"><button type="button" class="ra-btn" data-act="open-api">打开独立 API 设置</button><button type="button" class="ra-btn" data-act="open-panel">打开语义适配</button></div>');
+        + connectionHtml()
+        + group('助手模型参数 · ' + esc(profile.model || caps.model || '当前连接'))
+        + '<div class="ra-form" id="ra-model-fields" data-profile-key="' + esc(profile.key) + '">'
+        + '<p class="ra-note wide">当前窗口为 ' + esc(Number(caps.contextWindow).toLocaleString()) + ' tokens（' + esc(origin[caps.origin] || caps.origin) + '）。下列设置按模型与连接保存。</p>'
+        + '<label for="ra-window">上下文窗口（tokens，0 自动识别）</label><input type="number" id="ra-window" data-s="model.contextWindow" min="0" max="100000000" step="1" value="' + esc(profile.contextWindow || 0) + '">'
+        + '<label for="ra-effort">思考档位</label><select id="ra-effort" data-s="model.reasoningEffort">' + Object.keys(effort).map(function (level) { return option(level, effort[level], profile.reasoningEffort); }).join('') + '</select>'
+        + '<label for="ra-image-mode">图片接口</label><select id="ra-image-mode" data-s="model.imageMode">' + option('auto', '自动识别', profile.imageMode) + option('chat', '多模态对话', profile.imageMode) + option('generation', '独立 API 图像生成接口', profile.imageMode) + '</select>'
+        + '<details class="wide ra-fold"><summary>反代专用参数</summary><div class="ra-form">'
+        + '<label for="ra-ultra-key">UltraCode 开关的请求字段</label><input type="text" id="ra-ultra-key" data-s="model.ultraCodeKey" value="' + esc(profile.ultraCodeKey || '') + '" placeholder="按代理文档填写" spellcheck="false">'
+        + '<label for="ra-ultra">UltraCode</label><select id="ra-ultra" data-s="model.ultraCode">' + option('auto', '跟随代理', profile.ultraCode) + option('on', '开启', profile.ultraCode) + option('off', '关闭', profile.ultraCode) + '</select>'
+        + '<p class="ra-note wide">代理支持 UltraCode 时，填写它规定的布尔字段。开启或关闭会随该模型的请求发送。</p>'
+        + '<label for="ra-model-json">额外请求参数（JSON 对象）</label><textarea id="ra-model-json" data-s="model.modelParameters" rows="3" spellcheck="false" placeholder="{}">' + esc(JSON.stringify(profile.modelParameters || {}, null, 2)) + '</textarea>'
+        + '</div></details></div>');
     }
 
     /* 乙组的 MCP 服务器放进 #ra-mcp（data-slot="mcp"）。 */
@@ -1040,6 +1189,15 @@
       setDirty(false);
       renderToc();
       renderRuns();
+      resolveDisplayedModel();
+    }
+
+    function resolveDisplayedModel() {
+      var fields = $('#ra-model-fields');
+      llm.resolveModelCapabilities('agent').then(function () {
+        var connection = $('#ra-agent-connection');
+        if (!dirty && fields === $('#ra-model-fields') && !(connection && connection.open)) replaceCard('ra-model-card', modelCardHtml());
+      }).catch(function () { /* 未提供元数据的代理仍可手填窗口。 */ });
     }
 
     function saveSettingsFromForm() {
@@ -1049,12 +1207,27 @@
         budget.focus();
         return;
       }
-      var agentPatch = {}, memoryPatch = {}, placements = {};
+      var agentPatch = {}, modelPatch = {}, memoryPatch = {}, placements = {};
       var invalid = null;
       overlay.querySelectorAll('[data-s]').forEach(function (input) {
         var key = input.getAttribute('data-s');
         var value = input.type === 'checkbox' ? input.checked : input.type === 'number' ? Number(input.value) : input.value;
-        if (key.indexOf('a.') === 0) agentPatch[key.slice(2)] = value;
+        if (key.indexOf('model.') === 0) {
+          var field = key.slice(6);
+          if (field === 'modelParameters') {
+            try {
+              value = JSON.parse(value.trim() || '{}');
+              if (!modules.isObject(value)) throw new Error();
+            } catch (error) { invalid = [input, '额外请求参数必须是有效的 JSON 对象']; }
+          }
+          if (field === 'contextWindow' && !input.validity.valid) invalid = [input, '上下文窗口应为 0 至 100000000 的整数'];
+          if (field === 'ultraCodeKey') {
+            value = value.trim();
+            if (value && !/^[a-zA-Z][\w.-]{0,79}$/.test(value)) invalid = [input, '请填写有效的代理布尔字段名'];
+          }
+          modelPatch[field] = value;
+        }
+        else if (key.indexOf('a.') === 0) agentPatch[key.slice(2)] = value;
         else if (key === 'personaPrompt' && value !== input.defaultValue) {
           var persona = agent.personaContext();
           var promptKey = input.getAttribute('data-persona-key');
@@ -1074,7 +1247,10 @@
           }
         }
       });
+      if (modelPatch.ultraCode !== 'auto' && !modelPatch.ultraCodeKey.trim()) invalid = [$('#ra-ultra-key'), '请填写代理定义的 UltraCode 字段'];
       if (invalid) { toast(invalid[1], true); invalid[0].focus(); return; }
+      try { agent.saveModelSettings(modelPatch, $('#ra-model-fields').dataset.profileKey); }
+      catch (error) { toast(message(error), true); return; }
       if ($('#ra-rules')) agentPatch.rules = readRules();
       if ($('#ra-placement-card')) {
         try { modules.readerPromptPlacement.save(kit.context(), placements); }
@@ -1142,7 +1318,9 @@
         + '<div class="ra-id"><span class="ra-seal" aria-hidden="true"><i>夜</i><i>梦</i></span><div class="ra-name"><b>九十九夜梦</b><i id="ra-persona">READER AGENT</i></div></div>'
         + '<nav class="ra-tabs" role="tablist"><button type="button" class="ra-tab" role="tab" data-tab="chat">对话</button><button type="button" class="ra-tab" role="tab" data-tab="memory">记忆</button><button type="button" class="ra-tab" role="tab" data-tab="settings">设置</button></nav>'
         + '<button type="button" class="ra-close" data-act="close" aria-label="关闭，回到聊天" title="关闭，回到聊天">' + icon('close') + '</button></header>'
-        + '<section class="ra-pane" data-pane="chat"><div class="ra-log" id="ra-log" aria-live="polite"></div>'
+        + '<section class="ra-pane" data-pane="chat"><div class="ra-threads"><label for="ra-thread-select">对话</label><select id="ra-thread-select" aria-label="按所属卡切换对话"></select>'
+        + '<button type="button" class="ra-btn is-small" data-act="thread-new">新建</button><button type="button" class="ra-btn is-small" data-act="thread-delete">删除</button></div>'
+        + '<p id="ra-thread-status" role="status" hidden></p><div class="ra-log" id="ra-log" aria-live="polite"></div>'
         + '<div class="ra-quick"><button type="button" class="ra-chip" data-quick="看看现在 Reader 的状态。">看看状态</button><button type="button" class="ra-chip" data-quick="帮我把这张卡的变量适配到 Reader-II，逐项告诉我结果。">适配这张卡</button><button type="button" class="ra-chip" data-quick="把我们最近的助手对话整理成记忆，告诉我记下了什么。">整理记忆</button><button type="button" class="ra-chip" data-quick="你还记得我们聊过哪些事？">你还记得什么</button></div>'
         + '<div class="ra-input"><textarea id="ra-text" rows="1" aria-label="对夜梦说的话" placeholder="' + (touch ? '想问什么、想让我做什么，直接说。' : '想问什么、想让我做什么，直接说。Enter 发送，Shift+Enter 换行') + '"></textarea><button type="button" class="ra-btn is-main" id="ra-send">发送</button></div>'
         + '<div class="ra-foot"><div class="ra-tags"><span id="ra-foot-text"></span><button type="button" class="ra-tag" id="ra-tool-mode" data-act="goto-tools" data-mode="none">工具：不可用</button></div>'
@@ -1162,19 +1340,23 @@
         if (!actor) return;
         var action = actor.getAttribute('data-act');
         if (action.indexOf('turn-') === 0) editTurn(action, actor);
+        else if (action === 'thread-new') threadAction('create');
+        else if (action === 'thread-delete') threadAction('remove', threads.currentId());
+        else if (action === 'thread-next') threadAction('select', actor.dataset.threadTarget);
         else if (action === 'close') close();
         else if (action === 'back-lobby') backToLobby();
         else if (action === 'clear') {
           if (running) return;
           if (actor.getAttribute('data-armed') !== '1') { actor.setAttribute('data-armed', '1'); actor.textContent = '再点一次清空'; setTimeout(function () { actor.removeAttribute('data-armed'); actor.textContent = '清空对话'; }, 3000); return; }
           actor.removeAttribute('data-armed'); actor.textContent = '清空对话';
-          agent.clearHistory(); renderHistory();
+          Promise.resolve(agent.clearHistory()).then(function () { renderHistory(); threadControls(); }).catch(function (error) { notice('thread', message(error)); });
         }
         else if (action === 'toc') gotoSection(actor.getAttribute('data-target'), true);
         else if (action === 'goto-tools') { showTab('settings'); gotoSection('ra-tools-card', false); }
         else if (action === 'save-settings') saveSettingsFromForm();
         else if (action === 'card-toggle') cardToggle(actor);
         else if (action === 'probe-tools') probeTools(actor);
+        else if (action === 'agent-route-save') saveConnection();
         else if (action === 'open-api') { close(); var shell = deps.shell && deps.shell(); if (shell) shell.command('openIndependentApiSettings'); }
         else if (action === 'open-panel') openSemanticPanel();
         else if (action === 'undo-run') undoRun(actor);
@@ -1184,6 +1366,9 @@
         else if (netUi && /^(?:net|mcp|comp)-/.test(action)) netUi.action(action, actor, event);
       });
       overlay.addEventListener('change', function (event) {
+        if (event.target.id === 'ra-thread-select') { threadAction('select', event.target.value); return; }
+        if (event.target.id === 'ra-agent-route') $('#ra-dedicated-fields').hidden = event.target.value !== '@dedicated';
+        if (event.target.closest('#ra-model-fields')) $('#ra-model-fields').dataset.edited = '1';
         if (event.target.closest && event.target.closest('[data-s],[data-r]')) setDirty(true);
         if (event.target.id === 'ra-plot-source') $('[data-s="a.plotContext"]').checked = !!event.target.value;
         if (event.target.matches('[data-s="a.plotContext"]') && event.target.checked && !$('#ra-plot-source').value) $('#ra-plot-source').value = 'auto';
@@ -1196,6 +1381,7 @@
       });
       overlay.addEventListener('input', function (event) {
         if (event.target.id === 'ra-text') { fitInput(); return; }
+        if (event.target.closest('#ra-model-fields')) $('#ra-model-fields').dataset.edited = '1';
         if (event.target.closest && event.target.closest('[data-s],[data-r]')) { setDirty(true); return; }
         if (event.target.id === 'ra-mem-q') {
           memoryFilter.query = event.target.value;
@@ -1232,7 +1418,7 @@
       if (!overlay.open) {
         try { overlay.showModal(); } catch (error) { overlay.setAttribute('open', ''); }
       }
-      if (!running) renderHistory();
+      if (!running) refreshThreads(true);
       showTab(target || tab);
       /* <dialog> 打开时会把焦点给第一枚按钮（「服务台」），上面就多出一圈焦点框。对话页的焦点已经在输入框里；
          别的页（以及触屏，不该弹键盘）把焦点放在外框上，按 Tab 再进到第一个控件。 */
@@ -1242,18 +1428,23 @@
       }
       if (!unsubscribe.length) {
         /* 设置被别处改了（斜杠命令、插件、助手自己）时，底栏跟着更新。 */
-        unsubscribe.push(agent.onChange(function (reason) { if ((reason === 'settings' || reason === 'probe') && overlay && overlay.open) refreshFoot(); }));
+        unsubscribe.push(agent.onChange(function (reason) {
+          if (!overlay || !overlay.open) return;
+          if (reason === 'settings' || reason === 'probe') refreshFoot();
+          if (reason === 'run' && !running) refreshThreads();
+        }));
         unsubscribe.push(memory.onChange(function (reason) {
           /* 换了聊天：设置页里「这张卡」说的已经是另一张卡了，没保存的改动不再留着，下次进设置页重画。 */
           if (reason === 'chat') {
             dirty = false;
+            editing = null;
             if (running && runningChat !== kit.chatKey()) {
               agent.stop();
               pendingConfirms.slice().forEach(function (finish) { finish('deny'); });
             }
           }
           if (!overlay || !overlay.open) return;
-          if (reason === 'chat') { if (!running) renderHistory(); refreshFoot(); refreshBack(); if (tab === 'settings') renderSettings(); }
+          if (reason === 'chat') { refreshThreads(); refreshBack(); if (tab === 'settings') renderSettings(); }
           if (tab === 'memory' && reason !== 'settings' && !editing) renderMemory();
         }));
       }
@@ -1276,7 +1467,7 @@
       if (theme) theme.remove(doc);
     }
 
-    return { open: open, close: close, dispose: dispose, requestMoreRounds: requestMoreRounds, isOpen: function () { return !!(overlay && overlay.open); } };
+    return { open: open, close: close, dispose: dispose, requestMoreRounds: requestMoreRounds, refreshThreads: refreshThreads, isOpen: function () { return !!(overlay && overlay.open); } };
   }
 
   modules.createAgentUi = createAgentUi;

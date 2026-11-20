@@ -44,13 +44,16 @@ async function main() {
     assert(mock.confirms.length === 1, '应先问一次');
     assert(mock.ctx.characters[0].data.extensions.reader_ii.enabled === true, '没有保存角色卡开关');
   });
-  await step('旧存档打开后助手记忆从零开始，原聊天仍可查看', async () => {
-    const memory = window.ReaderII.memory;
-    assert(window.ReaderII.agent.getHistory().some(turn => turn.id === 'old-user'), '原助手聊天无法查看');
-    assert((await memory.list()).length === 0 && (await memory.status()).pending.turns === 0, '旧记忆或升级前的聊天进入了新库');
-    const before = mock.llmCalls.length;
-    await memory.consolidate();
-    assert(mock.llmCalls.length === before, '打开旧存档后重新整理了旧聊天');
+  await step('同一张卡可新建、切换与删除独立的助手对话', async () => {
+    const threads = window.ReaderII.agent.threads;
+    await threads.ready();
+    const first = threads.currentId(), second = await threads.create();
+    assert(second !== first && second === threads.currentId(), '没有切换到新建的对话');
+    assert(threads.list().every(row => row.owner.key && row.owner.label.includes(mock.ctx.name2)), '对话归属未包含角色名称');
+    await threads.select(first);
+    assert(threads.currentId() === first, '没有切换回原对话');
+    await threads.remove(second);
+    assert(threads.list().some(row => row.id === first) && !threads.list().some(row => row.id === second), '删除影响了其他对话');
   });
   await step('三套大厅主题与服务台四个入口', async () => {
     for (const theme of ['cafe', 'summer', 'ink']) {

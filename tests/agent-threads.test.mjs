@@ -1,0 +1,98 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import vm from 'node:vm';
+
+function setup() {
+  const env = { host: { crypto: globalThis.crypto } };
+  const globals = vm.createContext({});
+  for (const file of ['reader-env.js', 'agent/store.js']) {
+    vm.runInContext(readFileSync(new URL('../src/' + file, import.meta.url), 'utf8'), globals);
+  }
+  const modules = globals.__ReaderIIModules;
+  const databases = new Map();
+  const factory = (env, name) => {
+    if (!databases.has(name)) databases.set(name, modules.createStore(env, name));
+    return databases.get(name);
+  };
+  const ctx = {
+    extensionSettings: {}, characterId: 0, chatId: '旅程',
+    characters: [{ name: '艾琳', avatar: 'ailin.png' }, { name: '时雨', avatar: 'rain.png' }],
+  };
+  const reopen = () => modules.createThreadHistory(env, { context: () => ctx }, factory);
+  return { ctx, reopen, history: reopen() };
+}
+
+test('多对话保留历史、图片与归属，切换卡和账号均隔离，欢迎页单独保存', async () => {
+  const { ctx, history, reopen } = setup();
+  await history.ready();
+  const first = history.currentId();
+  const turns = Array.from({ length: 140 }, (_, i) => ({
+    role: i % 2 ? 'assistant' : 'user', id: String(i), text: '消息 ' + i,
+  }));
+  turns.at(-1).images = [{ url: 'https://example.org/generated.png' }];
+  await history.write({ turns, extracted: 39 });
+  const second = await history.create();
+  assert.equal(history.read().turns.length, 0);
+  await history.select(first);
+  assert.equal(history.read().turns.length, 140);
+  assert.equal(history.read().turns.at(-1).images[0].url, turns.at(-1).images[0].url);
+  const reloaded = reopen();
+  await reloaded.ready();
+  assert.equal(reloaded.currentId(), first);
+  assert.equal(reloaded.read().extracted, 39);
+  ctx.characterId = 1;
+  await history.ready();
+  assert.notEqual(history.currentId(), first);
+  await history.select(first);
+  assert.equal(history.canRun(), false);
+  await assert.rejects(history.write(history.read()), /切换/);
+  ctx.characterId = undefined;
+  ctx.chatId = '';
+  await history.ready();
+  assert.equal(history.isUnbound(), true);
+  assert.equal(history.canRun(), true);
+  assert.equal(history.list().find(item => item.id === history.currentId()).owner.label, '无卡');
+  await history.remove(second);
+  const originalAccount = ctx.extensionSettings;
+  ctx.extensionSettings = {};
+  await history.ready();
+  assert.equal(history.list().length, 1);
+  assert.equal(history.list().some(item => item.id === first), false);
+  ctx.extensionSettings = originalAccount;
+  ctx.characterId = 0;
+  ctx.chatId = '旅程';
+  await history.ready();
+  assert.equal(history.currentId(), first);
+  assert.equal(history.list().some(item => item.id === second), false);
+});
+
+test('交接只带摘要，保留来源；并发编辑按版本拒绝覆盖，刷新可继续', async () => {
+  const { history, reopen } = setup();
+  await history.ready();
+  const fromId = history.currentId();
+  const data = history.read();
+  data.turns = [{ id: 'u', role: 'user', text: '最初问题' }];
+  await history.write(data);
+  const another = reopen();
+  await another.ready();
+  const stale = another.read();
+  const dest = await history.handoff({ fromId, input: '继续完成', summary: '已核对来源 A；只需处理 B。' });
+  assert.equal(history.currentId(), dest);
+  assert.equal(history.read().turns.length, 0);
+  assert.equal(history.read().checkpoint.text, '已核对来源 A；只需处理 B。');
+  assert.equal(history.read().checkpoint.task, '继续完成');
+  await history.select(fromId);
+  assert.equal(history.read().turns.at(-1).text, '继续完成');
+  assert.equal(history.list().find(item => item.id === fromId).nextId, dest);
+  assert.equal(another.currentId(), fromId);
+  await assert.rejects(another.write(stale), /已被其他操作修改/);
+  await another.refresh();
+  const latest = another.read();
+  latest.turns[0].text = '重新编辑';
+  await another.write(latest);
+  await history.refresh();
+  assert.equal(history.read().turns[0].text, '重新编辑');
+  await history.remove(fromId);
+  assert.equal(history.currentId(), dest);
+});

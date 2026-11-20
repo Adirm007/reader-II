@@ -3,8 +3,7 @@
  * 这里只做三件事：记下扩展自己的地址、等酒馆就绪、在空闲时加载主包（dist/reader-ii.ext.js）。
  * 主包有一兆多，不放在酒馆的启动路径上；语义层、读者界面、提示词、记忆与夜梦助手都在主包里。
  *
- * 入口只有一个去处：读者大厅。扩展菜单里的「Reader-II · 大厅」与不带内容的 /yume 都打开它；
- * 夜梦助手、助手设置、语义适配、记忆都在大厅的「彩蛋服务台」里。
+ * 大厅与 /yume 沿用原有入口。扩展设置里的按钮在没有打开角色卡时也能进入助手。
  */
 const entry = new URL(import.meta.url);
 const base = new URL('.', entry).href;
@@ -34,6 +33,19 @@ function addEntries() {
     item.addEventListener('click', () => { openLobby(); });
     menu.appendChild(item);
   }
+  function assistantButton(parent, id, className) {
+    if (!parent || document.getElementById(id)) return;
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.id = id;
+    button.className = className;
+    button.textContent = 'Reader-II · 夜梦助手';
+    button.addEventListener('click', () => window.ReaderII.agent.open('chat'));
+    parent.appendChild(button);
+  }
+  assistantButton(menu, 'reader-ii-agent-menu', 'list-group-item flex-container flexGap5 interactable');
+  assistantButton(document.getElementById('extensions_settings2') || document.getElementById('extensions_settings'),
+    'reader-ii-agent-settings', 'menu_button menu_button_icon interactable');
   /* /yume 打开大厅；/yume 一句话 让夜梦助手处理这句话，回答作为命令的返回值（给快捷回复与脚本用，不是界面入口）。 */
   try {
     const ctx = context();

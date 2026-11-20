@@ -55,6 +55,29 @@
     }
 
     return {
+      /* 对话目录和正文一起提交。先在同一事务内读取目录，供多个标签页比较修订号。 */
+      update: async function (store, key, work) {
+        var db = await open();
+        if (!db) {
+          var map = memory[store], writes = [], deletes = [];
+          var value = work(modules.clone(map.get(key)), {
+            put: function (k, v) { writes.push([k, v]); }, del: function (k) { deletes.push(k); }
+          });
+          writes.forEach(function (pair) { map.set(pair[0], pair[1]); });
+          deletes.forEach(function (k) { map.delete(k); });
+          return value;
+        }
+        return new Promise(function (resolve, reject) {
+          var tx = db.transaction(store, 'readwrite'), os = tx.objectStore(store);
+          var read = os.get(key), answer, failed;
+          read.onsuccess = function () {
+            try { answer = work(read.result, { put: function (k, v) { os.put(v, k); }, del: function (k) { os.delete(k); } }); }
+            catch (error) { failed = error; tx.abort(); }
+          };
+          tx.oncomplete = function () { resolve(answer); };
+          tx.onerror = tx.onabort = function () { reject(failed || tx.error || new Error('保存助手对话失败')); };
+        });
+      },
       get: function (store, key) { return run(store, 'readonly', function (os, map) { return os ? os.get(key) : map.get(key); }); },
       put: function (store, key, value) { return run(store, 'readwrite', function (os, map) { if (os) return os.put(value, key); map.set(key, value); }); },
       del: function (store, key) { return run(store, 'readwrite', function (os, map) { if (os) return os.delete(key); map.delete(key); }); },
@@ -179,6 +202,194 @@
     return { begin: begin, capture: capture, settle: settle, note: note, end: end, list: list, changes: changes, undo: undo };
   }
 
+  /*
+   * 只载入目录及当前线程正文。账号独享数据库，角色以 avatar + 酒馆聊天 ID 标识；
+   * 未打开卡的对话归属为空。切换宿主聊天时同步使旧缓存失效。
+   */
+  function createThreadHistory(env, kit, storeFactory) {
+    var databases = new Map(), state = null;
+    var ephemeralAccount = null;
+    var host = env.host || {};
+    function id() {
+      return host.crypto && host.crypto.randomUUID ? host.crypto.randomUUID() : Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
+    }
+    function account(ctx) {
+      var prefs = ctx.extensionSettings;
+      if (!prefs) return ephemeralAccount || (ephemeralAccount = id());
+      var bag = prefs.reader_ii || (prefs.reader_ii = {});
+      if (!bag.threadVault) {
+        bag.threadVault = id();
+        if (typeof ctx.saveSettingsDebounced === 'function') ctx.saveSettingsDebounced();
+      }
+      return bag.threadVault;
+    }
+    function hostOwner(ctx) {
+      var chat = typeof ctx.getCurrentChatId === 'function' ? ctx.getCurrentChatId() : ctx.chatId;
+      var group = ctx.groupId != null && ctx.groupId !== '';
+      var card = ctx.characters && ctx.characters[ctx.characterId];
+      if (!chat || (!group && !card && (ctx.characterId == null || ctx.characterId === -1))) return { key: '', label: '无卡' };
+      var owner = group ? 'group:' + ctx.groupId : 'card:' + (card && card.avatar || ctx.characterId);
+      var name = group ? ((ctx.groups || []).find(function (item) { return String(item.id) === String(ctx.groupId); }) || {}).name || '群聊 ' + ctx.groupId : card && card.name || ctx.name2 || '角色卡';
+      return { key: JSON.stringify([owner, String(chat)]), label: String(name) + ' / ' + chat };
+    }
+    function scope() {
+      var ctx = kit.context() || {}, vault = account(ctx), owner = hostOwner(ctx);
+      if (state && state.vault === vault && state.owner.key === owner.key) return state;
+      if (!databases.has(vault)) databases.set(vault, (storeFactory || createStore)(env, 'reader_ii_threads_' + vault));
+      state = { vault: vault, owner: owner, db: databases.get(vault), rows: [], active: null, data: null, loading: null, remembered: false };
+      return state;
+    }
+    function same(s) {
+      if (scope() !== s) throw new Error('聊天或账号已切换，请重试');
+    }
+    function fresh() { return { turns: [], extracted: 0 }; }
+    function makeRow(owner, title, parent) {
+      return { id: id(), owner: owner, title: title || '', parentId: parent || '', updated: Date.now(), revision: 0 };
+    }
+    function key(row) { return 'thread:' + row.id; }
+    function mutate(s, change) {
+      return s.db.update('kv', 'directory', function (raw, write) {
+        same(s);
+        var directory = raw || { rows: [], selected: {} };
+        var answer = change(directory, write);
+        write.put('directory', directory);
+        return { directory: directory, value: answer };
+      });
+    }
+    function choose(directory, owner, write) {
+      var selected = directory.selected[owner.key];
+      var row = directory.rows.find(function (item) { return item.id === selected && item.owner.key === owner.key; })
+        || directory.rows.find(function (item) { return item.owner.key === owner.key; });
+      if (!row) {
+        row = makeRow(owner);
+        directory.rows.unshift(row);
+        write.put(key(row), fresh());
+      }
+      directory.selected[owner.key] = row.id;
+      return row;
+    }
+    async function install(s, result, data) {
+      var row = result.value;
+      var body = data || await s.db.get('kv', key(row));
+      same(s);
+      if (!body) throw new Error('找不到这条对话，可能已被其他标签页删除');
+      s.active = row;
+      s.data = body;
+      s.rows = result.directory.rows;
+      return row.id;
+    }
+    async function load(s) {
+      var result = await mutate(s, function (directory, write) { return choose(directory, s.owner, write); });
+      await install(s, result);
+      s.remembered = await s.db.persistent();
+    }
+    function ready() {
+      var s = scope();
+      if (!s.loading) s.loading = load(s).catch(function (error) { s.loading = null; throw error; });
+      return s.loading;
+    }
+    function currentId() { var row = scope().active; return row ? row.id : ''; }
+    function canRun() { var s = scope(); return !!s.active && s.active.owner.key === s.owner.key; }
+    function isUnbound() { var row = scope().active; return !row || !row.owner.key; }
+    function read() {
+      var s = scope();
+      return Object.assign({}, modules.clone(s.data || fresh()), { threadId: currentId(), revision: s.active ? s.active.revision : 0 });
+    }
+    async function write(next) {
+      var s = scope(), expectedId = next.threadId || currentId();
+      await ready();
+      same(s);
+      var row = s.active, revision = next.revision == null ? row.revision : next.revision;
+      if ((expectedId && expectedId !== row.id) || !canRun()) throw new Error('对话已切换，请重新操作');
+      var data = { turns: modules.clone(next.turns), extracted: Number(next.extracted) || 0 };
+      if (next.checkpoint && next.checkpoint.text) data.checkpoint = modules.clone(next.checkpoint);
+      var result = await mutate(s, function (directory, writer) {
+        var live = directory.rows.find(function (item) { return item.id === row.id; });
+        if (!live || live.revision !== revision) throw new Error('对话已被其他操作修改，请重新打开对话');
+        var first = data.turns.find(function (turn) { return turn.role === 'user'; });
+        if (!live.title && first) live.title = first.text.trim().slice(0, 40);
+        live.updated = Date.now();
+        live.revision++;
+        writer.put(key(live), data);
+        return live;
+      });
+      same(s);
+      if (currentId() === row.id) await install(s, result, data);
+      return true;
+    }
+    async function create(options) {
+      var s = scope();
+      await ready(); same(s);
+      var opts = options || {}, data = fresh(), owner = s.owner;
+      if (opts.fromId) {
+        if (currentId() !== opts.fromId || !canRun()) throw new Error('交接来源已切换，请重试');
+        data.checkpoint = { text: opts.summary, throughId: '', task: String(opts.input || '') };
+      }
+      var title = opts.fromId ? '交接 · ' + String(opts.input || s.active.title || '继续任务').slice(0, 35) : '';
+      var row = makeRow(owner, title, opts.fromId);
+      var parentData = opts.fromId ? modules.clone(s.data) : null;
+      if (parentData && opts.input) parentData.turns.push({ id: id(), role: 'user', text: String(opts.input), at: Date.now() });
+      var result = await mutate(s, function (directory, writer) {
+        if (opts.fromId) {
+          var parent = directory.rows.find(function (item) { return item.id === opts.fromId; });
+          if (!parent || parent.revision !== s.active.revision) throw new Error('交接来源已经变更');
+          parent.nextId = row.id;
+          parent.updated = row.updated;
+          parent.revision++;
+          if (!parent.title && opts.input) parent.title = String(opts.input).slice(0, 40);
+          writer.put(key(parent), parentData);
+        }
+        directory.rows.unshift(row);
+        directory.selected[owner.key] = row.id;
+        writer.put(key(row), data);
+        return row;
+      });
+      return install(s, result, data);
+    }
+    async function select(threadId) {
+      var s = scope();
+      await ready(); same(s);
+      var result = await mutate(s, function (directory) {
+        var row = directory.rows.find(function (item) { return item.id === threadId; });
+        if (!row) throw new Error('找不到这条对话');
+        if (row.owner.key === s.owner.key) directory.selected[s.owner.key] = row.id;
+        return row;
+      });
+      return install(s, result);
+    }
+    async function refresh() {
+      var s = scope();
+      if (!s.active) return ready();
+      var result = await mutate(s, function (directory, writer) {
+        return directory.rows.find(function (item) { return item.id === s.active.id; }) || choose(directory, s.owner, writer);
+      });
+      return install(s, result);
+    }
+    async function remove(threadId) {
+      var s = scope();
+      await ready(); same(s);
+      var result = await mutate(s, function (directory, writer) {
+        var index = directory.rows.findIndex(function (item) { return item.id === threadId; });
+        if (index >= 0) {
+          var row = directory.rows.splice(index, 1)[0];
+          writer.del(key(row));
+          if (directory.selected[row.owner.key] === row.id) delete directory.selected[row.owner.key];
+        }
+        var active = directory.rows.find(function (item) { return item.id === s.active.id; });
+        return active || choose(directory, s.owner, writer);
+      });
+      return install(s, result);
+    }
+    return {
+      ready: ready, refresh: refresh, read: read, write: write, turnId: id, currentId: currentId, canRun: canRun, isUnbound: isUnbound,
+      checkpoint: function () { var data = scope().data; return data && modules.clone(data.checkpoint); },
+      list: function () { return modules.clone(scope().rows).sort(function (a, b) { return b.updated - a.updated; }); },
+      persistent: function () { return scope().remembered; },
+      create: create, select: select, remove: remove, handoff: create
+    };
+  }
+
+  modules.createThreadHistory = createThreadHistory;
   modules.createStore = createStore;
   modules.createJournal = createJournal;
 })(typeof globalThis !== 'undefined' ? globalThis : window);
