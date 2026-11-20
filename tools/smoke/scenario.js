@@ -79,7 +79,7 @@ async function main() {
     const injected = mock.prompts['reader-ii-memory'];
     assert(!injected || !(injected.text || injected.content), '在没用 Reader-II 的聊天里注入了记忆');
     assert(mock.llmCalls.length === 0, '启动后就调用了模型');
-    assert(window.ReaderII.memory.getSettings().scope === 'reader', '记忆范围的默认值不对');
+    assert(!window.ReaderII.memory.getSettings().unify, '助手记忆应默认仅供助手使用');
   });
 
   await step('扩展菜单入口与 /yume 命令', async () => {
@@ -261,6 +261,44 @@ async function main() {
   await step('记忆页能渲染', async () => {
     $('#reader-agent-overlay [data-tab="memory"]').click();
     await until(() => ($('#reader-agent-overlay [data-pane="memory"] .ra-scroll')?.children.length || 0) > 0, '记忆页内容');
+  });
+
+  await step('设置页：清空剧情来源后保持关闭，人格与助手共用提示词分别生效', async () => {
+    const previous = agent.getSettings();
+    const persona = agent.personaContext();
+    const field = (key) => $('#reader-agent-overlay [data-s="' + key + '"]');
+    const personaText = '冒烟当前人格：以翻书声作开场。';
+    const systemText = '冒烟助手共用：谈话结束时道声晚安。';
+    try {
+      $('#reader-agent-overlay [data-tab="settings"]').click();
+      const source = await until(() => field('a.plotSource'), '剧情来源下拉框');
+      assert(source.value === 'auto' && field('a.plotContext').checked, '新设置应默认开启自动读取');
+      assert(['baibai', 'shujuku', 'lwb', 'worldengine', ''].every((id) => [...source.options].some((opt) => opt.value === id)), '剧情来源选项不全');
+      source.value = '';
+      source.dispatchEvent(new Event('change', { bubbles: true }));
+      assert(!field('a.plotContext').checked, '选择不选后开关未关闭');
+      field('personaPrompt').value = personaText;
+      field('a.assistantSystemPrompt').value = systemText;
+      $('#reader-agent-overlay [data-act="save-settings"]').click();
+      agent.close();
+      agent.open('settings');
+      await until(() => field('personaPrompt'), '重开助手设置');
+      assert(field('a.plotSource').value === '' && !field('a.plotContext').checked, '重新打开后剧情开关或来源有误');
+      assert(field('personaPrompt').value === personaText && field('a.assistantSystemPrompt').value === systemText, '重新打开后丢失提示词');
+
+      for (const id of [persona.id, persona.id === 'genki' ? 'reader' : 'genki']) {
+        const before = mock.llmCalls.length;
+        const reply = await agent.run('测试人格提示词', { persona: id, lite: true, remember: false });
+        assert(!reply.error && mock.llmCalls.length === before + 1, '助手请求失败：' + reply.error);
+        const system = mock.llmCalls[before][0].content;
+        assert(system.includes(systemText), '该人格没有收到共用提示词：' + id);
+        assert(system.includes(personaText) === (id === persona.id), '当前人格提示词的作用范围有误：' + id);
+      }
+    } finally {
+      agent.saveSettings(previous);
+      agent.close();
+      agent.open('memory');
+    }
   });
 
   await step('各挂载点可列出、角色卡可保存', async () => {

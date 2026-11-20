@@ -59,7 +59,7 @@ export function transformReaderUi(input) {
     '${i("eggagent")}><b class="q-nm">和夜梦说说话</b><small class="q-ds">查资料、改变量、排查这张卡、整理记忆。要动手改东西之前，她会先问你。</small><span class="sv2">打开</span>',
     '彩蛋页书海入口 → 夜梦助手');
   s = replaceExact(s, 'g(i("eggwb"),"检查更新","分别检查正则、脚本和世界书")',
-    'g(i("eggagentset"),"助手设置","模型与工具调用方式、权限、联网与插件对接、版本更新")+g(i("eggpanel"),"语义适配","把这张卡的变量接到读者这边，可以一键适配")+g(i("eggmemory"),"记忆","查看、整理记忆；存在当前聊天或《夜之洋》世界书")',
+    'g(i("eggagentset"),"助手设置","模型与工具调用方式、权限、联网与插件对接、版本更新")+g(i("eggpanel"),"语义适配","把这张卡的变量接到读者这边，可以一键适配")+g(i("eggmemory"),"记忆","查看与助手的交流记忆，可随聊天保存或存进《夜之洋》")',
     '彩蛋页检查更新 → 助手设置 / 语义适配 / 记忆');
   s = replaceExact(s, 'sea:"书海迷宫"', 'sea:"夜梦助手"', '三套主题的书海标题', 3);
   s = replaceExact(s, '{text:"更新新闻"}', '{text:"请读者写一则旁观札记"}', '三套主题的点单文本', 3);

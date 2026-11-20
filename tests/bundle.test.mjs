@@ -90,6 +90,22 @@ for (const persona of ['reader', 'kuromaku']) test(`三份编译模板经真实�
   } finally { h.runtime.dispose(); }
 });
 
+test('正文只替换当前人格段落，保留机制并隔离助手系统提示词', async () => {
+  const h = promptHost({ local: { dream_persona: 'reader' } });
+  h.host.ReaderII = { agent: { personaContext: id => ({ override: id === 'reader' ? '我的夜梦人格' : '' }), getSettings: () => ({ assistantSystemPrompt: '助手专用文本' }) } };
+  try {
+    const actual = await h.runtime.render();
+    assert.match(actual.core, /我的夜梦人格/);
+    assert.doesNotMatch(actual.core, /她自称是书的读者|助手专用文本/);
+    assert.match(actual.core, /复活机制/);
+    h.ctx.chatMetadata.variables.dream_persona = 'genki';
+    const other = await h.runtime.render();
+    assert.doesNotMatch(other.core, /我的夜梦人格|助手专用文本/);
+    assert.match(other.core, /元气活泼/);
+    assert.deepEqual(h.errors, []);
+  } finally { h.runtime.dispose(); }
+});
+
 test('版本比较处理预发布、数字段与 build metadata，拒绝坏版本', () => {
   const { m } = modules(['src/agent/updates.js']);
   const cmp = m.compareReaderVersions;

@@ -429,11 +429,10 @@
         + '<label>类型</label><select data-f="type">' + types + '</select>'
         + '<label>标题</label><input type="text" data-f="title" maxlength="40" value="' + esc(record.title || '') + '">'
         + '<label>正文</label><textarea data-f="content" maxlength="4000">' + esc(record.content || '') + '</textarea>'
-        + '<label>触发词</label><input type="text" data-f="keys" value="' + esc((record.keys || []).join('，')) + '" placeholder="用逗号分隔；正文或对话里出现这些词时会想起它">'
+        + '<label>触发词</label><input type="text" data-f="keys" value="' + esc((record.keys || []).join('，')) + '" placeholder="用逗号分隔，检索记忆时会匹配这些词">'
         + '<label>重要度</label><select data-f="importance">' + importance + '</select>'
-        + '<label>归属</label><select data-f="owner"><option value="story"' + (record.owner !== 'agent' ? ' selected' : '') + '>正文的记忆：正文里的夜梦会想起</option><option value="agent"' + (record.owner === 'agent' ? ' selected' : '') + '>助手自己的：打开“同一个人”后正文才会想起</option></select>'
         + (isNew ? '<label>存放位置</label><select data-f="store"><option value="chat"' + (record.store === 'chat' ? ' selected' : '') + '>当前聊天</option><option value="ocean"' + (record.store === 'ocean' ? ' selected' : '') + '>《' + esc(memory.getSettings().oceanBook) + '》世界书（跨存档）</option></select>' : '')
-        + '<label class="ra-check wide"><input type="checkbox" data-f="pinned"' + (record.pinned ? ' checked' : '') + '><span class="ra-switch" aria-hidden="true"></span><span>常驻<span class="ra-hint">每一轮都带上（《夜之洋》里对应蓝灯条目）</span></span></label>'
+        + '<label class="ra-check wide"><input type="checkbox" data-f="pinned"' + (record.pinned ? ' checked' : '') + '><span class="ra-switch" aria-hidden="true"></span><span>常驻<span class="ra-hint">开启正文共享后，在预算内优先带入这条记忆</span></span></label>'
         + '<div class="ra-row wide"><button type="button" class="ra-btn is-main" data-act="mem-save">保存</button><button type="button" class="ra-btn" data-act="mem-cancel">取消</button></div>'
         + '</div></section>';
     }
@@ -447,7 +446,7 @@
     function memoryItemHtml(record) {
       return '<div class="ra-mem" data-id="' + esc(record.id) + '"><div class="ra-mem-head"><span class="ra-badge t-' + record.type + '">' + esc(memory.TYPE_SHORT[record.type]) + '</span>'
         + '<span class="ra-mem-title">' + esc(record.title) + '</span>' + starsHtml(record.importance)
-        + '<span class="ra-badge">' + (record.store === 'ocean' ? '夜之洋' : '聊天') + '</span>' + (record.owner === 'agent' ? '<span class="ra-badge">助手</span>' : '') + (record.pinned ? '<span class="ra-badge">常驻</span>' : '') + (record.enabled ? '' : '<span class="ra-badge">已停用</span>') + '</div>'
+        + '<span class="ra-badge">' + (record.store === 'ocean' ? '夜之洋' : '聊天') + '</span>' + (record.pinned ? '<span class="ra-badge">常驻</span>' : '') + (record.enabled ? '' : '<span class="ra-badge">已停用</span>') + '</div>'
         + '<div class="ra-mem-body">' + esc(record.content) + '</div>'
         + (record.keys.length ? '<div class="ra-mem-keys">触发词：' + esc(record.keys.join('、')) + '</div>' : '')
         + '<div class="ra-row"><button type="button" class="ra-btn is-small" data-act="mem-edit">编辑</button>'
@@ -473,24 +472,21 @@
       };
       var fact = function (text) { return '<span class="ra-tag">' + esc(text) + '</span>'; };
       var last = status.last ? ((status.last.ok ? '上次整理：新增 ' + status.last.added + '、更新 ' + status.last.updated : '上次整理失败：' + (status.last.error || '')) + (status.last.note ? '（' + status.last.note + '）' : '')) : '还没有整理过';
-      var threshold = status.thresholds.auto ? '自动整理阈值 ' + (status.thresholds.turns || '—') + ' 条回复 / ' + (status.thresholds.chars || '—') + ' 字' : '自动整理已关闭';
-      var ocean = '《' + status.oceanBook + '》' + (status.oceanExists ? status.oceanCount + ' 条' + (status.oceanNative ? '（已挂载，由酒馆按触发词原生带入）' : '（未挂载，由脚本带入）') : '尚未创建');
+      var ocean = '《' + status.oceanBook + '》' + (status.oceanExists ? status.oceanCount + ' 条' : '尚未创建');
       var html = '<section class="ra-card"><div class="ra-membar"><label class="ra-inline"><span>本聊天的新记忆写到</span><select id="ra-store">'
         + '<option value=""' + (status.chatOverride === '' ? ' selected' : '') + '>跟随全局设置（' + (memory.getSettings().store === 'ocean' ? '夜之洋' : '当前聊天') + '）</option>'
         + '<option value="chat"' + (status.chatOverride === 'chat' ? ' selected' : '') + '>当前聊天</option>'
         + '<option value="ocean"' + (status.chatOverride === 'ocean' ? ' selected' : '') + '>《' + esc(status.oceanBook) + '》世界书（跨存档）</option></select></label>'
-        + '<span class="ra-row"><button type="button" class="ra-btn is-main" data-act="mem-run"' + (status.running ? ' disabled' : '') + '>立即整理</button>'
+        + '<span class="ra-row"><button type="button" class="ra-btn is-main" data-act="mem-run"' + (status.running ? ' disabled' : '') + '>整理助手对话</button>'
         + '<button type="button" class="ra-btn" data-act="mem-new">新增记忆</button>'
         + '<button type="button" class="ra-btn is-ghost" data-act="mem-export">导出</button><button type="button" class="ra-btn is-ghost" data-act="mem-import">导入</button></span></div>'
-        + '<div class="ra-facts">' + fact('当前聊天 ' + status.chatCount + ' 条') + fact(ocean) + fact('待整理 ' + status.pending.turns + ' 条回复 / ' + status.pending.chars + ' 字') + fact(threshold) + '</div>'
+        + '<div class="ra-facts">' + fact('当前聊天 ' + status.chatCount + ' 条') + fact(ocean) + fact('待整理 ' + status.pending.turns + ' 条助手回复') + '</div>'
         + '<p class="ra-note">' + esc(last) + '</p><div class="ra-status" data-ra-status="memory"></div></section>';
-      html += '<section class="ra-card"><h3>前情梗概</h3><textarea id="ra-summary" placeholder="整理对话时自动更新；也可以自己改写。注入正文时放在记忆的最前面。">' + esc(status.summary || '') + '</textarea>'
-        + '<div class="ra-row" style="margin-top:8px"><button type="button" class="ra-btn is-small" data-act="mem-summary">保存梗概</button></div></section>';
       if (editing) html += memoryEditorHtml(editing);
       html += '<div class="ra-filter">' + chip('type', '', '全部') + TYPE_ORDER.map(function (type) { return chip('type', type, memory.TYPE_SHORT[type]); }).join('')
         + '<span class="ra-sep" aria-hidden="true"></span>' + chip('store', '', '两处') + chip('store', 'chat', '聊天') + chip('store', 'ocean', '夜之洋')
         + '<label class="ra-search">' + icon('search') + '<input type="search" id="ra-mem-q" placeholder="搜索" aria-label="搜索记忆" value="' + esc(memoryFilter.query) + '"></label></div>';
-      html += list.length ? list.map(memoryItemHtml).join('') : '<p class="ra-empty">这里还没有记忆。聊上一阵后会自动整理；也可以点“立即整理”或“新增记忆”。</p>';
+      html += list.length ? list.map(memoryItemHtml).join('') : '<p class="ra-empty">这里还没有助手记忆。和夜梦助手聊过后，可以点“整理助手对话”。</p>';
       var scroll = pane.scrollTop;
       pane.innerHTML = html;
       pane.scrollTop = scroll;
@@ -507,7 +503,6 @@
         keys: field('keys').value,
         importance: Number(field('importance').value),
         pinned: field('pinned').checked,
-        owner: field('owner') ? field('owner').value : undefined,
         store: field('store') ? field('store').value : undefined
       };
     }
@@ -548,7 +543,7 @@
         if (action === 'mem-filter') {
           memoryFilter[element.getAttribute('data-group')] = element.getAttribute('data-value');
         } else if (action === 'mem-new') {
-          editing = { type: 'fact', title: '', content: '', keys: [], importance: 3, pinned: false, owner: 'story', store: memory.targetStore() };
+          editing = { type: 'fact', title: '', content: '', keys: [], importance: 3, pinned: false, store: memory.targetStore() };
         } else if (action === 'mem-edit') {
           editing = await memory.get(id);
         } else if (action === 'mem-cancel') {
@@ -573,15 +568,11 @@
           }
           await memory.remove(id);
         } else if (action === 'mem-run') {
-          toast('正在整理对话…');
+          toast('正在整理助手对话…');
           element.disabled = true;
-          var report = await memory.consolidate({ reason: 'manual', force: true });
+          var report = await memory.consolidate();
           await renderMemory();
           toast(report.ok ? (report.note || '整理完成：新增 ' + report.added.length + ' 条，更新 ' + report.updated.length + ' 条' + (report.errors.length ? '，' + report.errors.length + ' 条写入失败' : '')) : '整理失败：' + report.error, !report.ok);
-          return;
-        } else if (action === 'mem-summary') {
-          memory.setSummary($('#ra-summary').value);
-          toast('梗概已保存');
           return;
         } else if (action === 'mem-export') {
           download('reader-ii-memory-' + new Date().toISOString().slice(0, 10) + '.json', JSON.stringify(await memory.exportAll(), null, 2));
@@ -595,7 +586,7 @@
           return;
         }
         await renderMemory();
-        /* 点「新增」「编辑」后把编辑框带到眼前：它排在梗概下面，不滚的话看不出点了有反应。 */
+        /* 点「新增」「编辑」后把编辑框带到眼前：它排在存放位置下面，不滚的话看不出点了有反应。 */
         if (action === 'mem-new' || action === 'mem-edit') {
           var box = $('#ra-editor');
           if (box && box.scrollIntoView) box.scrollIntoView({ block: 'nearest' });
@@ -699,14 +690,28 @@
     }
 
     function agentCardHtml(a) {
+      var sources = agent.listPlotSources();
+      // Preserve a chosen source after an imported connector has been removed.
+      if (a.plotSource && a.plotSource !== 'auto' && !sources.some(function (item) { return item.id === a.plotSource; })) {
+        sources.push({ id: a.plotSource, title: a.plotSource + '（未安装）' });
+      }
+      var persona = agent.personaContext();
       return card('ra-agent-card', '助手', group('权限')
         + '<div class="ra-form">'
         + '<label>权限档位</label><select data-s="a.mode">' + option('readonly', '只读：查看酒馆，草稿可写入工作区', a.mode) + option('card', '单卡：只改当前聊天和这张卡（推荐）', a.mode) + option('tavern', '酒馆全权：酒馆里的一切', a.mode) + option('device', '设备全权：再加上设备上的文件与命令（需后端伴侣）', a.mode) + '</select>'
         + '<label>确认方式</label><select data-s="a.approval">' + option('ask', '每次写入前询问（推荐）', a.approval) + option('auto', '档位内直接执行，危险操作仍询问', a.approval) + option('yolo', '全部直接执行', a.approval) + '</select>'
         + '</div>'
         + group('对话')
-        + switchField('a.useAssistantPreset', a.useAssistantPreset, '启用酒馆预设', '默认关闭。开启后，夜梦使用当前预设中启用的提示词和宏；切换预设后，从下一次请求生效。')
-        + switchField('a.plotContext', a.plotContext, '让助手了解当前剧情', '做前后端、修脚本时可以关掉，省 token')
+        + '<div class="ra-form"><label for="ra-persona-prompt">夜梦人格提示词 · ' + esc(persona.name) + '</label>'
+        + '<textarea id="ra-persona-prompt" data-s="personaPrompt" data-persona-key="' + esc(persona.key) + '" rows="7">' + esc(persona.override || persona.defaultPrompt) + '</textarea>'
+        + '<p class="ra-note">修改后用于该人格的助手对话和正文人设。清空后保存可恢复人格原文。</p>'
+        + '<label for="ra-assistant-system-prompt">助手专用系统提示词</label>'
+        + '<textarea id="ra-assistant-system-prompt" data-s="a.assistantSystemPrompt" rows="4">' + esc(a.assistantSystemPrompt) + '</textarea>'
+        + '<p class="ra-note">所有人格共用，只随助手对话发送。可在这里设定助手的角色、措辞和回答方式。</p></div>'
+        + switchField('a.plotContext', a.plotContext, '让助手了解当前剧情', '仅在助手对话时读取所选插件已有的剧情记忆。关闭或不选来源时跳过。')
+        + '<div class="ra-form"><label for="ra-plot-source">剧情记忆来源</label><select id="ra-plot-source" data-s="a.plotSource">'
+        + option('', '不选择（关闭）', a.plotSource) + option('auto', '自动使用首个有记录的插件', a.plotSource)
+        + sources.map(function (item) { return option(esc(item.id), esc(item.title), a.plotSource); }).join('') + '</select></div>'
         + switchField('a.lite', a.lite, '轻聊', '不带任何工具，只聊天')
         + switchField('a.recall', a.recall, '回答前自动带入相关记忆')
         + group('生成参数')
@@ -787,28 +792,14 @@
     }
 
     function memoryCardHtml(m) {
-      return card('ra-memory-card', '记忆', group('总开关')
-        + switchField('m.enabled', m.enabled, '启用记忆系统')
-        + '<div class="ra-form">'
-        + '<label>在哪些聊天里生效</label><select data-s="m.scope">' + option('reader', '只在用了 Reader-II 的聊天里（推荐）', m.scope) + option('all', '所有聊天', m.scope) + '</select>'
-        + '<label>新记忆写到</label><select data-s="m.store">' + option('chat', '当前聊天（随存档，互不相干）', m.store) + option('ocean', '《夜之洋》世界书（跨存档）', m.store) + '</select>'
-        + '</div>'
-        + group('自动整理')
-        + switchField('m.autoExtract', m.autoExtract, '自动整理', '对话攒够下面任一数量后，把它沉淀为记忆')
-        + '<div class="ra-nums">' + numberField('m.everyTurns', '每多少条回复', m.everyTurns, 0, 200) + numberField('m.everyChars', '或每多少字', m.everyChars, 0, 400000) + numberField('m.keepRecent', '最近几条先不整理', m.keepRecent, 0, 20) + '</div>'
-        + switchField('m.agentExtract', m.agentExtract, '与助手的对话也沉淀为记忆', '情感、偏好、做法')
-        + '<p class="ra-note">两个数量都填 0 时，只在手动点“立即整理”时整理。</p>'
-        + group('带入正文')
-        + switchField('m.inject', m.inject, '把相关记忆带进正文提示词')
-        + '<div class="ra-nums">' + numberField('m.injectDepth', '注入深度', m.injectDepth, 0, 40) + numberField('m.injectMax', '最多带几条', m.injectMax, 1, 30) + numberField('m.injectBudget', '字数预算', m.injectBudget, 200, 20000) + '</div>'
-        + switchField('m.injectSummary', m.injectSummary, '同时带上前情梗概')
-        + switchField('m.unify', m.unify, '助手夜梦 = 正文夜梦', '助手自己的记忆也带进正文（功能记忆除外；正文里不主动超游）')
-        + group('夜之洋')
-        + '<div class="ra-form">'
-        + '<label>书名</label><input type="text" data-s="m.oceanBook" value="' + esc(m.oceanBook) + '" maxlength="60">'
-        + '<label>挂载</label><select data-s="m.oceanMount">' + option('global', '全局启用：所有角色卡的聊天都能想起', m.oceanMount) + option('character', '绑到当前角色卡：只在这张卡的各个存档间共享', m.oceanMount) + option('none', '不挂载：只由脚本检索带入', m.oceanMount) + '</select>'
-        + '</div>'
-        + '<p class="ra-note">已挂载的《夜之洋》由酒馆按触发词原生带入正文；当前聊天里的记忆、以及未挂载的《夜之洋》由脚本带入。没打开“同一个人”时，助手自己的记忆不进正文，它们在《夜之洋》里的条目保持停用。</p>');
+      return card('ra-memory-card', '助手记忆', switchField('m.enabled', m.enabled, '启用助手记忆')
+        + switchField('m.agentExtract', m.agentExtract, '自动整理助手对话', '整理真实用户与夜梦聊过的偏好、约定、情感与做法。')
+        + '<div class="ra-nums">' + numberField('m.agentEveryTurns', '每多少条助手回复整理一次', m.agentEveryTurns, 1, 40) + '</div>'
+        + '<div class="ra-form"><label>新记忆写到</label><select data-s="m.store">' + option('chat', '当前聊天（随存档）', m.store) + option('ocean', '《夜之洋》世界书（跨存档）', m.store) + '</select>'
+        + '<label>跨存档世界书名</label><input type="text" data-s="m.oceanBook" value="' + esc(m.oceanBook) + '" maxlength="60"></div>'
+        + group('正文共享')
+        + switchField('m.unify', m.unify, '助手夜梦 = 正文夜梦', '正文夜梦可以想起与真实用户的交流，并保持角色视角。')
+        + '<div class="ra-nums">' + numberField('m.injectDepth', '注入深度', m.injectDepth, 0, 40) + numberField('m.injectMax', '最多带几条', m.injectMax, 1, 30) + numberField('m.injectBudget', '字数预算', m.injectBudget, 200, 20000) + '</div>');
     }
 
     function modelCardHtml() {
@@ -1064,6 +1055,14 @@
         var key = input.getAttribute('data-s');
         var value = input.type === 'checkbox' ? input.checked : input.type === 'number' ? Number(input.value) : input.value;
         if (key.indexOf('a.') === 0) agentPatch[key.slice(2)] = value;
+        else if (key === 'personaPrompt' && value !== input.defaultValue) {
+          var persona = agent.personaContext();
+          var promptKey = input.getAttribute('data-persona-key');
+          var prompts = agent.getSettings().personaPrompts;
+          if (!value.trim() || (promptKey === persona.key && value.trim() === persona.defaultPrompt)) delete prompts[promptKey];
+          else prompts[promptKey] = value.trim();
+          agentPatch.personaPrompts = prompts;
+        }
         else if (key.indexOf('m.') === 0) memoryPatch[key.slice(2)] = value;
         else if (key.indexOf('p.') === 0) {
           var parts = key.split('.');
@@ -1144,7 +1143,7 @@
         + '<nav class="ra-tabs" role="tablist"><button type="button" class="ra-tab" role="tab" data-tab="chat">对话</button><button type="button" class="ra-tab" role="tab" data-tab="memory">记忆</button><button type="button" class="ra-tab" role="tab" data-tab="settings">设置</button></nav>'
         + '<button type="button" class="ra-close" data-act="close" aria-label="关闭，回到聊天" title="关闭，回到聊天">' + icon('close') + '</button></header>'
         + '<section class="ra-pane" data-pane="chat"><div class="ra-log" id="ra-log" aria-live="polite"></div>'
-        + '<div class="ra-quick"><button type="button" class="ra-chip" data-quick="看看现在 Reader 的状态。">看看状态</button><button type="button" class="ra-chip" data-quick="帮我把这张卡的变量适配到 Reader-II，逐项告诉我结果。">适配这张卡</button><button type="button" class="ra-chip" data-quick="把最近的对话整理成记忆，告诉我记下了什么。">整理记忆</button><button type="button" class="ra-chip" data-quick="你还记得关于我和这个故事的哪些事？">你还记得什么</button></div>'
+        + '<div class="ra-quick"><button type="button" class="ra-chip" data-quick="看看现在 Reader 的状态。">看看状态</button><button type="button" class="ra-chip" data-quick="帮我把这张卡的变量适配到 Reader-II，逐项告诉我结果。">适配这张卡</button><button type="button" class="ra-chip" data-quick="把我们最近的助手对话整理成记忆，告诉我记下了什么。">整理记忆</button><button type="button" class="ra-chip" data-quick="你还记得我们聊过哪些事？">你还记得什么</button></div>'
         + '<div class="ra-input"><textarea id="ra-text" rows="1" aria-label="对夜梦说的话" placeholder="' + (touch ? '想问什么、想让我做什么，直接说。' : '想问什么、想让我做什么，直接说。Enter 发送，Shift+Enter 换行') + '"></textarea><button type="button" class="ra-btn is-main" id="ra-send">发送</button></div>'
         + '<div class="ra-foot"><div class="ra-tags"><span id="ra-foot-text"></span><button type="button" class="ra-tag" id="ra-tool-mode" data-act="goto-tools" data-mode="none">工具：不可用</button></div>'
         + '<button type="button" class="ra-btn is-small is-ghost" data-act="clear">清空对话</button></div></section>'
@@ -1186,6 +1185,8 @@
       });
       overlay.addEventListener('change', function (event) {
         if (event.target.closest && event.target.closest('[data-s],[data-r]')) setDirty(true);
+        if (event.target.id === 'ra-plot-source') $('[data-s="a.plotContext"]').checked = !!event.target.value;
+        if (event.target.matches('[data-s="a.plotContext"]') && event.target.checked && !$('#ra-plot-source').value) $('#ra-plot-source').value = 'auto';
         var placementSection = event.target.closest && event.target.closest('[data-placement-section]');
         if (placementSection) updatePlacementFields(placementSection);
         if (netUi && netUi.change(event)) return;

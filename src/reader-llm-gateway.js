@@ -293,7 +293,7 @@
     }
 
     function isolatedRoute(request) {
-      return (request.route === 'agent' || request.route === 'adapt') && modules.hasAgentCompletionTransport && modules.hasAgentCompletionTransport(env);
+      return request.route === 'agent' || request.route === 'adapt' || request.route === 'memory';
     }
 
     // 有些模型把思考放在正文开头；只读取标签之后的正文，保留正文里的引用与代码。
@@ -325,6 +325,42 @@
       return responseText(data);
     }
 
+    /* 宿主的文本补全参数构造器会展开正文停止词、负面提示和 DRY 分隔符里的宏。
+     * 助手只借用已选的连接、模型和数值采样参数，仍由酒馆后端处理鉴权。 */
+    async function isolatedTextCompletion(ctx, textApi, messages, request) {
+      var script = await env.hostImport('/script.js');
+      var settings = textApi.textgenerationwebui_settings;
+      var type = settings.type;
+      var limit = script.amount_gen || request.maxTokens;
+      var body = {
+        api_type: type, api_server: textApi.getTextGenServer(type), model: textApi.getTextGenModel(settings),
+        prompt: messages.map(function (message) { return message.role + ': ' + message.content; }).join('\n\n') + '\n\nassistant:',
+        stream: false, max_tokens: limit, max_new_tokens: limit, temperature: settings.temp, top_p: settings.top_p,
+        top_k: settings.top_k, min_p: settings.min_p, repetition_penalty: settings.rep_pen,
+        presence_penalty: settings.presence_pen, frequency_penalty: settings.freq_pen, include_reasoning: settings.include_reasoning
+      };
+      if (settings.seed >= 0) body.seed = settings.seed;
+      if (type === 'ollama' || type === 'llamacpp') {
+        body.num_ctx = script.max_context;
+        body.repeat_penalty = settings.rep_pen;
+        body.repeat_last_n = settings.rep_pen_range;
+        if (type === 'ollama') body.num_predict = limit;
+        else body.n_predict = limit;
+      }
+      if (type === 'openrouter') {
+        body.provider = settings.openrouter_providers;
+        body.quantizations = settings.openrouter_quantizations;
+        body.allow_fallbacks = settings.openrouter_allow_fallbacks;
+      }
+      if (request.jsonSchema && (type === 'tabby' || type === 'llamacpp')) body.json_schema = request.jsonSchema.value;
+      if (request.jsonSchema && type === 'aphrodite') body.guided_json = request.jsonSchema.value;
+      var response = await hostFetch()('/api/backends/text-completions/generate', {
+        method: 'POST', headers: ctx.getRequestHeaders(), body: JSON.stringify(body), signal: request.signal
+      });
+      if (!response.ok) throw new Error('文本补全返回 HTTP ' + response.status + '：' + await readFailure(response));
+      return script.extractMessageFromData(JSON.parse(await response.text()), ctx.mainApi);
+    }
+
     /*
      * 多轮消息生成。request:
      *   messages [{role, content}]  route  maxTokens  temperature  timeoutMs  retries  signal  jsonSchema
@@ -343,10 +379,10 @@
         if (request.signal && request.signal.aborted) throw abortError();
         var generationId = String(request.generationId || 'reader-llm') + '-' + Date.now().toString(36) + '-' + (++sequence).toString(36);
         try {
-          var result = await raceOnce(function () {
+          var result = await raceOnce(async function () {
             if (isolatedRoute(request)) {
               var ctx = nativeContext();
-              if (ctx && (api || ctx.mainApi === 'openai')) {
+              if (ctx && typeof ctx.getRequestHeaders === 'function' && (api || ctx.mainApi === 'openai')) {
                 var options = Object.assign({}, request, { timeoutMs: timeoutMs, tools: undefined, toolChoice: undefined });
                 var pending = api ? backendRequest(api, messages, options) : mainRequest(messages, options);
                 return pending.then(function (raw) {
@@ -354,6 +390,13 @@
                   if (parsed.toolCalls.length) throw new Error('模型为文本请求返回了未声明的工具调用，本次没有执行');
                   return parsed.text;
                 });
+              }
+              if (api && hostFetch()) return directChat(api, messages, request);
+              if (ctx && ctx.mainApi === 'textgenerationwebui' && typeof ctx.getRequestHeaders === 'function' && env.hostImport && hostFetch()) {
+                var textApi = await env.hostImport('/scripts/textgen-settings.js').catch(function () { return null; });
+                if (textApi && textApi.textgenerationwebui_settings && typeof textApi.getTextGenModel === 'function' && typeof textApi.getTextGenServer === 'function') {
+                  return isolatedTextCompletion(ctx, textApi, messages, request);
+                }
               }
             }
             if (!generateRaw) {
@@ -370,6 +413,7 @@
               if (native && typeof native.generateRaw === 'function') {
                 return native.generateRaw({ prompt: messages, responseLength: Number(request.maxTokens) > 0 ? Math.trunc(Number(request.maxTokens)) : undefined });
               }
+              if (isolatedRoute(request)) throw new Error('当前连接只有带正文预设的生成接口。请更新酒馆或配置独立 API 后重试。');
               var quiet = resolveFunction('generateQuietPrompt');
               if (!quiet) throw new Error('当前环境没有可用的 Reader LLM 生成接口');
               return quiet(messages.map(function (message) {
@@ -570,14 +614,14 @@
 
     async function sendBackendBody(ctx, fetcher, body, request, label) {
       var data;
-      if (isolatedRoute(request)) {
+      if (isolatedRoute(request) && modules.hasAgentCompletionTransport && modules.hasAgentCompletionTransport(env)) {
         try { data = await modules.sendAgentCompletion(env, body, request.signal, request.timeoutMs); }
         catch (error) {
           if (body.tools && looksUnsupported(error && error.status, error && error.message)) throw unsupportedError('当前连接不接受原生函数调用');
           throw error;
         }
       } else {
-        data = await fetchBackendBody(ctx, fetcher, body, request.signal, label);
+        data = await fetchBackendBody(ctx, fetcher, body, request, label);
       }
       if (data && data.quota_error) throw new Error(label + ' 配额不足');
       if (data && data.error) {
@@ -588,16 +632,16 @@
       return data;
     }
 
-    async function fetchBackendBody(ctx, fetcher, body, signal, label) {
+    async function fetchBackendBody(ctx, fetcher, body, request, label) {
       var headers = Object.assign({ 'Content-Type': 'application/json' }, ctx.getRequestHeaders() || {});
-      var response = await fetcher('/api/backends/chat-completions/generate', { method: 'POST', headers: headers, body: JSON.stringify(body), signal: signal, cache: 'no-cache' });
+      var response = await fetcher('/api/backends/chat-completions/generate', { method: 'POST', headers: headers, body: JSON.stringify(body), signal: request.signal, cache: 'no-cache' });
       if (!response.ok) {
         var detail = await readFailure(response);
         if (body.tools && looksUnsupported(response.status, detail)) throw unsupportedError('这个接口不接受原生函数调用（HTTP ' + response.status + '：' + detail + '）');
         throw new Error(label + ' 返回 HTTP ' + response.status + '：' + detail);
       }
       /* 展示用预设可以改写 Response 实例的 json()，把调用消费为正文；助手需要同一次响应的协议数据。 */
-      return body.tools ? JSON.parse(await response.text()) : response.json();
+      return isolatedRoute(request) || body.tools ? JSON.parse(await response.text()) : response.json();
     }
 
     async function directRequest(api, messages, request) {
@@ -648,6 +692,7 @@
         var prepared = await api.createGenerationParameters(settings, model, 'quiet', messages, { allowToolCalls: false, jsonSchema: request.jsonSchema || null });
         var body = prepared.generate_data;
         setAgentTools(body);
+        if (isolated) delete body.stop;
         if (request.jsonSchema) body.json_schema = modules.clone(request.jsonSchema);
         if (!isolated && ctx.eventSource && ctx.eventSource.emit) await ctx.eventSource.emit(eventName, body);
         body.stream = false;
@@ -732,7 +777,8 @@
       var system = String(request.system || request.systemPrompt || '');
       if (!userInput.trim()) throw new Error('Reader LLM 调用缺少用户提示词');
       var api = resolveApi(request.route);
-      if (isolatedRoute(request) && !request.usePreset && nativeContext()) {
+      var ctx = nativeContext();
+      if (isolatedRoute(request) && (api || ctx && ctx.mainApi)) {
         return chat(Object.assign({}, request, { api: api, messages: [
           { role: 'system', content: system }, { role: 'user', content: userInput }
         ] }));
@@ -747,7 +793,7 @@
       if (request.jsonSchema) config.json_schema = modules.clone(request.jsonSchema);
 
       var result;
-      if (!api && request.usePreset === true) {
+      if (!api && request.usePreset === true && !isolatedRoute(request)) {
         var generateWithPreset = resolveFunction('generate');
         if (!generateWithPreset) throw new Error('当前酒馆助手未提供 generate');
         if (request.overrides) config.overrides = modules.clone(request.overrides);
@@ -757,6 +803,7 @@
         var generateRaw = resolveFunction('generateRaw');
         if (!generateRaw) {
           if (api) throw new Error('独立 API 需要酒馆助手 generateRaw 接口');
+          if (isolatedRoute(request)) throw new Error('当前连接只有带正文预设的生成接口。请更新酒馆或配置独立 API 后重试。');
           var quiet = resolveFunction('generateQuietPrompt');
           if (!quiet) throw new Error('当前环境没有可用的 Reader LLM 生成接口');
           result = await quiet((system ? system + '\n\n' : '') + userInput);

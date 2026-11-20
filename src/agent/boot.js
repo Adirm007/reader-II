@@ -16,7 +16,8 @@
 
     var kit = modules.createHostKit(env);
     var llm = modules.createLlmGateway(env);
-    var memory = modules.createMemorySystem(env, llm, kit);
+    var history = modules.createAgentHistory(env, kit);
+    var memory = modules.createMemorySystem(env, llm, kit, history);
     var store = modules.createStore(env);
     var journal = modules.createJournal(store);
     var vfs = modules.createVfs({ journal: journal });
@@ -80,7 +81,7 @@
     var connectors = modules.installConnectors(registry, env, kit, function () { return agent ? agent.getSettings().connectors : []; });
 
     agent = modules.createAgent(env, llm, kit, memory, {
-      registry: registry, vfs: vfs, journal: journal, connectors: connectors, settingsIo: settingsIo, apiTier: legacy.apiTier,
+      history: history, registry: registry, vfs: vfs, journal: journal, connectors: connectors, settingsIo: settingsIo, apiTier: legacy.apiTier,
       requestMoreRounds: function (request) { return ui ? ui.requestMoreRounds(request) : 0; },
       core: function () { return host.ReaderCore && host.ReaderCore.__reader_core_api ? host.ReaderCore : null; },
       envLines: function () { return [web ? web.brief() : '', mcp ? mcp.brief() : '', companion.brief()]; }

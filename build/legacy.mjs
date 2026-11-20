@@ -11,7 +11,7 @@ import { renameLocalKeys } from './local-keys.mjs';
 
 const AGENT_DOOR = "h+='<div class=\"dlb-sub-h\">夜梦助手<i>READER AGENT</i></div><button type=\"button\" class=\"dlb-row\" data-dlb=\"eggagent\" style=\"width:100%;text-align:left;background:transparent;color:inherit;font:inherit;cursor:pointer\"><div class=\"ic\">'+dlbSvg('quill')+'</div><div class=\"tx\"><div class=\"nm\">和夜梦说说话<em>AGENT</em></div><div class=\"ds\">查资料、改变量、适配这张卡、整理记忆；要动手改东西之前会先问你</div></div><div class=\"rt\"><span class=\"sv2\">打开</span></div></button>';";
 const MEMORY_ROWS = "h+='<div class=\"dlb-row\" data-dlb=\"eggagentset\"><div class=\"ic\">'+dlbSvg('tuning')+'</div><div class=\"tx\"><div class=\"nm\">助手设置<em>SETTINGS</em></div><div class=\"ds\">模型与工具调用方式、权限、联网与插件对接、版本更新</div></div><div class=\"pr\">打开</div></div>';\n"
-  + "h+='<div class=\"dlb-row\" data-dlb=\"eggmemory\"><div class=\"ic\">'+dlbSvg('info')+'</div><div class=\"tx\"><div class=\"nm\">记忆<em>MEMORY</em></div><div class=\"ds\">夜之洋：查看、整理与管理记忆；可存在当前聊天，或《夜之洋》世界书（跨存档）</div></div><div class=\"rt\"><span class=\"go\">'+dlbSvg('go')+'</span></div></div>';\n"
+  + "h+='<div class=\"dlb-row\" data-dlb=\"eggmemory\"><div class=\"ic\">'+dlbSvg('info')+'</div><div class=\"tx\"><div class=\"nm\">记忆<em>MEMORY</em></div><div class=\"ds\">查看与助手的交流记忆，可随聊天保存或存进《夜之洋》</div></div><div class=\"rt\"><span class=\"go\">'+dlbSvg('go')+'</span></div></div>';\n"
   + "h+='<div class=\"dlb-row\" data-dlb=\"eggpanel\"><div class=\"ic\">'+dlbSvg('tuning')+'</div><div class=\"tx\"><div class=\"nm\">语义适配<em>READER CORE</em></div><div class=\"ds\">把宿主卡的变量接到读者这边：地点、角色、任务、技能、状态、货币、背包</div></div><div class=\"rt\"><span class=\"go\">'+dlbSvg('go')+'</span></div></div>';";
 
 /* 控制器里新增的小函数：通往主脚本里的 ReaderCore（语义层）、夜梦助手与适配面板。 */
@@ -74,7 +74,7 @@ export function transformLegacy(input) {
   source = replaceRegex(source, /h\+='<div class="dlb-sub-h">书海迷宫<i>BOOKSEA<\/i><\/div><button type="button" class="dlb-row" data-dlb="eggbooksea"[^\n]*\n/, AGENT_DOOR + '\n', '彩蛋页书海入口');
   source = replaceExact(source, "if(act==='eggbooksea'){dlbEnterBooksea();return;}", "if(act==='eggagent'){dreamOpenAgent('chat');return;}if(act==='eggagentset'){dreamOpenAgent('settings');return;}if(act==='eggmemory'){dreamOpenAgent('memory');return;}if(act==='eggpanel'){dreamOpenPanel();return;}", '彩蛋页入口动作');
   source = replaceExact(source, "['booksea_compile','书海 · 技能整备','进入迷宫前编译同行者能力'],\n['booksea_supplier','书海 · 补给员对话','迷宫里和补给员聊天、请她生成东西'],\n",
-    "['agent','夜梦助手','助手对话与工具调用'],\n['memory','记忆整理','把对话沉淀为记忆（夜之洋）'],\n['adapt','语义适配','一键适配时寻找宿主变量、分析容器结构'],\n", '独立 API 调用类型');
+    "['agent','夜梦助手','助手对话与工具调用'],\n['memory','记忆整理','整理用户与夜梦助手的聊天（夜之洋）'],\n['adapt','语义适配','一键适配时寻找宿主变量、分析容器结构'],\n", '独立 API 调用类型');
   source = replaceExact(source, '/* 调用类型：[键, 名称, 说明]。书海读取同一份 dream_independent_api_v2.routes。正文回复始终走酒馆当前插头。 */', '/* 调用类型：[键, 名称, 说明]。主脚本里的助手、记忆与语义适配读取同一份方案表的 routes。正文回复始终走酒馆当前插头。 */', '独立 API 注释');
 
   /* ---- 6. 检查更新不进通用版：换成记忆与语义适配入口 ---- */

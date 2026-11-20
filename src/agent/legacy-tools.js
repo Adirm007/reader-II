@@ -570,17 +570,17 @@
         id: record.id, type: record.type, title: record.title,
         content: full ? record.content : text(record.content, 160),
         keys: record.keys, importance: record.importance, pinned: record.pinned,
-        store: record.store === 'ocean' ? '夜之洋' : '当前聊天', owner: record.owner === 'agent' ? 'agent 助手自己的' : 'story 正文的', score: record.score
+        store: record.store === 'ocean' ? '夜之洋' : '当前聊天', owner: 'agent', score: record.score
       };
     };
 
     tool({
       name: 'memory_search', tier: 'read',
-      summary: '在记忆库里检索与一句话相关的记忆（当前聊天的记忆与《夜之洋》一起找）。用户问“还记得吗 / 上次 / 之前”时先用它。',
+      summary: '在记忆库里检索与一句话相关的记忆（当前聊天的记忆与《夜之洋》一起找）。用户问起你们此前的交流时使用。',
       params: [
         { name: 'query', type: 'string', required: true, desc: '检索词或短句' },
         { name: 'limit', type: 'number', desc: '最多返回几条（默认 6）' },
-        { name: 'type', type: 'string', desc: '只找某一类：episode 剧情 | fact 设定 | bond 情感 | howto 功能' }
+        { name: 'type', type: 'string', desc: '只找某一类：episode 交流 | fact 事实 | bond 情感 | howto 功能' }
       ],
       run: async function (args) {
         var hits = await memory.search(String(args.query || ''), { limit: int(args.limit, 6, 1, 20), type: args.type || undefined });
@@ -605,7 +605,7 @@
 
     tool({
       name: 'memory_save', tier: 'memory',
-      summary: '记下一条记忆。type：episode 剧情 / fact 设定 / bond 情感 / howto 功能。store 留空就写到用户选定的位置；用户明确说“记到夜之洋 / 跨存档”用 ocean，说“只记在这个聊天”用 chat。owner 默认 agent（你自己的经历、用户偏好、做法，正文里的夜梦默认想不起来）；用户要你记的是剧情或设定、要正文也记得时用 story。',
+      summary: '记下你与真实用户聊过的偏好、约定、情感或做法。不得保存正文剧情、角色状态或剧情插件摘要。store 留空跟随用户设置，明确要求跨存档时使用 ocean。',
       params: [
         { name: 'type', type: 'string', required: true, desc: 'episode | fact | bond | howto' },
         { name: 'title', type: 'string', required: true, desc: '不超过 18 字的标题' },
@@ -613,11 +613,10 @@
         { name: 'keys', type: 'json', desc: '2～5 个触发词（数组）' },
         { name: 'importance', type: 'number', desc: '1～5' },
         { name: 'store', type: 'string', desc: 'chat | ocean（可省略）' },
-        { name: 'pinned', type: 'boolean', desc: 'true=常驻，每轮都带上' },
-        { name: 'owner', type: 'string', desc: 'agent（默认）| story' }
+        { name: 'pinned', type: 'boolean', desc: 'true=开启正文共享后优先带入' }
       ],
       run: async function (args) {
-        var record = await memory.add({ type: args.type, title: args.title, content: args.content, keys: args.keys, importance: args.importance, pinned: args.pinned === true, source: 'agent', owner: args.owner === 'story' ? 'story' : 'agent' },
+        var record = await memory.add({ type: args.type, title: args.title, content: args.content, keys: args.keys, importance: args.importance, pinned: args.pinned === true, source: 'agent', owner: args.owner },
           { store: args.store === 'ocean' || args.store === 'chat' ? args.store : undefined });
         return { ok: true, memory: memoryView(record, false) };
       }
@@ -632,8 +631,7 @@
         { name: 'content', type: 'string', desc: '新的完整正文' },
         { name: 'keys', type: 'json', desc: '新的触发词数组' },
         { name: 'importance', type: 'number', desc: '1～5' },
-        { name: 'pinned', type: 'boolean', desc: '是否常驻' },
-        { name: 'owner', type: 'string', desc: 'agent | story（改归属）' }
+        { name: 'pinned', type: 'boolean', desc: '是否常驻' }
       ],
       run: async function (args) {
         var patch = {};
@@ -655,10 +653,10 @@
 
     tool({
       name: 'memory_consolidate', tier: 'memory',
-      summary: '立刻把正文里尚未整理的对话沉淀为记忆（平时会按阈值自动进行）。',
-      params: [{ name: 'include_recent', type: 'boolean', desc: 'true=连最近几楼也一起整理' }],
+      summary: '整理已经完成且尚未归档的用户与助手聊天，从中提取值得记住的内容。',
+      params: [],
       run: async function (args, ctx) {
-        var report = await memory.consolidate({ reason: 'agent', force: args.include_recent === true, signal: ctx && ctx.signal });
+        var report = await memory.consolidate({ signal: ctx && ctx.signal });
         return { ok: report.ok, added: report.added, updated: report.updated, skipped: report.skipped, errors: report.errors, note: report.note || report.error || '' };
       }
     });

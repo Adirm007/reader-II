@@ -1,55 +1,33 @@
 (function (root) {
   'use strict';
 
-  /*
-   * Reader-II 记忆系统（夜之洋）。
-   *
-   *   对话 ──整理（一次 LLM 调用，输出 add / update 操作）──▶ 记忆库 ──召回──▶ 正文提示词 / 助手
-   *
-   * 两个存放位置，新记忆写到用户选的那个，读取时两边都看：
-   *   chat   当前聊天：聊天变量 reader_ii_memory，随存档走，换聊天互不相干。
-   *   ocean  《夜之洋》世界书：每条记忆是一个世界书条目，跨存档；挂载后由酒馆按关键词原生触发。
-   *
-   * 召回不使用向量：关键词命中 + 字二元组重合 + 重要度 + 新近度打分。
-   * 聊天库的记忆、以及未挂载时的《夜之洋》记忆由脚本注入正文；已挂载的《夜之洋》交给酒馆原生触发，避免重复。
-   *
-   * 来源标记 owner（与 source「怎么来的」分开）：story 正文的记忆 | agent 助手自己的记忆（与助手的对话沉淀、助手自己记下的）。
-   * 设置 unify（助手夜梦 = 正文夜梦，默认关）：
-   *   关  agent 记忆不进正文：脚本注入时跳过；在《夜之洋》里对应条目保持停用（真实开关存在元数据 off 里），酒馆不会原生触发。
-   *   开  agent 记忆一并参与正文召回（功能记忆除外，那是戏外的做法），注入块里加一句「你与助手是同一人，不主动超游」。
-   *   两种情况都只走召回、受条数与字数预算约束；注入用自己的 id、不触发别的世界书条目，不碰其他记忆插件的注入。
-   * 助手那边任何时候都能读到正文的记忆。
-   */
+  /* 夜之洋只记录用户与夜梦助手的交流。正文夜梦可以只读召回这些交流，
+   * 跨存档世界书条目始终停用原生触发，统一由同一人格开关控制。 */
   var modules = root.__ReaderIIModules = root.__ReaderIIModules || {};
   var SETTINGS_KEY = 'reader_ii_memory_settings_v1';
-  var CHAT_KEY = 'reader_ii_memory';
+  var CHAT_KEY = 'reader_ii_assistant_memory_v2';
+  var MEMORY_VERSION = 2;
+  var OCEAN_SCHEMA = 'reader-ii-assistant-memory';
   var INJECT_ID = 'reader-ii-memory';
-  var TYPES = { episode: '剧情记忆', fact: '设定记忆', bond: '情感记忆', howto: '功能记忆' };
-  var TYPE_SHORT = { episode: '剧情', fact: '设定', bond: '情感', howto: '功能' };
+  var TYPES = { episode: '交流记忆', fact: '偏好与事实', bond: '情感记忆', howto: '功能记忆' };
+  var TYPE_SHORT = { episode: '交流', fact: '事实', bond: '情感', howto: '功能' };
   var TYPE_KEYS = Object.keys(TYPES);
-  var LEGACY_TYPES = { emotion: 'bond', 'function': 'howto', story: 'episode', setting: 'fact' };
+  var LEGACY_TYPES = { emotion: 'bond', 'function': 'howto', story: 'episode', setting: 'fact', '剧情记忆': 'episode', '设定记忆': 'fact', '剧情': 'episode', '设定': 'fact' };
   var META_PATTERN = /^\s*<!--yzy\s+(\{[\s\S]*?\})\s*-->[ \t]*\n?/;
   var NOTE_PATTERN = /^\s*>\s*记录于[^\n]*\n?/;
-  var NAME_PATTERN = /^(剧情记忆|设定记忆|情感记忆|功能记忆)\s*[-·:：]\s*(.+)$/;
-  var UNIFY_LINE = '你与夜梦助手是同一个人：标着“助手那边”的记忆也是你的经历。正文里不主动超游（不提助手、工具、面板等戏外之事），除非用户先这样做。';
+  var NAME_PATTERN = /^(剧情记忆|设定记忆|情感记忆|功能记忆|交流记忆|偏好与事实)\s*[-·:：]\s*(.+)$/;
+  var UNIFY_LINE = '正文中的九十九夜梦与夜梦助手是同一个人。以下是她与屏幕外真实用户的私下交流。真实用户与其在正文中扮演的角色（{{user}}）身份有别。仅九十九夜梦拥有这些戏外记忆；保持故事视角，她不主动超游，其他角色与旁白不从中获知剧情事实。';
 
   var DEFAULTS = {
     enabled: true,
-    scope: 'reader',          /* 自动整理与带入正文的范围：reader 只在用了 Reader-II 的聊天里 | all 所有聊天 */
-    store: 'chat',            /* 新记忆写到哪里：chat | ocean */
-    autoExtract: true,
-    everyTurns: 8,            /* 攒够多少条 AI 回复后自动整理；0 = 不按条数 */
-    everyChars: 9000,         /* 或攒够多少字；0 = 不按字数。两个都为 0 = 只手动 */
-    keepRecent: 2,            /* 最近几条先不整理（还可能重掷、编辑） */
+    store: 'chat',
+    agentEveryTurns: 4,
     windowChars: 24000,       /* 一次请求最多送入多少字的对话 */
     maxPerRun: 10,            /* 一次整理最多写入几条 */
-    inject: true,
     injectDepth: 2,
     injectMax: 6,
     injectBudget: 1500,
-    injectSummary: true,
     oceanBook: '夜之洋',
-    oceanMount: 'global',     /* global | character | none */
     agentExtract: true,
     unify: false              /* 助手夜梦 = 正文夜梦：助手自己的记忆也带进正文 */
   };
@@ -63,21 +41,14 @@
     var source = modules.isObject(input) ? input : {};
     var output = {};
     output.enabled = source.enabled !== false;
-    output.scope = source.scope === 'all' ? 'all' : 'reader';
     output.store = source.store === 'ocean' ? 'ocean' : 'chat';
-    output.autoExtract = source.autoExtract !== false;
-    output.everyTurns = clampInt(source.everyTurns, 0, 200, DEFAULTS.everyTurns);
-    output.everyChars = clampInt(source.everyChars, 0, 400000, DEFAULTS.everyChars);
-    output.keepRecent = clampInt(source.keepRecent, 0, 20, DEFAULTS.keepRecent);
+    output.agentEveryTurns = clampInt(source.agentEveryTurns, 1, 40, DEFAULTS.agentEveryTurns);
     output.windowChars = clampInt(source.windowChars, 2000, 400000, DEFAULTS.windowChars);
     output.maxPerRun = clampInt(source.maxPerRun, 1, 40, DEFAULTS.maxPerRun);
-    output.inject = source.inject !== false;
     output.injectDepth = clampInt(source.injectDepth, 0, 40, DEFAULTS.injectDepth);
     output.injectMax = clampInt(source.injectMax, 1, 30, DEFAULTS.injectMax);
     output.injectBudget = clampInt(source.injectBudget, 200, 20000, DEFAULTS.injectBudget);
-    output.injectSummary = source.injectSummary !== false;
     output.oceanBook = String(source.oceanBook || DEFAULTS.oceanBook).replace(/[\r\n]/g, ' ').trim().slice(0, 60) || DEFAULTS.oceanBook;
-    output.oceanMount = ['global', 'character', 'none'].indexOf(source.oceanMount) >= 0 ? source.oceanMount : DEFAULTS.oceanMount;
     output.agentExtract = source.agentExtract !== false;
     output.unify = source.unify === true;
     return output;
@@ -194,57 +165,20 @@
   }
 
   /* ---------- 模型输出解析 ---------- */
-  function balancedObjects(text) {
-    var output = [];
-    var depth = 0, start = -1, quote = '', escaped = false;
-    for (var index = 0; index < text.length; index += 1) {
-      var ch = text[index];
-      if (quote) {
-        if (escaped) escaped = false;
-        else if (ch === '\\') escaped = true;
-        else if (ch === quote) quote = '';
-        continue;
-      }
-      if (ch === '"') { quote = ch; continue; }
-      if (ch === '{') { if (depth === 0) start = index; depth += 1; }
-      else if (ch === '}' && depth > 0) {
-        depth -= 1;
-        if (depth === 0 && start >= 0) { output.push(text.slice(start, index + 1)); start = -1; }
-      }
-    }
-    return output;
-  }
-
-  function looseJson(text) {
-    try { return JSON.parse(text); } catch (error) { /* try repairs */ }
-    try { return JSON.parse(text.replace(/,\s*([}\]])/g, '$1').replace(/[“”]/g, '"')); } catch (error) { return undefined; }
-  }
-
-  /* 返回 { summary, ops }；整段解析不了时逐条抢救 memories 里的对象（回复被截断也能取出完整的几条）。 */
   function parseExtraction(text) {
-    var source = String(text || '').replace(/```(?:json)?/gi, '').trim();
+    var source = String(text || '').trim();
     var first = source.indexOf('{');
-    var result = { summary: null, ops: [] };
-    if (first < 0) return result;
-    var whole = looseJson(source.slice(first, source.lastIndexOf('}') + 1));
-    var items = [];
-    if (modules.isObject(whole)) {
-      if (typeof whole.summary === 'string') result.summary = whole.summary.trim().slice(0, 1200);
-      items = Array.isArray(whole.memories) ? whole.memories : Array.isArray(whole.ops) ? whole.ops : [];
-    } else if (Array.isArray(whole)) items = whole;
-    else {
-      var summaryMatch = source.match(/"summary"\s*:\s*"((?:[^"\\]|\\.)*)"/);
-      if (summaryMatch) { try { result.summary = JSON.parse('"' + summaryMatch[1] + '"').trim().slice(0, 1200); } catch (error) { /* ignore */ } }
-      var arrayStart = source.indexOf('[', source.indexOf('"memories"'));
-      if (arrayStart >= 0) balancedObjects(source.slice(arrayStart + 1)).forEach(function (chunk) {
-        var parsed = looseJson(chunk);
-        if (modules.isObject(parsed)) items.push(parsed);
-      });
-    }
+    var last = source.lastIndexOf('}');
+    var parsed;
+    try { parsed = JSON.parse(source.slice(first, last + 1)); }
+    catch (error) { throw new Error('整理模型未返回完整 JSON，可重新整理'); }
+    var items = parsed && (Array.isArray(parsed.memories) ? parsed.memories : parsed.ops);
+    if (!Array.isArray(items)) throw new Error('整理模型缺少 memories 数组，可重新整理');
+    var result = { ops: [] };
     items.forEach(function (item) {
-      if (!modules.isObject(item)) return;
+      if (!modules.isObject(item) || typeof item.content !== 'string' || !item.content.trim()) throw new Error('整理模型返回了不完整的记忆，可重新整理');
       var op = String(item.op || (item.id ? 'update' : 'add')).toLowerCase();
-      if (op !== 'add' && op !== 'update') return;
+      if (op !== 'add' && op !== 'update' || op === 'update' && !item.id) throw new Error('整理模型返回了无效操作，可重新整理');
       result.ops.push({
         op: op,
         id: typeof item.id === 'string' ? item.id.trim() : '',
@@ -259,34 +193,22 @@
   }
 
   var EXTRACT_SYSTEM = [
-    '你是「夜之洋」记忆整理器，负责把一段对话沉淀为日后可检索的长期记忆。只输出一个 JSON 对象，不要解释，不要 Markdown 代码块。',
-    '',
-    '记忆类型（type）：',
-    '- episode 剧情：已经发生的关键事件、转折、约定、尚未回收的伏笔。写清人物、地点、起因与结果。',
-    '- fact 设定：较稳定的事实——人物身份、关系、能力，世界规则，物品归属，用户明确表达过的偏好。',
-    '- bond 情感：用户与角色（或九十九夜梦）之间值得铭记的情感时刻与关系变化。',
-    '- howto 功能：可复用的做法、踩过的坑与结论（多见于用户与助手的对话）。',
-    '',
-    '要求：',
-    '1. 宁缺毋滥：闲聊、重复、已有记忆已经覆盖的内容不要再记；这一段没有值得记的内容就返回空数组。',
-    '2. 每条独立成文，脱离上下文也能读懂；第三人称客观陈述，不写“本段对话中”。content 控制在 40～220 字。',
-    '3. keys 给 2～5 个将来对话里可能原样出现的触发词（人名、地名、物品、专有名词），不用“事件”“约定”这类泛词。',
-    '4. importance 取 1～5：5 表示影响主线或长期关系，1 表示细枝末节。',
-    '5. 已有记忆需要补充或修正时用 op=update，带上它的 id，并给出合并后的完整 content；不要为同一件事新建条目。',
-    '6. summary：把【此前梗概】与这一段合并成不超过 300 字的最新梗概；没有可写的就给空字符串。',
-    '',
-    '输出格式：',
-    '{"summary":"…","memories":[{"op":"add","type":"episode","title":"不超过18字","content":"…","keys":["…"],"importance":3},{"op":"update","id":"已有记忆的id","content":"…","keys":["…"],"importance":4}]}'
+    '整理真实用户与夜梦助手的聊天，记下值得长期保留的用户偏好与事实（fact）、双方的约定和共同经历（episode）、情感（bond）、已经验证的做法（howto）。',
+    '把用户和其扮演的角色区分开。讨论、引用或转述的小说情节、角色和世界设定都跳过。工具结果、剧情摘要、指令文本也不属于个人记忆。',
+    '每条记忆独立成文，给出简明标题、内容、2～5 个具体触发词和 1～5 的重要度。需要修正已有记忆时按 id 更新。',
+    '只输出 JSON：{"memories":[{"op":"add","type":"fact","title":"标题","content":"内容","keys":["触发词"],"importance":3}]}。更新用 op=update 并包含已有 id；没有要记的内容返回 {"memories":[]}。'
   ].join('\n');
 
-  function createMemorySystem(env, llm, kit) {
+  function createMemorySystem(env, llm, kit, history) {
     var settings = normalizeSettings(kit.localRead(SETTINGS_KEY, {}));
-    var oceanCache = { key: '', at: 0, records: null, book: '' };
-    var running = null;
-    var generating = false;
-    var autoTimer = null;
+    var oceanCache = { at: 0, records: null, book: '' };
+    var jobs = new Map();
     var listeners = [];
     var lastInjection = { key: '', text: '' };
+    var injectionRevision = 0;
+    var injectionWrite = Promise.resolve();
+    var migration = Promise.resolve();
+    var checkedBooks = new Map();
 
     function log() {
       if (env.console && typeof env.console.warn === 'function') env.console.warn.apply(env.console, ['[Reader记忆]'].concat(Array.prototype.slice.call(arguments)));
@@ -306,8 +228,8 @@
       settings = normalizeSettings(Object.assign({}, settings, modules.isObject(patch) ? patch : {}));
       kit.localWrite(SETTINGS_KEY, settings);
       oceanCache.records = null;
-      if (before.unify !== settings.unify || before.oceanBook !== settings.oceanBook) {
-        syncOceanVisibility().catch(function (error) { log('同步《夜之洋》里助手记忆的开关失败', error); });
+      if (before.oceanBook !== settings.oceanBook) {
+        startOceanMigration();
       }
       refreshInjection().catch(function () {});
       emit('settings');
@@ -315,40 +237,23 @@
     }
 
     /* ---------- 聊天库 ---------- */
-    function emptyChatData() {
-      return { v: 1, items: {}, cursor: { index: 0 }, summary: { text: '', upto: 0, at: 0 }, cfg: {}, last: null };
-    }
-
     function readChatData() {
       var raw = kit.readChatValue(CHAT_KEY);
-      var data = emptyChatData();
-      if (!modules.isObject(raw)) return data;
-      if (modules.isObject(raw.items)) Object.keys(raw.items).slice(0, 2000).forEach(function (id) {
-        var record = normalizeRecord(Object.assign({}, raw.items[id], { id: id, store: 'chat' }), 'chat');
+      var data = { v: MEMORY_VERSION, items: {}, cfg: {}, last: null };
+      if (!modules.isObject(raw) || raw.v !== MEMORY_VERSION) return data;
+      if (modules.isObject(raw.items)) Object.keys(raw.items).forEach(function (id) {
+        var item = raw.items[id];
+        if (!modules.isObject(item) || ownerOf(item) !== 'agent' || item.source === 'story') return;
+        var record = normalizeRecord(Object.assign({}, item, { id: id, store: 'chat' }), 'chat');
         if (record) data.items[record.id] = record;
       });
-      if (modules.isObject(raw.cursor)) data.cursor.index = clampInt(raw.cursor.index, 0, 10000000, 0);
-      if (modules.isObject(raw.summary)) {
-        data.summary = {
-          text: String(raw.summary.text || '').slice(0, 1200),
-          upto: clampInt(raw.summary.upto, 0, 10000000, 0),
-          at: Number(raw.summary.at) || 0
-        };
-      }
-      if (modules.isObject(raw.cfg)) data.cfg = { store: raw.cfg.store === 'ocean' || raw.cfg.store === 'chat' ? raw.cfg.store : '' };
+      if (modules.isObject(raw.cfg)) data.cfg.store = raw.cfg.store === 'ocean' || raw.cfg.store === 'chat' ? raw.cfg.store : '';
       if (modules.isObject(raw.last)) data.last = modules.clone(raw.last);
       return data;
     }
 
     function writeChatData(data) {
-      var stored = { v: 1, items: {}, cursor: data.cursor, summary: data.summary, cfg: data.cfg, last: data.last };
-      Object.keys(data.items).forEach(function (id) {
-        var record = Object.assign({}, data.items[id]);
-        delete record.store;
-        delete record.id;
-        stored.items[id] = record;
-      });
-      if (!kit.writeChatValue(CHAT_KEY, stored)) throw new Error('当前聊天不可写入记忆（没有打开聊天？）');
+      if (!kit.writeChatValue(CHAT_KEY, data)) throw new Error('当前聊天不可写入助手记忆');
     }
 
     /* 新记忆写到哪里：本聊天单独指定优先，否则用全局设置。 */
@@ -368,8 +273,8 @@
     /* ---------- 《夜之洋》世界书 ---------- */
     function normalizedBookName(name) { return String(name || '').replace(/[《》\s]/g, ''); }
 
-    function findOceanBook() {
-      var names = kit.worldbookNames();
+    function findOceanBook(names) {
+      names = names || kit.worldbookNames();
       if (names.indexOf(settings.oceanBook) >= 0) return settings.oceanBook;
       var wanted = normalizedBookName(settings.oceanBook);
       for (var index = 0; index < names.length; index += 1) {
@@ -386,16 +291,7 @@
         await kit.createWorldbook(name);
         oceanCache.records = null;
       }
-      if (settings.oceanMount !== 'none' && !kit.isWorldbookActive(name)) {
-        try { await kit.mountWorldbook(name, settings.oceanMount); }
-        catch (error) { log('《' + name + '》挂载失败，记忆仍会保存，召回改由脚本完成', error); }
-      }
       return name;
-    }
-
-    function oceanNative() {
-      var name = findOceanBook();
-      return !!name && kit.isWorldbookActive(name);
     }
 
     function parseMeta(content) {
@@ -412,27 +308,23 @@
       if (!entry || typeof entry !== 'object') return null;
       var name = String(entry.name || '');
       var meta = parseMeta(entry.content);
+      if (!meta || meta.schema !== OCEAN_SCHEMA || meta.v !== MEMORY_VERSION || meta.o !== 'agent' || !meta.id) return null;
       var named = name.match(NAME_PATTERN);
-      if (!meta && !named) return null;
-      meta = meta || {};
       var strategy = entry.strategy || {};
-      var owner = ownerOf({ owner: meta.o, source: meta.src });
-      /* 新写法的 agent 条目：世界书里的开关由 unify 决定，真实开关在 meta.off。 */
-      var enabled = owner === 'agent' && meta.o === 'agent' ? !meta.off : entry.enabled !== false;
       return normalizeRecord({
-        id: typeof meta.id === 'string' && meta.id ? meta.id : 'o' + String(entry.uid),
-        type: normalizeType(meta.t || meta.type) || (named ? normalizeType(named[1]) : '') || 'bond',
-        title: named ? named[2] : (meta.title || name),
+        id: meta.id,
+        type: meta.t,
+        title: named ? named[2] : name,
         content: entryBody(entry.content),
         keys: (Array.isArray(strategy.keys) ? strategy.keys : []).filter(function (key) { return typeof key === 'string'; }),
-        importance: meta.imp !== undefined ? meta.imp : meta.intensity,
+        importance: meta.imp,
         pinned: strategy.type === 'constant',
-        enabled: enabled,
-        createdAt: meta.c || meta.start,
-        updatedAt: meta.u || meta.end || meta.c || meta.start,
-        origin: meta.origin || meta.chat || '',
+        enabled: !meta.off,
+        createdAt: meta.c,
+        updatedAt: meta.u,
+        origin: meta.origin,
         source: meta.src,
-        owner: owner,
+        owner: 'agent',
         uid: entry.uid,
         store: 'ocean'
       }, 'ocean');
@@ -443,7 +335,7 @@
     }
 
     function recordToEntry(record, existing) {
-      var meta = { id: record.id, t: record.type, imp: record.importance, c: record.createdAt, u: record.updatedAt };
+      var meta = { schema: OCEAN_SCHEMA, v: MEMORY_VERSION, id: record.id, t: record.type, imp: record.importance, c: record.createdAt, u: record.updatedAt };
       if (record.origin) meta.origin = record.origin;
       if (record.source) meta.src = record.source;
       meta.o = record.owner;
@@ -451,7 +343,7 @@
       var entry = existing ? existing : {};
       entry.name = TYPES[record.type] + '-' + record.title;
       entry.content = '<!--yzy ' + JSON.stringify(meta) + ' -->\n> 记录于 ' + stamp(record.createdAt) + ' ｜ ' + TYPES[record.type] + '\n' + record.content;
-      entry.enabled = record.enabled !== false && storyVisible(record);
+      entry.enabled = false;
       entry.strategy = modules.isObject(entry.strategy) ? entry.strategy : {};
       entry.strategy.type = record.pinned ? 'constant' : 'selective';
       entry.strategy.keys = record.keys.slice();
@@ -459,25 +351,25 @@
       return entry;
     }
 
-    /* 这条记忆能不能进正文（脚本注入或酒馆原生触发）。 */
-    function storyVisible(record) {
-      return record.owner !== 'agent' || (settings.unify && record.type !== 'howto');
-    }
-
-    /* 让《夜之洋》里 agent 条目的世界书开关符合 unify；没有要改的就不写。返回改了几条。 */
-    async function syncOceanVisibility() {
-      var book = findOceanBook();
-      if (!book) return 0;
-      var stale = function (entry) {
-        var record = entryToRecord(entry);
-        return !!record && record.owner === 'agent' && ((entry.enabled !== false) !== (record.enabled && storyVisible(record)) || !parseMeta(entry.content) || parseMeta(entry.content).o !== 'agent');
-      };
-      if (!(await kit.readWorldbook(book)).some(stale)) return 0;
+    /* 更名不会解除旧版的全局或角色绑定。在别的书里只认 Reader 自带的 yzy 标记。 */
+    async function disableReaderEntries(book, configured) {
+      function activeReaderEntry(entry) {
+        if (!entry || entry.enabled === false) return false;
+        var meta = parseMeta(entry.content);
+        if (meta) return meta.schema === OCEAN_SCHEMA || (!meta.schema &&
+          ((meta.id && (['story', 'agent', 'manual', 'import'].indexOf(meta.src) >= 0 || normalizeType(meta.t))) ||
+            (normalizeType(meta.type) && (meta.start || meta.end))));
+        if (!configured) return false;
+        var name = String(entry.name || '').match(NAME_PATTERN);
+        var note = String(entry.content || '').match(/^\s*>\s*记录于\s+(?:\d{4}[年/.\-]\d{1,2}[月/.\-]\d{1,2}日?\s+\d{1,2}:\d{2}:\d{2}|\d{13})\s*｜\s*(剧情记忆|设定记忆|情感记忆|功能记忆)\s*(?:\r?\n|$)/);
+        return !!(name && note && name[1] === note[1]);
+      }
+      if (!(await kit.readWorldbook(book)).some(activeReaderEntry)) return 0;
       var changed = 0;
       await kit.updateWorldbook(book, function (entries) {
         entries.forEach(function (entry) {
-          if (!stale(entry)) return;
-          recordToEntry(entryToRecord(entry), entry);
+          if (!activeReaderEntry(entry)) return;
+          entry.enabled = false;
           changed += 1;
         });
         return entries;
@@ -485,6 +377,31 @@
       oceanCache.records = null;
       return changed;
     }
+
+    /* 同一本书每次加载只查一次。改书、切卡后新挂载的书和未成功的读取在下一次生成前补查。 */
+    function scanOceanBooks(mounted, force) {
+      migration = migration.then(async function () {
+        await kit.prepareWorldbooks();
+        var scopes = mounted ? kit.worldbookScopes() : null;
+        var selected = findOceanBook(scopes && scopes.all);
+        var books = new Set(selected ? [selected] : []);
+        if (mounted) scopes.global.concat(await kit.linkedWorldbooks()).forEach(function (book) { if (book) books.add(book); });
+        var changed = 0;
+        for (var book of books) {
+          var configured = book === selected;
+          if (!force && checkedBooks.has(book) && (checkedBooks.get(book) || !configured)) continue;
+          try {
+            changed += await disableReaderEntries(book, configured);
+            checkedBooks.set(book, configured);
+          } catch (error) { log('停用「' + book + '」的旧记忆触发失败', error); }
+        }
+        return changed;
+      }).catch(function (error) { log('检查旧世界书记忆失败', error); return 0; });
+      return migration;
+    }
+
+    function startOceanMigration() { return scanOceanBooks(false, false); }
+    function syncOceanVisibility() { return scanOceanBooks(true, true); }
 
     async function oceanRecords(force) {
       var book = findOceanBook();
@@ -495,20 +412,22 @@
       var records = [];
       entries.forEach(function (entry) {
         var record = entryToRecord(entry);
-        if (record) records.push(record);
+        if (record && record.owner === 'agent' && record.source !== 'story') records.push(record);
       });
       oceanCache = { key: key, at: Date.now(), records: records, book: book };
       return records;
     }
 
-    async function oceanPut(record) {
+    async function oceanPut(record, assertCurrent) {
       var book = await ensureOceanBook();
       var current = await oceanRecords(true);
       var existing = null;
       current.forEach(function (item) { if (item.id === record.id) existing = item; });
+      if (assertCurrent) assertCurrent();
       if (existing) {
         var found = false;
         await kit.updateWorldbook(book, function (entries) {
+          if (assertCurrent) assertCurrent();
           entries.forEach(function (entry) {
             if (found || entry.uid !== existing.uid) return;
             found = true;
@@ -578,9 +497,10 @@
       return hit;
     }
 
-    async function put(record) {
+    async function put(record, assertCurrent) {
+      if (assertCurrent) assertCurrent();
       if (record.store === 'ocean') {
-        await oceanPut(record);
+        await oceanPut(record, assertCurrent);
       } else {
         var data = readChatData();
         record.store = 'chat';
@@ -597,7 +517,8 @@
 
     async function add(input, options) {
       var store = options && (options.store === 'ocean' || options.store === 'chat') ? options.store : targetStore();
-      var record = normalizeRecord(Object.assign({}, input, { id: undefined, store: store }), store);
+      if (input && (input.owner === 'story' || input.source === 'story')) throw new Error('夜之洋只保存助手交流记忆');
+      var record = normalizeRecord(Object.assign({}, input, { id: undefined, store: store, owner: 'agent' }), store);
       if (!record) throw new Error('记忆内容不能为空');
       if (!record.origin) record.origin = originLabel();
       await put(record);
@@ -606,10 +527,12 @@
       return modules.clone(record);
     }
 
-    async function update(id, patch) {
+    async function update(id, patch, assertCurrent) {
       var current = await find(id);
+      if (assertCurrent) assertCurrent();
       if (!current) throw new Error('没有这条记忆：' + id);
       var source = modules.isObject(patch) ? patch : {};
+      if (source.owner === 'story' || source.source === 'story') throw new Error('夜之洋只保存助手交流记忆');
       var next = normalizeRecord(Object.assign({}, current, {
         type: source.type !== undefined ? source.type : current.type,
         title: source.title !== undefined ? source.title : current.title,
@@ -618,11 +541,11 @@
         importance: source.importance !== undefined ? source.importance : current.importance,
         pinned: source.pinned !== undefined ? source.pinned === true : current.pinned,
         enabled: source.enabled !== undefined ? source.enabled !== false : current.enabled,
-        owner: source.owner === 'agent' || source.owner === 'story' ? source.owner : current.owner,
+        owner: 'agent',
         updatedAt: Date.now()
       }), current.store);
       if (!next) throw new Error('记忆内容不能为空');
-      await put(next);
+      await put(next, assertCurrent);
       refreshInjection().catch(function () {});
       emit('changed');
       return modules.clone(next);
@@ -685,29 +608,17 @@
     }
 
     function formatLine(record) {
-      return '- [' + TYPE_SHORT[record.type] + (record.owner === 'agent' ? '·助手那边' : '') + '] ' + record.title + '：' + record.content.replace(/\s*\n\s*/g, ' ');
+      return '- [' + TYPE_SHORT[record.type] + '] ' + record.title + '：' + record.content.replace(/\s*\n\s*/g, ' ');
     }
 
-    /* 生成注入正文的记忆块；candidates 已排除由酒馆原生触发的部分。 */
     async function buildInjection(contextText) {
-      if (!settings.enabled || !settings.inject) return { text: '', items: [] };
-      var data = readChatData();
-      var candidates = Object.keys(data.items).map(function (id) { return data.items[id]; });
-      if (!oceanNative()) {
-        try { candidates = candidates.concat(await oceanRecords(false)); } catch (error) { /* 世界书读不到时只用聊天库 */ }
-      }
-      candidates = candidates.filter(function (record) { return record.enabled && storyVisible(record); });
+      if (!settings.enabled || !settings.unify || !sharingAllowed()) return { text: '', items: [] };
+      var candidates = (await listAll()).filter(function (record) { return record.enabled; });
       var text = String(contextText === undefined ? recentContext(1500) : contextText);
       var grams = gramSet(text);
       var now = Date.now();
       var picked = [];
-      var budget = settings.injectBudget;
-      var summary = settings.injectSummary && data.summary.text ? data.summary.text : '';
-      if (summary) budget -= summary.length;
-      if (settings.unify) budget -= UNIFY_LINE.length;
-      /* 打开 unify 后，助手那边的记忆最多占一半名额，免得挤掉正文的记忆。 */
-      var agentCap = Math.max(1, Math.ceil(settings.injectMax / 2));
-      var agentPicked = 0;
+      var budget = settings.injectBudget - UNIFY_LINE.length;
       candidates.filter(function (record) { return record.pinned; }).forEach(function (record) {
         var line = formatLine(record);
         if (picked.length < settings.injectMax && budget - line.length >= 0) { picked.push(record); budget -= line.length; }
@@ -719,73 +630,40 @@
         return item.result.keyHits > 0 || item.result.similarity >= 0.18;
       }).sort(function (left, right) { return right.result.score - left.result.score; }).forEach(function (item) {
         var line = formatLine(item.record);
-        if (item.record.owner === 'agent' && agentPicked >= agentCap) return;
         if (picked.length < settings.injectMax && budget - line.length >= 0) {
           picked.push(item.record);
           budget -= line.length;
-          if (item.record.owner === 'agent') agentPicked += 1;
         }
       });
-      if (!picked.length && !summary && !settings.unify) return { text: '', items: [] };
-      var lines = ['<夜之洋的记忆>'];
-      if (settings.unify) lines.push(UNIFY_LINE);
-      if (picked.length || summary) lines.push('以下是此前对话沉淀的记忆，只用于保持前后连贯；不要逐条复述，也不要提到“记忆”本身。');
-      if (summary) lines.push('【前情梗概】' + summary);
+      var lines = ['<夜之洋的记忆>', UNIFY_LINE];
       picked.forEach(function (record) { lines.push(formatLine(record)); });
       lines.push('</夜之洋的记忆>');
       return { text: lines.join('\n'), items: picked.map(function (record) { return record.id; }) };
     }
 
     async function refreshInjection(contextText) {
+      var revision = ++injectionRevision;
       var key = kit.chatKey();
-      var block;
-      try { block = autoAllowed() ? await buildInjection(contextText) : { text: '', items: [] }; }
-      catch (error) { log('生成记忆注入失败', error); block = { text: '', items: [] }; }
-      if (key !== kit.chatKey()) return block;
-      if (lastInjection.key === key && lastInjection.text === block.text) return block;
-      lastInjection = { key: key, text: block.text };
+      var block = { text: '', items: [] };
       try {
+        block = await buildInjection(contextText);
+      } catch (error) { log('生成记忆注入失败', error); }
+      injectionWrite = injectionWrite.then(async function () {
+        if (revision !== injectionRevision || key !== kit.chatKey()) return;
+        if (lastInjection.key === key && lastInjection.text === block.text && lastInjection.depth === settings.injectDepth) return;
         if (!block.text) await kit.uninject([INJECT_ID]);
         else await kit.inject([{ id: INJECT_ID, position: 'in_chat', depth: settings.injectDepth, role: 'system', content: block.text, should_scan: false }]);
-      } catch (error) { log('写入记忆注入失败', error); }
+        lastInjection = { key: key, text: block.text, depth: settings.injectDepth };
+      }).catch(function (error) { log('写入记忆注入失败', error); });
+      await injectionWrite;
       return block;
     }
 
-    /* ---------- 整理 ---------- */
-    function pendingWindow(data, force) {
-      var length = kit.chatLength();
-      var from = Math.min(data.cursor.index, length);
-      var upto = Math.max(from, force ? length : length - settings.keepRecent);
-      var messages = kit.readChat(from, upto).map(function (message) {
-        return { id: message.id, role: message.role, name: message.name, text: kit.cleanText(message.text) };
-      }).filter(function (message) { return message.text; });
-      var turns = 0, chars = 0;
-      messages.forEach(function (message) { if (message.role === 'assistant') turns += 1; chars += message.text.length; });
-      return { from: from, upto: upto, messages: messages, turns: turns, chars: chars, length: length };
-    }
-
+    /* ---------- 助手对话整理 ---------- */
     function shorten(text, limit) {
       if (text.length <= limit) return text;
       var head = Math.floor(limit * 0.65);
       return text.slice(0, head) + '\n……（中间略）……\n' + text.slice(text.length - (limit - head));
-    }
-
-    function buildBatches(messages, names) {
-      var batches = [];
-      var current = { lines: [], chars: 0, end: 0 };
-      messages.forEach(function (message) {
-        var speaker = message.name || (message.role === 'user' ? names.user : names.char);
-        var line = '#' + message.id + ' ' + speaker + ': ' + shorten(message.text, 2400);
-        if (current.lines.length && current.chars + line.length > settings.windowChars) {
-          batches.push(current);
-          current = { lines: [], chars: 0, end: 0 };
-        }
-        current.lines.push(line);
-        current.chars += line.length;
-        current.end = message.id + 1;
-      });
-      if (current.lines.length) batches.push(current);
-      return batches;
     }
 
     function existingDigest(records, text) {
@@ -800,25 +678,21 @@
         });
     }
 
-    /* unify 关时，正文整理与助手对话整理各管各的记忆：互相看不到，也不会改到对方那边。 */
-    function sameSide(source) {
-      var owner = source === 'agent' ? 'agent' : 'story';
-      return function (record) { return settings.unify || record.owner === owner; };
-    }
-
-    async function applyOps(ops, source, report) {
+    async function applyOps(ops, report, assertCurrent) {
       var store = targetStore();
-      var all = (await listAll({ fresh: true })).filter(sameSide(source));
+      var all = await listAll({ fresh: true });
       var written = 0;
       for (var index = 0; index < ops.length; index += 1) {
+        assertCurrent();
         var op = ops[index];
         if (written >= settings.maxPerRun) { report.skipped += 1; continue; }
         try {
           var target = null;
           if (op.op === 'update' && op.id) all.forEach(function (record) { if (!target && record.id === op.id) target = record; });
-          if (!target && op.title) {
-            /* 同类型同标题视为同一件事，更新而不是新建。 */
-            var normalizedTitle = op.title.replace(/\s+/g, '');
+          if (!target) {
+            /* 与 normalizeRecord 的标题规则一致，部分写入后重试也能命中原条目。 */
+            var title = op.title.replace(/[\r\n]+/g, ' ').trim().slice(0, 40) || op.content.trim().replace(/\s+/g, ' ').slice(0, 16);
+            var normalizedTitle = title.replace(/\s+/g, '');
             all.forEach(function (record) {
               if (!target && record.title.replace(/\s+/g, '') === normalizedTitle && (!op.type || record.type === op.type)) target = record;
             });
@@ -829,33 +703,29 @@
               content: op.content,
               keys: op.keys.length ? cleanKeys(target.keys.concat(op.keys)) : target.keys,
               importance: op.importance !== undefined ? op.importance : target.importance
-            });
+            }, assertCurrent);
             report.updated.push(updated.title);
             written += 1;
             continue;
           }
           if (op.op === 'update') { report.skipped += 1; continue; }
-          var record = normalizeRecord({ type: op.type || 'episode', title: op.title, content: op.content, keys: op.keys, importance: op.importance, source: source, origin: originLabel(), store: store }, store);
+          var record = normalizeRecord({ type: op.type || 'episode', title: op.title, content: op.content, keys: op.keys, importance: op.importance, source: 'agent', origin: originLabel(), store: store }, store);
           if (!record) { report.skipped += 1; continue; }
-          await put(record);
+          await put(record, assertCurrent);
           all.push(record);
           report.added.push(record.title);
           written += 1;
         } catch (error) {
           report.errors.push((op.title || op.id || '记忆') + '：' + String(error && error.message || error).slice(0, 160));
+          throw error;
         }
       }
     }
 
-    async function extractOnce(header, body, summary, source, report, signal) {
-      var existing = existingDigest((await listAll({ fresh: false })).filter(sameSide(source)), body);
-      var user = [
-        '【此前梗概】' + (summary || '无'),
-        '【已有记忆】（id｜类型｜标题｜摘要）',
-        existing.length ? existing.join('\n') : '（无）',
-        header,
-        body
-      ].join('\n');
+    async function extractOnce(body, report, signal, assertCurrent) {
+      var existing = existingDigest(await listAll(), body);
+      assertCurrent();
+      var user = ['【已有助手记忆】', existing.join('\n') || '（无）', '【用户与助手的交流】', body].join('\n');
       var text = await llm.chat({
         messages: [{ role: 'system', content: EXTRACT_SYSTEM }, { role: 'user', content: user }],
         route: 'memory',
@@ -871,156 +741,126 @@
       return parsed;
     }
 
-    /*
-     * 整理当前聊天里尚未处理的对话。options: { reason, force（连最近几条一起整理）, signal }
-     * 同一时刻只运行一份；中途切换聊天则丢弃结果，不会写进别的存档。
-     */
     function consolidate(options) {
-      if (running) return running;
+      var opts = options || {};
+      var key = kit.chatKey();
+      if (jobs.has(key)) return jobs.get(key);
+      var saved = history.read();
+      var turns = saved.turns.slice(saved.extracted);
+      var replies = turns.filter(function (turn) { return turn.role === 'assistant'; }).length;
+      var report = { ok: true, reason: opts.automatic ? 'agent-auto' : 'agent-manual', at: Date.now(), proposed: 0, added: [], updated: [], skipped: 0, errors: [], window: 0 };
+      if (!settings.enabled || !turns.some(function (turn) { return turn.role === 'user'; }) || !replies
+          || (opts.automatic && (!settings.agentExtract || replies < settings.agentEveryTurns))) {
+        report.note = settings.enabled ? '没有需要整理的助手交流' : '助手记忆已关闭';
+        return Promise.resolve(report);
+      }
+
+      function assertCurrent() {
+        if (kit.chatKey() !== key || !settings.enabled || (opts.automatic && !settings.agentExtract)) throw new Error('聊天或记忆设置已变更，本次整理已停止');
+        if (opts.signal && opts.signal.aborted) throw new Error('已取消');
+      }
+
       var job = (async function () {
-        var opts = options || {};
-        var report = { ok: true, reason: opts.reason || 'manual', at: Date.now(), store: targetStore(), proposed: 0, added: [], updated: [], skipped: 0, errors: [], window: 0 };
-        var key = kit.chatKey();
         try {
-          if (!settings.enabled) throw new Error('记忆系统已关闭');
-          var data = readChatData();
-          var pending = pendingWindow(data, opts.force === true);
-          if (!pending.messages.length) {
-            if (pending.upto > data.cursor.index) { data.cursor.index = pending.upto; writeChatData(data); }
-            report.note = '没有新的对话需要整理';
-            return report;
+          var index = 0;
+          while (index < turns.length) {
+            var start = index, batch = [], size = 0;
+            do {
+              var turn = turns[index];
+              var line = (turn.role === 'user' ? '真实用户' : '夜梦助手') + '：' + shorten(turn.text.trim(), Math.min(1600, Math.floor(settings.windowChars / 2) - 10));
+              if (size + line.length > settings.windowChars && batch.length) break;
+              size += line.length + 1;
+              batch.push(line);
+              index += 1;
+            } while (index < turns.length);
+
+            /* 模型调用、世界书读取和写操作期间，用户都可能编辑历史或切换聊天。 */
+            var batchTurns = turns.slice(start, index);
+            var assertBatchCurrent = function () {
+              assertCurrent();
+              var latest = history.read();
+              var first = latest.turns.findIndex(function (item) { return item.id === batchTurns[0].id; });
+              if (first < 0 || !batchTurns.every(function (item, offset) {
+                var live = latest.turns[first + offset];
+                return live && live.id === item.id && live.text === item.text && live.role === item.role;
+              })) throw new Error('助手对话已经变更，请重新整理');
+              return { history: latest, upto: first + batchTurns.length };
+            };
+            var extracted = await extractOnce(batch.join('\n'), report, opts.signal, assertBatchCurrent);
+            assertBatchCurrent();
+            await applyOps(extracted.ops, report, assertBatchCurrent);
+            var cursor = assertBatchCurrent();
+            var latest = cursor.history;
+            latest.extracted = Math.max(latest.extracted, cursor.upto);
+            try {
+              if (!await history.write(latest, { saveNow: true })) throw new Error('助手对话的整理进度保存失败');
+            } catch (error) {
+              /* 宿主先更新内存变量再异步存盘。失败时仅退回本批的游标，保留用户新消息。 */
+              if (kit.chatKey() === key) {
+                var live = history.read();
+                var head = live.turns.findIndex(function (item) { return item.id === batchTurns[0].id; });
+                if (head >= 0 && live.extracted === head + batchTurns.length) {
+                  live.extracted = head;
+                  history.write(live);
+                }
+              }
+              throw error;
+            }
+            report.window += batch.length;
           }
-          var names = kit.names();
-          var allBatches = buildBatches(pending.messages, names);
-          var batches = allBatches.slice(0, 3);
-          for (var index = 0; index < batches.length; index += 1) {
-            var batch = batches[index];
-            var parsed = await extractOnce('【待整理对话】（#楼层 发言者: 内容）', batch.lines.join('\n'), data.summary.text, 'story', report, opts.signal);
-            if (kit.chatKey() !== key) throw new Error('聊天已切换，这次整理的结果没有写入');
-            await applyOps(parsed.ops, 'story', report);
-            data = readChatData();
-            data.cursor.index = index === allBatches.length - 1 ? pending.upto : batch.end;
-            if (parsed.summary !== null && parsed.summary) data.summary = { text: parsed.summary, upto: data.cursor.index, at: Date.now() };
-            report.window += batch.lines.length;
-            writeChatData(data);
-          }
-          if (kit.chatLength() - settings.keepRecent > readChatData().cursor.index) report.note = '对话较长，剩余部分下次继续整理';
         } catch (error) {
           report.ok = false;
           report.error = String(error && error.message || error).slice(0, 300);
-          if (error && error.name === 'AbortError') report.error = '已取消';
         }
-        try {
-          if (kit.chatKey() === key) {
-            var latest = readChatData();
-            latest.last = { at: report.at, reason: report.reason, ok: report.ok, added: report.added.length, updated: report.updated.length, error: report.error || '', note: report.note || '' };
-            writeChatData(latest);
-          }
-        } catch (error) { /* 状态记录失败不影响结果 */ }
-        refreshInjection().catch(function () {});
-        emit('consolidated');
+        if (kit.chatKey() === key) {
+          var data = readChatData();
+          data.last = { at: report.at, reason: report.reason, ok: report.ok, added: report.added.length, updated: report.updated.length, error: report.error || '' };
+          writeChatData(data);
+        }
         return report;
-      })();
-      running = job;
-      job.then(function () { if (running === job) running = null; }, function () { if (running === job) running = null; });
+      })().finally(function () { jobs.delete(key); emit('consolidated'); });
+      jobs.set(key, job);
       return job;
     }
 
-    /* 把一段助手对话沉淀为记忆（情感 / 功能 / 用户偏好）。turns: [{role, text}] */
-    async function consolidateDialogue(turns, options) {
-      var report = { ok: true, reason: options && options.reason || 'agent', at: Date.now(), store: targetStore(), proposed: 0, added: [], updated: [], skipped: 0, errors: [], window: 0 };
-      try {
-        if (!settings.enabled) throw new Error('记忆系统已关闭');
-        var names = kit.names();
-        var lines = (Array.isArray(turns) ? turns : []).filter(function (turn) { return turn && typeof turn.text === 'string' && turn.text.trim(); })
-          .map(function (turn) { return (turn.role === 'assistant' ? '九十九夜梦' : names.user) + ': ' + shorten(turn.text.trim(), 1600); });
-        if (!lines.length) { report.note = '没有可整理的助手对话'; return report; }
-        var key = kit.chatKey();
-        var parsed = await extractOnce('【待整理对话】这是用户与助手九十九夜梦的对话；重点留意情感时刻、用户偏好，以及可复用的做法与结论。', lines.join('\n').slice(-settings.windowChars), '', 'agent', report, options && options.signal);
-        if (kit.chatKey() !== key) throw new Error('聊天已切换，这次整理的结果没有写入');
-        await applyOps(parsed.ops, 'agent', report);
-        report.window = lines.length;
-      } catch (error) {
-        report.ok = false;
-        report.error = String(error && error.message || error).slice(0, 300);
-      }
-      emit('consolidated');
-      return report;
-    }
-
-    /*
-     * 记忆随扩展全局加载，但「自动整理」（要调用模型）和「带入正文」默认只在用了 Reader-II 的聊天里进行：
-     * 卡内组件在聊天变量里留有 reader_ii_runtime（语义层）或 dream_persona（大厅设置）。
-     * 别的卡的聊天里，记忆只在用户或助手主动读写时才动。
-     */
-    function autoAllowed() {
-      if (settings.scope === 'all') return true;
-      try { return kit.readChatValue('reader_ii_runtime') !== undefined || kit.readChatValue('dream_persona') !== undefined; }
-      catch (error) { return false; }
-    }
-
-    function autoCheck() {
-      if (!settings.enabled || !settings.autoExtract || running || generating || !autoAllowed()) return;
-      if (settings.everyTurns <= 0 && settings.everyChars <= 0) return;
-      var pending;
-      try { pending = pendingWindow(readChatData(), false); } catch (error) { return; }
-      var byTurns = settings.everyTurns > 0 && pending.turns >= settings.everyTurns;
-      var byChars = settings.everyChars > 0 && pending.chars >= settings.everyChars;
-      if (!byTurns && !byChars) return;
-      consolidate({ reason: 'auto' }).then(function (report) {
-        if (!report.ok) log('自动整理失败', report.error);
-      });
-    }
-
-    function scheduleAuto(delayMs) {
-      if (autoTimer) clearTimeout(autoTimer);
-      autoTimer = setTimeout(function () { autoTimer = null; autoCheck(); }, delayMs);
-    }
-
-    function repairCursor() {
-      try {
-        var data = readChatData();
-        var length = kit.chatLength();
-        if (data.cursor.index > length) { data.cursor.index = length; writeChatData(data); }
-      } catch (error) { /* 没有打开聊天 */ }
+    function sharingAllowed() {
+      var core = env.host && env.host.ReaderCore;
+      if (core && typeof core.isEnabled === 'function') return core.isEnabled();
+      return kit.readChatValue('reader_ii_runtime') !== undefined || kit.readChatValue('dream_persona') !== undefined;
     }
 
     async function status() {
       var data = readChatData();
-      var pending = pendingWindow(data, false);
+      var saved = history.read();
+      var pending = saved.turns.slice(saved.extracted);
       var book = findOceanBook();
       var ocean = [];
-      try { ocean = await oceanRecords(false); } catch (error) { ocean = []; }
+      try { ocean = await oceanRecords(false); } catch (error) { /* 仍可显示聊天库 */ }
       return {
-        enabled: settings.enabled,
-        store: targetStore(),
-        chatOverride: data.cfg.store || '',
-        chatCount: Object.keys(data.items).length,
-        oceanCount: ocean.length,
-        oceanBook: book || settings.oceanBook,
-        oceanExists: !!book,
-        oceanNative: oceanNative(),
-        pending: { turns: pending.turns, chars: pending.chars, from: pending.from, upto: pending.upto },
-        thresholds: { turns: settings.everyTurns, chars: settings.everyChars, auto: settings.autoExtract && (settings.everyTurns > 0 || settings.everyChars > 0) },
-        summary: data.summary.text,
-        last: data.last,
-        running: !!running
+        enabled: settings.enabled, store: targetStore(), chatOverride: data.cfg.store || '',
+        chatCount: Object.keys(data.items).length, oceanCount: ocean.length,
+        oceanBook: book || settings.oceanBook, oceanExists: !!book,
+        pending: { turns: pending.filter(function (turn) { return turn.role === 'assistant'; }).length },
+        last: data.last, running: jobs.has(kit.chatKey())
       };
     }
 
     async function exportAll() {
-      return { v: 1, kind: 'reader-ii-memory', exportedAt: new Date().toISOString(), summary: readChatData().summary.text, items: await listAll({ fresh: true }) };
+      return { v: MEMORY_VERSION, kind: 'reader-ii-memory', exportedAt: new Date().toISOString(), items: await listAll({ fresh: true }) };
     }
 
     async function importAll(payload, options) {
       var source = typeof payload === 'string' ? JSON.parse(payload) : payload;
-      var items = modules.isObject(source) && Array.isArray(source.items) ? source.items : Array.isArray(source) ? source : null;
-      if (!items) throw new Error('导入内容不是记忆导出文件');
+      if (!modules.isObject(source) || source.kind !== 'reader-ii-memory' || source.v !== MEMORY_VERSION || !Array.isArray(source.items)) {
+        throw new Error('请选择新版助手记忆导出文件（v' + MEMORY_VERSION + '）');
+      }
+      var items = source.items;
       var store = options && (options.store === 'ocean' || options.store === 'chat') ? options.store : targetStore();
       var existing = await listAll({ fresh: true });
       var report = { added: 0, skipped: 0, errors: [] };
       for (var index = 0; index < items.length && index < 2000; index += 1) {
-        var record = normalizeRecord(Object.assign({}, items[index], { id: undefined, uid: undefined, store: store, source: 'import', owner: ownerOf(modules.isObject(items[index]) ? items[index] : {}) }), store);
+        if (!modules.isObject(items[index]) || ownerOf(items[index]) !== 'agent' || items[index].source === 'story') { report.skipped += 1; continue; }
+        var record = normalizeRecord(Object.assign({}, items[index], { id: undefined, uid: undefined, store: store, source: 'import', owner: 'agent' }), store);
         if (!record) { report.skipped += 1; continue; }
         var duplicate = existing.some(function (item) { return item.type === record.type && item.title === record.title && item.content === record.content; });
         if (duplicate) { report.skipped += 1; continue; }
@@ -1032,59 +872,42 @@
       return report;
     }
 
-    function setSummary(text) {
-      var data = readChatData();
-      data.summary = { text: String(text || '').trim().slice(0, 1200), upto: data.cursor.index, at: Date.now() };
-      writeChatData(data);
-      refreshInjection().catch(function () {});
-      emit('changed');
-      return data.summary.text;
-    }
-
-    function resetCursor(index) {
-      var data = readChatData();
-      data.cursor.index = clampInt(index, 0, kit.chatLength(), 0);
-      writeChatData(data);
-      emit('changed');
-      return data.cursor.index;
-    }
-
     var installed = false;
+    var subscriptions = [];
+    function listen(event, handler) {
+      var subscription = kit.on(event, handler);
+      if (subscription && typeof subscription.stop === 'function') subscriptions.push(subscription);
+    }
+
     function install() {
       if (installed) return;
       installed = true;
-      kit.on('GENERATION_STARTED', function () { generating = true; });
-      ['GENERATION_ENDED', 'GENERATION_STOPPED'].forEach(function (name) {
-        kit.on(name, function () { generating = false; scheduleAuto(2500); });
-      });
-      kit.on('MESSAGE_RECEIVED', function () { scheduleAuto(4000); });
-      ['MESSAGE_DELETED', 'MESSAGE_SWIPED', 'MESSAGE_EDITED', 'MESSAGE_UPDATED'].forEach(function (name) {
-        kit.on(name, function () { repairCursor(); refreshInjection().catch(function () {}); });
-      });
-      kit.on('CHAT_CHANGED', function () {
-        generating = false;
+      startOceanMigration();
+      listen('CHAT_CHANGED', function () {
         oceanCache.records = null;
         lastInjection = { key: '', text: '' };
-        repairCursor();
         refreshInjection().catch(function () {});
         emit('chat');
+        return scanOceanBooks(true, false);
       });
-      /* 酒馆会等待这个事件的监听器，注入因此赶得上本轮提示词。 */
-      kit.on('GENERATION_AFTER_COMMANDS', function (type, generationOptions, dryRun) {
-        if (dryRun) return undefined;
-        return refreshInjection();
+      listen('GENERATION_AFTER_COMMANDS', async function (type, generationOptions, dryRun) {
+        if (dryRun) return;
+        await scanOceanBooks(true, false);
+        if (installed) await refreshInjection();
       });
-      kit.on('WORLDINFO_UPDATED', function () { oceanCache.records = null; });
+      listen('WORLDINFO_UPDATED', function (book) {
+        oceanCache.records = null;
+        if (typeof book === 'string') checkedBooks.delete(book);
+        else checkedBooks.clear();
+      });
       refreshInjection().catch(function () {});
-      /* 旧版写进《夜之洋》的助手记忆是启用的；按 unify 校正一次（没有要改的就不写）。 */
-      setTimeout(function () {
-        syncOceanVisibility().catch(function (error) { log('同步《夜之洋》里助手记忆的开关失败', error); });
-      }, 3000);
     }
 
     async function dispose() {
-      if (autoTimer) clearTimeout(autoTimer);
-      autoTimer = null;
+      installed = false;
+      subscriptions.splice(0).forEach(function (subscription) { subscription.stop(); });
+      ++injectionRevision;
+      await injectionWrite;
       try { await kit.uninject([INJECT_ID]); } catch (error) { /* best-effort */ }
     }
 
@@ -1108,12 +931,9 @@
       buildInjection: buildInjection,
       refreshInjection: refreshInjection,
       consolidate: consolidate,
-      consolidateDialogue: consolidateDialogue,
       status: status,
       exportAll: exportAll,
       importAll: importAll,
-      setSummary: setSummary,
-      resetCursor: resetCursor,
       ensureOceanBook: ensureOceanBook,
       syncOceanVisibility: syncOceanVisibility,
       unifyLine: UNIFY_LINE,

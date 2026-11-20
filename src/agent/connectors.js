@@ -29,9 +29,96 @@
     return { value: current, owner: owner };
   }
 
-  function shorten(text, limit) {
-    var source = String(text == null ? '' : text).trim();
-    return source.length > limit ? source.slice(0, limit) + '…（已截断）' : source;
+  var PLOT_ORDER = ['baibai', 'shujuku', 'lwb', 'worldengine'];
+
+  function clipBrief(text, budget) {
+    var source = String(text || '').trim();
+    return source.length > budget ? source.slice(0, budget - 1) + '…' : source;
+  }
+
+  // The database exports merged sheets with a header row. Its history-context API
+  // returns chat/isolation identifiers, not the table contents.
+  function databaseBrief(tables, budget) {
+    if (typeof tables === 'string') tables = JSON.parse(tables);
+    var sheets = Object.keys(tables || {}).filter(function (key) { return key.startsWith('sheet_'); })
+      .map(function (key) { return tables[key]; })
+      .filter(function (sheet) { return sheet && Array.isArray(sheet.content) && sheet.content.length > 1; });
+    function priority(sheet) { return /大纲|总结|纪要|剧情|事件/.test(sheet.name) ? 0 : 1; }
+    sheets.sort(function (a, b) { return priority(a) - priority(b) || (a.orderNo || 0) - (b.orderNo || 0); });
+    var parts = [], size = 0;
+    for (var sheet of sheets) {
+      var lines = [], rows = sheet.content, header = rows[0] || [];
+      // Recent rows first when a long chronology exceeds the budget.
+      for (var i = rows.length - 1; i > 0 && size < budget; i--) {
+        if (!Array.isArray(rows[i])) continue;
+        var line = rows[i].map(function (cell, column) {
+          if (!header[column] || cell == null || !String(cell).trim()) return '';
+          return header[column] + '：' + cell;
+        }).filter(Boolean).join('，');
+        if (line) { lines.push(line); size += line.length + 1; }
+      }
+      if (lines.length) parts.push('【' + String(sheet.name || '表格') + '】\n' + lines.join('\n'));
+      if (size >= budget) break;
+    }
+    return parts.join('\n');
+  }
+
+  // LittleWhiteBox 3.x stores its finished plot summary on this chat. Its live
+  // injection slot is transient and has no chat ID. Reading the stored projection
+  // avoids a generation hook, an extra copy of the story, and vector/LLM calls.
+  function lwbBrief(ctx, budget) {
+    var settings = ctx.extensionSettings || {};
+    var pluginSettings = settings.LittleWhiteBox || {};
+    var owner = ctx.chatMetadata && ctx.chatMetadata.extensions && ctx.chatMetadata.extensions.LittleWhiteBox;
+    if (!owner || owner.storySummaryEnabled === false || pluginSettings.storySummary && pluginSettings.storySummary.enabled === false ||
+        (settings.disabledExtensions || []).some(function (name) { return /(?:^|\/)LittleWhiteBox$/i.test(name); })) return '';
+    var store = owner.storySummary;
+    if (!store || store.summaryInvalid || store.sourceInvalidFromFloor != null || store.sourceRollbackFromFloor != null || !store.json) return '';
+    var data = store.json, parts = [], size = 0;
+    function add(lines, format) {
+      if (!Array.isArray(lines)) return;
+      for (var i = lines.length - 1; i >= 0 && size < budget; i--) {
+        if (!lines[i]) continue;
+        var line = format(lines[i]);
+        if (line) { parts.push(line); size += line.length + 1; }
+      }
+    }
+    add(data.events, function (event) { return [event.timeLabel, event.title, event.summary].filter(Boolean).join(' · '); });
+    add(data.facts, function (fact) { return fact.retracted ? '' : [fact.s, fact.p, fact.o].filter(Boolean).join(' '); });
+    add(data.arcs, function (arc) {
+      var moments = (arc.moments || []).map(function (m) { return typeof m === 'string' ? m : m && m.text; }).filter(Boolean);
+      return [arc.name, moments.length ? moments.join(' → ') : arc.trajectory].filter(Boolean).join('：');
+    });
+    return parts.join('\n');
+  }
+
+  function worldBrief(api, budget) {
+    if (typeof api.hasState === 'function' && !api.hasState()) return '';
+    var state = api.loadState();
+    if (!state || typeof state !== 'object') return '';
+    var parts = [];
+    var size = 0;
+    function append(text) {
+      if (!text || size >= budget) return;
+      var line = clipBrief(text, budget - size);
+      parts.push(line);
+      size += line.length + 1;
+    }
+    if (state.worldDigest !== '世界正在苏醒，一切尚未可知。') append(state.worldDigest);
+    // Some versions merge connection and evolution settings into loadState().
+    // Summary arrays already start at the newest entry. Read only narrative text.
+    for (var key of ['volumeSummaries', 'chapterSummaries', 'events', 'plotThreads', 'memories', 'factions', 'rumors']) {
+      if (!Array.isArray(state[key])) continue;
+      for (var entry of state[key]) {
+        if (size >= budget) break;
+        if (!entry) continue;
+        if (typeof entry === 'string') append(entry);
+        else append([entry.title || entry.name, entry.summary || entry.content || entry.text || entry.description, entry.stage, entry.goal]
+          .filter(function (part) { return typeof part === 'string' && part.trim(); }).join(' · '));
+      }
+    }
+    append(state.worldDescription);
+    return parts.join('\n');
   }
 
   function fromManifest(host, manifest) {
@@ -85,7 +172,8 @@
 
     list.push({
       id: 'lwb', title: '小白X（LittleWhiteBox）', summary: '变量存在聊天变量里（var:/chat.json）；写入请用 lwb_state_apply，让它的楼层账本与校验保持一致',
-      detect: function () { return !!(host.LittleWhiteBox || host.LWB_StateV2); }, skill: 'lwb-variables',
+      detect: function () { return !!(host.LittleWhiteBox || host.LWB_StateV2 || host.xiaobaixGenerateInterceptor); }, skill: 'lwb-variables',
+      brief: function (options) { return lwbBrief(kit.context() || {}, options.budget); },
       tools: [{
         name: 'lwb_state_apply', effect: 'write', scope: 'chat', paths: function () { return ['var:/chat.json']; },
         summary: '按小白X「变量 2.0」的 <state> 写法修改变量，例如 <state>数据.角色.金币: +10</state>。会经过它的模板与约束校验。',
@@ -105,18 +193,26 @@
 
     list.push({
       id: 'baibai', title: '柏宝书（记忆）', summary: '按楼层整理的剧情摘要、状态、人物、物品、计划',
-      detect: function () { return !!(host.STBaiBaiBook && typeof host.STBaiBaiBook.getSnapshot === 'function'); },
+      detect: function () { var api = host.STBaiBaiBook; return !!(api && (api.getHistory || api.getInjectedHistory || api.getSnapshot)); },
       brief: async function (options) {
-        var api = host.STBaiBaiBook, parts = [];
+        var api = host.STBaiBaiBook, parts = [], text = '';
+        // getInjectedHistory excludes the visible window. Reader has no raw story
+        // transcript in this request, so include recent valid summaries when available.
+        for (var method of ['getHistory', 'getInjectedHistory']) {
+          if (typeof api[method] !== 'function') continue;
+          try {
+            var history = method === 'getHistory' ? await api.getHistory({}) : await api.getInjectedHistory();
+            text = String(history && (history.relativeText || history.text) || '').trim();
+            if (text) break;
+          } catch (error) { /* 下一种只读查询 */ }
+        }
         try {
-          var history = api.getInjectedHistory ? api.getInjectedHistory() : api.getHistory({});
-          if (history && (history.relativeText || history.text)) parts.push(shorten(history.relativeText || history.text, options.budget));
-        } catch (error) { /* 没有摘要 */ }
-        try {
-          var snapshot = api.getSnapshot();
+          var snapshot = api.getSnapshot && await api.getSnapshot();
           var state = snapshot && snapshot.state || {};
           if (state.time || state.location) parts.push('现在：' + [state.time, state.location].filter(Boolean).join('，'));
         } catch (error) { /* ignore */ }
+        var remaining = options.budget - (parts[0] || '').length - 1;
+        if (text && remaining > 1) parts.push(text.length > remaining ? '…' + text.slice(1 - remaining) : text);
         return parts.join('\n');
       },
       tools: [{
@@ -135,13 +231,7 @@
       id: 'shujuku', title: '数据库（shujuku / 龙血玄黄）', summary: '表格式记忆：人物、物品、事件等表',
       detect: function () { return !!(host.AutoCardUpdaterAPI && typeof host.AutoCardUpdaterAPI.exportTableAsJson === 'function'); },
       brief: async function (options) {
-        var api = host.AutoCardUpdaterAPI;
-        try {
-          var context = typeof api.getTableHistoryContext === 'function' ? await api.getTableHistoryContext() : '';
-          if (typeof context === 'string' && context.trim()) return shorten(context, options.budget);
-        } catch (error) { /* fall through */ }
-        var tables = await api.exportTableAsJson();
-        return shorten(typeof tables === 'string' ? tables : JSON.stringify(tables), options.budget);
+        return databaseBrief(await host.AutoCardUpdaterAPI.exportTableAsJson(), options.budget);
       },
       tools: [{
         name: 'shujuku_tables', effect: 'read', scope: 'chat', summary: '导出数据库当前的全部表格（JSON）。', params: [],
@@ -159,6 +249,12 @@
         params: [{ name: 'table', type: 'string', required: true }, { name: 'row', type: 'number', required: true }],
         run: async function (args) { return host.AutoCardUpdaterAPI.deleteRow(args.table, args.row); }
       }]
+    });
+
+    list.push({
+      id: 'worldengine', title: '世界引擎（World Engine）', summary: '当前聊天的后台世界状态、事件与剧情线',
+      detect: function () { return !!(host.WORLD_ENGINE_CORE && typeof host.WORLD_ENGINE_CORE.loadState === 'function'); },
+      brief: function (options) { return worldBrief(host.WORLD_ENGINE_CORE, options.budget); }
     });
 
     list.push({
@@ -230,19 +326,31 @@
       return active;
     }
 
-    /* 剧情察知用：取第一个给得出摘要的记忆类插件。 */
+    function plotSources() {
+      return all().filter(function (item) { return typeof item.brief === 'function'; }).map(function (item) {
+        return { id: item.id, title: item.title };
+      });
+    }
+
     async function brief(options) {
-      for (var index = 0; index < active.length; index += 1) {
-        if (typeof active[index].brief !== 'function') continue;
+      var source = options.source, budget = options.budget;
+      var chat = kit.chatKey();
+      if (!source || !kit.names().chat) return null;
+      // Auto uses verified read-only sources. Custom connectors are opt-in.
+      var ids = source === 'auto' ? PLOT_ORDER : [source];
+      for (var id of ids) {
+        var connector = active.find(function (item) { return item.id === id; });
+        if (!connector || typeof connector.brief !== 'function') continue;
         try {
-          var text = await active[index].brief(options || { budget: 1500 });
-          if (text && String(text).trim()) return { source: active[index].title, text: String(text).trim() };
-        } catch (error) { /* 换下一个 */ }
+          var text = clipBrief(await connector.brief({ budget: budget }), budget);
+          if (kit.chatKey() !== chat) return null;
+          if (text) return { source: connector.title, text: text };
+        } catch (error) { if (kit.chatKey() !== chat) return null; }
       }
       return null;
     }
 
-    return { refresh: refresh, active: function () { return active.slice(); }, brief: brief, validate: function (manifest) { return fromManifest(env.host, manifest); } };
+    return { refresh: refresh, active: function () { return active.slice(); }, plotSources: plotSources, brief: brief, validate: function (manifest) { return fromManifest(env.host, manifest); } };
   }
 
   modules.installConnectors = installConnectors;

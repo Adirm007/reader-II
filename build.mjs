@@ -40,7 +40,7 @@ export const CORE_MODULES = [
   ASSETS_MODULE, PROMPTS_MODULE, 'src/reader-shell.js', 'src/reader-prompt-placement.js', 'src/reader-prompt.js', 'src/reader-core.js',
 ];
 export const AGENT_MODULES = [
-  'src/reader-memory.js', 'src/reader-agent-preset.js',
+  'src/reader-memory.js',
   'src/agent/store.js', 'src/agent/protocol.js', 'src/agent/permissions.js', 'src/agent/vfs.js', 'src/agent/providers.js', 'src/agent/tools.js',
   'src/agent/net.js', 'src/agent/web.js', 'src/agent/device.js', 'src/agent/mcp.js', 'src/agent/connectors.js', 'src/agent/skills.js',
   'src/agent/legacy-tools.js', 'src/agent/personas.js', 'src/agent/agent.js', 'src/agent/updates.js',

@@ -186,6 +186,12 @@
       var templates = modules.READER_PROMPT_TEMPLATES;
       if (!enabled() || !templates) return output;
       var bridge = locals(generationType);
+      // 只向正文模板开放当前人格的改写，助手专用系统提示词留在助手的请求内。
+      bridge.getPersonaPrompt = function (id) {
+        var agent = host.ReaderII && host.ReaderII.agent;
+        var value = agent && agent.personaContext(id).override;
+        return value ? '\n' + value + '\n' : '';
+      };
       var ctx = context();
       /* 顺序同原世界书：核心在前（它会写「系统名」等聊天变量），再是更新规则与变量列表。 */
       for (var index = 0; index < PROMPTS.length; index += 1) {

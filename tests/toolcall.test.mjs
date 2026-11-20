@@ -113,6 +113,11 @@ function makeHost(options = {}) {
     fetch: async (url, init = {}) => {
       if (url === BACKEND) {
         const body = JSON.parse(init.body);
+        if (!body.tools && options.text) {
+          const config = { ordered_prompts: body.messages, custom_api: { model: body.model } };
+          log.text.push(clone({ prompts: body.messages, custom_api: config.custom_api }));
+          return Response.json(reply({ content: await options.text(config, log.text.length) }));
+        }
         log.backend.push({ body, headers: init.headers });
         if (!options.backend) throw new Error('这个测试不该请求酒馆后端');
         const answer = options.backend(body, log.backend.length);
@@ -195,56 +200,43 @@ test('历史轮数为零时不会把之前的聊天带入下一次请求', async
   same(log.backend.at(-1).body.messages.slice(1), [{ role: 'user', content: '本次新问题' }]);
 });
 
-test('默认隔离，开启后按当前预设顺序注入角色与宏；整轮复用，切换预设和关闭均从下一次生效', async () => {
-  const { run, agent, ctx, log } = makeHost({ settings: { historyTurns: 0 }, backend: (body, turn) => {
-    if (turn === 2) return reply({ tool_calls: [nativeCall('read', { path: 'wb:/设定集/王都' })] });
-    return reply({ content: '完成。' });
-  } });
-  const preset = label => ({
-    prompts: [
-      { identifier: 'one', role: 'system', content: label + '/{{char}}' },
-      { identifier: 'off', role: 'system', content: 'DISABLED' },
-      { identifier: 'chatHistory', marker: true },
-      { identifier: 'late', role: 'user', content: 'LATE' },
-    ],
-    prompt_order: [{ character_id: 100001, order: ['one', 'off', 'chatHistory', 'late'].map(identifier => ({ identifier, enabled: identifier !== 'off' })) }],
-  });
-  let expansions = 0;
-  ctx.substituteParams = (content, user, persona) => {
-    expansions++; assert.ok(user && persona);
-    return content.replace('{{char}}', persona);
-  };
-  ctx.chatCompletionSettings = preset('PRESET_A');
-  assert.equal(agent.getSettings().useAssistantPreset, false);
+test('旧预设开关失效，当前人格和助手专用文本随请求和工具续轮发送', async () => {
+  const { run, agent, ctx, log } = makeHost({ settings: { historyTurns: 0, useAssistantPreset: true }, backend: (body, turn) =>
+    turn === 1 ? reply({ tool_calls: [nativeCall('read', { path: 'wb:/设定集/王都' })] }) : reply({ content: '完成。' }) });
+  ctx.substituteParams = () => assert.fail('助手不应展开预设宏');
+  ctx.chatCompletionSettings = { prompts: [{ role: 'system', content: 'STORY_PRESET' }] };
+  agent.saveSettings({ personaPrompts: { reader: 'READER_PERSONA', genki: 'GENKI_PERSONA', 'custom:id-a': 'CUSTOM_A' }, assistantSystemPrompt: 'AGENT_ONLY {{literal}}' });
+  assert.equal(agent.getSettings().useAssistantPreset, undefined);
+  assert.match(agent.personaContext().defaultPrompt, /开场白/);
   await run('第一轮');
-  assert.equal(expansions, 0);
-  agent.saveSettings({ useAssistantPreset: true });
+  assert.equal(log.backend.length, 2);
+  for (const entry of log.backend) {
+    assert.match(entry.body.messages[0].content, /READER_PERSONA/);
+    assert.match(entry.body.messages[0].content, /AGENT_ONLY \{\{literal\}\}/);
+    assert.doesNotMatch(JSON.stringify(entry.body.messages), /STORY_PRESET|GENKI_PERSONA/);
+  }
+  ctx.chatMetadata.variables.dream_persona = 'genki';
   await run('第二轮');
-  assert.equal(expansions, 2);
-  assert.deepEqual(log.backend[1].body.messages.map(m => m.role), ['system', 'system', 'user', 'user']);
-  assert.match(log.backend[1].body.messages[1].content, /^PRESET_A\/[^{}]+$/);
-  assert.equal(log.backend[1].body.messages.at(-1).content, 'LATE');
-  assert.deepEqual(log.backend[2].body.messages.slice(-2).map(m => m.role), ['assistant', 'tool']);
-  ctx.chatCompletionSettings = preset('PRESET_B');
-  await run('第三轮');
-  assert.match(log.backend[3].body.messages[1].content, /^PRESET_B\//);
-  agent.saveSettings({ useAssistantPreset: false });
-  await run('第四轮');
-  assert.equal(expansions, 4);
-  assert.ok(!JSON.stringify(log.backend[4]).includes('PRESET_'));
-  assert.ok(log.backend.every(entry => !JSON.stringify(entry).includes('DISABLED')));
+  assert.match(log.backend[2].body.messages[0].content, /GENKI_PERSONA/);
+  assert.doesNotMatch(log.backend[2].body.messages[0].content, /READER_PERSONA/);
+  ctx.chatMetadata.variables.dream_persona = 'custom';
+  ctx.chatMetadata.variables.dream_custom_persona = JSON.stringify({ id: 'id-a', name: '同名人格' });
+  assert.equal(agent.personaContext().card, 'CUSTOM_A');
+  ctx.chatMetadata.variables.dream_custom_persona = { id: 'id-b', name: '同名人格' };
+  assert.equal(agent.personaContext().override, '');
 });
 
-test('文本补全系统预设可用于轻聊，适配 JSON 保持隔离', async () => {
-  const sample = makeHost({ preset: null, settings: { useAssistantPreset: true }, text: () => '收到。' });
+test('文本补全轻聊只发送所选人格和助手专用系统指令；适配、整理均不读这些指令', async () => {
+  const sample = makeHost({ preset: null, settings: { useAssistantPreset: true, assistantSystemPrompt: 'AGENT_ONLY' }, text: () => '收到。' });
   sample.ctx.mainApi = 'textgenerationwebui';
   sample.ctx.powerUserSettings = { sysprompt: { enabled: true, content: 'STORY_SYSTEM', post_history: 'STORY_POST' } };
   await sample.run('你好', { lite: true });
-  const messages = sample.log.text[0].prompts;
-  assert.ok(messages.some(m => m.content.includes('STORY_SYSTEM')));
-  assert.ok(messages.some(m => m.content.includes('STORY_POST')));
-  await sample.llm.generate({ userInput: 'JSON', route: 'adapt' });
-  assert.ok(!JSON.stringify(sample.log.text[1]).includes('STORY_'));
+  assert.match(sample.log.text[0].prompts[0].content, /AGENT_ONLY/);
+  assert.doesNotMatch(JSON.stringify(sample.log.text[0]), /STORY_/);
+  for (const route of ['adapt', 'memory']) {
+    await sample.llm.generate({ userInput: 'JSON', route });
+    assert.doesNotMatch(JSON.stringify(sample.log.text.at(-1)), /AGENT_ONLY|STORY_/);
+  }
 });
 
 test('原生函数调用：tools 随请求声明，调用取自 tool_calls，结果用 role: tool 交还；读 → 改（确认）→ 回答', async () => {
@@ -531,7 +523,7 @@ test('酒馆预设消费展示用的 tool_calls 时，助手按原始响应执�
     same(transcript.find(msg => msg.role === 'assistant').tool_calls, calls);
     same(transcript.filter(msg => msg.role === 'tool').map(msg => msg.tool_call_id), calls.map(call => call.id));
     if (via === 'openai') {
-      assert.equal(log.backend[0].body.preset_hook, 'applied');
+      assert.equal(log.backend[0].body.preset_hook, undefined);
       assert.equal(log.backend[0].body.model, 'fixture-model');
       assert.equal(log.backend[0].body.temperature, settings.temperature);
     }

@@ -764,8 +764,8 @@
 
     /* ---------- mem:/ 记忆 ---------- */
     /*
-     * mem:/chat/ 当前聊天的记忆 · mem:/ocean/ 《夜之洋》 · mem:/summary.md 前情梗概 · mem:/settings.json 记忆设置（只读）
-     * 每条记忆：<标题>.md 是正文，<标题>.meta.json 是类型、触发词、重要度、常驻、开关、归属。写一个不存在的 <标题>.md 就是新建。
+     * mem:/chat/ 当前聊天的记忆 · mem:/ocean/ 《夜之洋》 · mem:/settings.json 记忆设置（只读）
+     * 每条记忆：<标题>.md 是正文，<标题>.meta.json 是类型、触发词、重要度、常驻和开关。写一个不存在的 <标题>.md 就是新建。
      * 与 memory 工具箱读写的是同一份数据；范围按 chat 算，和 memory_save 一致。
      */
     var memory = deps.memory;
@@ -806,7 +806,7 @@
 
     vfs.mount({
       id: 'mem', title: '记忆（夜之洋）',
-      hint: 'mem:/chat|ocean/<标题>.md 正文 · <标题>.meta.json 类型、触发词、重要度、常驻、归属（owner：story 正文的 | agent 你自己的）；写一个新标题就是新记一条；mem:/summary.md 前情梗概',
+      hint: 'mem:/chat|ocean/<标题>.md 用户与助手的交流记忆 · <标题>.meta.json 类型、触发词、重要度、常驻；写一个新标题保存一条交流记忆',
       scope: function () { return 'chat'; },
       list: async function (segs, options) {
         if (!segs.length) {
@@ -814,11 +814,10 @@
           return page([
             { name: 'chat', dir: true, note: '当前聊天的记忆 ' + status.chatCount + ' 条' },
             { name: 'ocean', dir: true, note: '《' + status.oceanBook + '》' + status.oceanCount + ' 条（跨存档）' },
-            { name: 'summary.md', size: String(status.summary || '').length, note: '前情梗概' },
             { name: 'settings.json', note: '记忆设置（只读；改设置请让用户在面板里改）' }
           ], options);
         }
-        if (segs[0] !== 'chat' && segs[0] !== 'ocean') throw new Error('mem:/ 下只有 chat/、ocean/、summary.md、settings.json');
+        if (segs[0] !== 'chat' && segs[0] !== 'ocean') throw new Error('mem:/ 下只有 chat/、ocean/、settings.json');
         var records = await memRecords(segs[0]);
         var names = uniqueNames(records, memTitle, memId);
         var items = [];
@@ -829,7 +828,6 @@
         return page(items, options);
       },
       read: async function (segs) {
-        if (segs[0] === 'summary.md' && segs.length === 1) return String((await memoryApi().status()).summary || '');
         if (segs[0] === 'settings.json' && segs.length === 1) return JSON.stringify(memoryApi().getSettings(), null, 1);
         var hit = await locateMemory(segs);
         if (!hit || !hit.record) return null;
@@ -837,7 +835,6 @@
       },
       write: async function (segs, text) {
         var api = memoryApi();
-        if (segs[0] === 'summary.md' && segs.length === 1) { api.setSummary(text); return; }
         if (segs[0] === 'settings.json') throw new Error('记忆设置是只读的：请用户在面板的设置页里改');
         var hit = await locateMemory(segs);
         if (!hit) throw new Error('路径要写成 mem:/chat/<标题>.md 或 mem:/ocean/<标题>.md');
@@ -867,7 +864,6 @@
           var names = uniqueNames(records, memTitle, memId);
           records.forEach(function (record, at) { output.push({ path: 'mem:/' + stores[index] + '/' + enc(names[at]) + '.md', text: record.content }); });
         }
-        if (!segs.length) output.push({ path: 'mem:/summary.md', text: String((await memoryApi().status()).summary || '') });
         return output;
       }
     });

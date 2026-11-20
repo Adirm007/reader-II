@@ -387,17 +387,19 @@ test('VFS：cards:/ 别的角色卡（含浅卡补全）、mem:/ 记忆', async 
   assert.equal(vfs.scope('cards:/雷恩/description.md', 'write'), 'tavern');
   await vfs.write('cards:/雷恩/description.md', '王都守卫队长', null);
   assert.equal(ctx.characters[1].data.description, '王都守卫队长');
-  await vfs.write('mem:/chat/王都人口.md', '王都人口十万。', null);
+  await vfs.write('mem:/chat/偏爱简答.md', '用户喜欢简洁的回答。', null);
   const [record] = await api.memory.list({ store: 'chat' });
-  assert.equal(record.title, '王都人口');
+  assert.equal(record.title, '偏爱简答');
   assert.equal(record.owner, 'agent');
-  await vfs.write('mem:/chat/王都人口.meta.json', JSON.stringify({ owner: 'story', keys: ['王都'] }), null);
-  const meta = JSON.parse(await vfs.readText('mem:/chat/王都人口.meta.json'));
-  assert.equal(meta.owner, 'story');
-  same(meta.keys, ['王都']);
+  await assert.rejects(vfs.write('mem:/chat/偏爱简答.meta.json', JSON.stringify({ owner: 'story' }), null), /助手交流/);
+  await vfs.write('mem:/chat/偏爱简答.meta.json', JSON.stringify({ keys: ['简洁'] }), null);
+  const meta = JSON.parse(await vfs.readText('mem:/chat/偏爱简答.meta.json'));
+  assert.equal(meta.owner, 'agent');
+  same(meta.keys, ['简洁']);
   assert.equal(vfs.scope('mem:/ocean/x.md', 'write'), 'chat');
-  assert.match(JSON.stringify(await vfs.grep('mem:/', '十万', {})), /mem:\/chat\/王都人口\.md/);
-  await vfs.remove('mem:/chat/王都人口.md', null);
+  assert.match(JSON.stringify(await vfs.grep('mem:/', '简洁', {})), /mem:\/chat\/偏爱简答\.md/);
+  assert.equal((await vfs.list('mem:/', {})).items.some(item => item.name === 'summary.md'), false);
+  await vfs.remove('mem:/chat/偏爱简答.md', null);
   same(await api.memory.list({ store: 'chat' }), []);
 });
 
@@ -450,8 +452,7 @@ test('主循环：读 → 改（确认）→ 回答，随后整轮撤销', async
   const system = llmCalls[0][0].content;
   assert.match(system, /【核心工具】/);
   assert.match(system, /【工具箱】/);
-  assert.match(system, /【当前剧情】/);
-  assert.match(system, /艾琳放下了手里的杯子/);
+  assert.doesNotMatch(system, /【当前剧情】|艾琳放下了手里的杯子/);
   assert.ok(!/fp_adjust/.test(system), '没打开的工具箱不该出现在提示词里');
   assert.match(llmCalls[1].at(-1).content, /<action_result name="read" status="ok">/);
 
@@ -650,7 +651,7 @@ test('双方旧消息可编辑，保留工具记录与长原文，下一轮模�
   assert.equal(saves, 2);
   assert.equal(llmCalls.length, 0);
   same(vars.chat.reader_ii_agent.turns.map(t => t.id), [user.id, ai.id]);
-  assert.equal(vars.chat.reader_ii_agent.extracted, 1);
+  assert.equal(vars.chat.reader_ii_agent.extracted, 2, '旧聊天整段保留在新整理游标之前');
   const run = await agent.run('继续', { lite: true });
   assert.equal(run.answer, '继续。');
   assert.equal(llmCalls[0].find(t => t.role === 'user').content, '修订的问题');
@@ -697,6 +698,83 @@ test('省 token：轻聊不带工具；关掉剧情察知；工具箱按需打�
   assert.match(full.llmCalls[2][0].content, /slash_run/);
 });
 
+test('剧情记忆只读单选：旧设置、关闭、无记录和接口错误都不回落正文', async () => {
+  const reads = [];
+  const globals = {
+    STBaiBaiBook: {
+      getInjectedHistory() { return { relativeText: '只供正文注入的旧楼' }; },
+      getHistory() { reads.push('baibai'); return { relativeText: '柏宝书近期记录' }; },
+    },
+    AutoCardUpdaterAPI: {
+      exportTableAsJson() {
+        reads.push('shujuku');
+        return {
+          mate: { version: '模板信息' },
+          sheet_items: { name: '物品', orderNo: 1, content: [[null, '名称'], [null, '石头'.repeat(200)]] },
+          sheet_summary: { name: '总结表', orderNo: 2, sourceData: { instructions: '模板指令' },
+            content: [[null, '概要'], [null, '旧楼'.repeat(200)], [null, '数据库最新剧情']] },
+        };
+      },
+    },
+    LittleWhiteBox: {},
+    WORLD_ENGINE_CORE: {
+      hasState() { return true; },
+      loadState() {
+        reads.push('worldengine');
+        return { worldDigest: '幕后局势', chapterSummaries: [{ content: '最近章节' }, { content: '旧章节'.repeat(300) }],
+          blackbox: '隐私配置', config: { key: '配置值' } };
+      },
+    },
+  };
+  const { agent, ctx, llmCalls } = makeHost({ globals, agentSettings: { plotContext: false, plotBudget: 200, recall: false, lite: true } });
+  const story = async (patch = {}, options = {}) => {
+    agent.saveSettings(patch);
+    const run = await agent.run('好', { remember: false, ...options });
+    assert.equal(run.error, '');
+    const prompt = llmCalls.at(-1)[0].content;
+    assert.doesNotMatch(prompt, /我推开了酒馆的门|放下了手里的杯子/);
+    return prompt;
+  };
+  const noPlot = /【当前剧情】/;
+  assert.equal(agent.getSettings().plotSource, 'auto');
+  assert.doesNotMatch(await story(), noPlot);
+  same(reads, []);
+  assert.match(await story({ plotContext: true }), /柏宝书近期记录/);
+  same(reads.splice(0), ['baibai']);
+  assert.match(await story({ plotSource: 'shujuku' }), /数据库最新剧情/);
+  assert.doesNotMatch(llmCalls.at(-1)[0].content, /柏宝书近期记录|石头|模板信息|模板指令/);
+  same(reads.splice(0), ['shujuku']);
+  assert.doesNotMatch(await story({}, { plotContext: false }), noPlot);
+  assert.doesNotMatch(await story({ plotSource: '' }), noPlot);
+  assert.equal(agent.getSettings().plotContext, false);
+  same(reads, []);
+
+  ctx.chatMetadata.extensions = { LittleWhiteBox: { storySummary: {
+    json: { events: [{ title: '小白X既有事件', summary: '港口重开' }], facts: [{ s: '甲', p: '身份', o: '向导' }] },
+    summaryHistory: ['回滚账本内容'],
+  } } };
+  ctx.extensionPrompts = { LittleWhiteBox_StorySummary: { value: '不带聊天标识的临时插槽' } };
+  const oldMetadata = clone(ctx.chatMetadata.extensions);
+  const lwb = await story({ plotContext: true, plotSource: 'lwb' });
+  assert.match(lwb, /港口重开/);
+  assert.doesNotMatch(lwb, /回滚账本内容|临时插槽/);
+  same(ctx.chatMetadata.extensions, oldMetadata);
+  ctx.chatMetadata.extensions.LittleWhiteBox.storySummary.summaryInvalid = true;
+  assert.doesNotMatch(await story(), noPlot);
+  ctx.chatMetadata.extensions = {};
+  assert.doesNotMatch(await story(), noPlot);
+
+  assert.match(await story({ plotSource: 'worldengine' }), /幕后局势\n最近章节/);
+  assert.doesNotMatch(llmCalls.at(-1)[0].content, /隐私配置|配置值/);
+  same(reads.splice(0), ['worldengine']);
+  globals.WORLD_ENGINE_CORE.hasState = () => false;
+  assert.doesNotMatch(await story(), noPlot);
+  globals.AutoCardUpdaterAPI.exportTableAsJson = () => { throw Error('尚未就绪'); };
+  assert.doesNotMatch(await story({ plotSource: 'shujuku' }), noPlot);
+  assert.doesNotMatch(await story({ plotSource: '缺失来源' }), noPlot);
+  same(reads, []);
+});
+
 test('插件对接：探测、工具箱、剧情摘要、声明式自定义对接', async () => {
   const globals = {
     STBaiBaiBook: {
@@ -719,33 +797,184 @@ test('插件对接：探测、工具箱、剧情摘要、声明式自定义对�
   assert.match(system, /- baibai：/);
 });
 
-test('记忆：来源标记 owner 与 unify（助手夜梦 = 正文夜梦）', async () => {
-  const { api, worldbooks } = makeHost();
+test('助手记忆从空库开始，旧世界书只关闭触发，新记忆支持共享、重开与导入', async () => {
+  const { api, vars, worldbooks, ctx } = makeHost();
   const memory = api.memory;
-  assert.equal(memory.getSettings().unify, false);
-  await memory.add({ type: 'fact', title: '王都人口', content: '王都人口十万。', keys: ['王都'], source: 'manual' }, { store: 'chat' });
-  await memory.add({ type: 'bond', title: '喜欢猫', content: '用户在王都说过喜欢猫。', keys: ['王都'], source: 'agent' }, { store: 'chat' });
-  await memory.add({ type: 'howto', title: '修脚本', content: '王都的脚本这样修。', keys: ['王都'], source: 'agent' }, { store: 'chat' });
-  same((await memory.list({ store: 'chat' })).map((item) => item.owner).sort(), ['agent', 'agent', 'story']);
-  let block = await memory.buildInjection('我们去王都吧');
-  assert.match(block.text, /王都人口/);
-  assert.doesNotMatch(block.text, /喜欢猫|修脚本|同一个人/);
-  assert.ok((await memory.search('王都 猫')).some((item) => item.title === '喜欢猫'), '助手那边照样读得到');
-  memory.saveSettings({ unify: true });
-  block = await memory.buildInjection('我们去王都吧');
-  assert.match(block.text, /同一个人/);
-  assert.match(block.text, /\[情感·助手那边\] 喜欢猫/);
-  assert.doesNotMatch(block.text, /修脚本/, '功能记忆是戏外的做法，不进正文');
-  /* 《夜之洋》：助手记忆的条目开关跟着 unify，真实开关留在元数据里。 */
-  const saved = await memory.add({ type: 'bond', title: '夜里聊天', content: '和用户聊到深夜。', keys: ['深夜'], source: 'agent' }, { store: 'ocean' });
-  const entryOf = () => worldbooks['夜之洋'].find((entry) => entry.content.includes(saved.id));
-  assert.equal(entryOf().enabled, true);
-  memory.saveSettings({ unify: false });
+  const legacy = {
+    items: {
+      a: { source: 'agent', type: 'bond', title: '喜欢猫', content: '用户喜欢猫。', keys: ['猫'] },
+      s: { source: 'story', type: 'episode', title: '旧正文事件', content: '剧情秘密', pinned: true },
+      m: { type: 'fact', source: 'manual', title: '旧设定', content: '来源不明的旧设定', pinned: true },
+    }, summary: { text: '旧正文梗概' }, cursor: { index: 7 }, cfg: { store: 'ocean' },
+  };
+  vars.chat.reader_ii_memory = clone(legacy);
+  worldbooks['夜之洋'] = [
+    { uid: 0, name: '剧情记忆-旧事件', content: '<!--yzy {"id":"old","src":"story"} -->\n剧情秘密', enabled: true },
+    { uid: 1, name: '情感记忆-深夜聊天', content: '<!--yzy {"id":"night","src":"agent","t":"bond"} -->\n聊到深夜。', enabled: true, strategy: { type: 'constant', keys: [] } },
+    { uid: 2, name: '背景资料', content: '他人的世界书内容。', enabled: true },
+    { uid: 3, name: '剧情记忆-自建条目', content: '手工创建的同名条目', enabled: true },
+    { uid: 4, name: '设定记忆-旧署名', content: '> 记录于 2025/4/1 12:00:00 ｜ 设定记忆\n旧版无标记剧情', enabled: true },
+  ];
+  const oldBodies = worldbooks['夜之洋'].map(e => e.content);
   await memory.syncOceanVisibility();
-  assert.equal(entryOf().enabled, false);
-  const back = await memory.get(saved.id);
-  assert.equal(back.enabled, true);
-  assert.equal(back.owner, 'agent');
+  same(worldbooks['夜之洋'].map(e => e.content), oldBodies);
+  same(worldbooks['夜之洋'].map(e => e.enabled), [false, false, true, true, false]);
+  assert.equal(memory.targetStore(), 'chat');
+  same(await memory.list(), []);
+  assert.equal((await memory.buildInjection('猫')).text, '');
+  assert.equal(await memory.get('night'), null);
+  for (const oldExport of [Object.values(legacy.items), { items: Object.values(legacy.items) }, { v: 1, kind: 'reader-ii-memory', items: Object.values(legacy.items) }]) {
+    await assert.rejects(memory.importAll(oldExport), /新版助手记忆/);
+  }
+  await assert.rejects(memory.add({ source: 'story', content: '剧情秘密' }), /助手交流/);
+  await memory.add({ type: 'howto', title: '核对步骤', content: '与用户约定的核对步骤。', pinned: true }, { store: 'ocean' });
+  await memory.add({ title: '回答要简短', content: '用户希望回复简短。', pinned: true }, { store: 'chat' });
+  same(vars.chat.reader_ii_memory, legacy);
+  const exported = await memory.exportAll();
+  assert.doesNotMatch(JSON.stringify(exported), /喜欢猫|深夜聊天|剧情秘密|旧设定|旧正文梗概|旧署名/);
+  const reopened = makeHost();
+  reopened.vars.chat[memory.chatKey] = clone(vars.chat[memory.chatKey]);
+  reopened.worldbooks['夜之洋'] = clone(worldbooks['夜之洋']);
+  same((await reopened.api.memory.list()).map(i => i.title).sort(), ['回答要简短', '核对步骤']);
+  const other = makeHost().api.memory;
+  assert.equal((await other.importAll(exported)).added, 2);
+  assert.equal((await other.importAll(exported)).skipped, 2);
+  memory.saveSettings({ unify: true, scope: 'all' });
+  assert.equal((await memory.buildInjection('猫')).text, '', '只用助手的卡不会获取 Meta 身份或记忆');
+  ctx.characters[0].data.extensions.reader_ii = { enabled: true };
+  const block = await memory.buildInjection('猫');
+  for (const word of ['真实用户', '{{user}}', '不主动超游', '回答要简短', '核对步骤']) assert.ok(block.text.includes(word), word);
+  assert.doesNotMatch(block.text, /喜欢猫|深夜聊天|剧情秘密|旧设定|旧正文梗概/);
+  assert.equal(worldbooks['夜之洋'].find(e => e.name.includes('核对步骤')).enabled, false);
+  memory.saveSettings({ unify: false });
+  assert.equal((await memory.buildInjection('猫')).text, '');
+});
+
+test('旧世界书改名和切聊天后只停用挂载书中的 Reader 标记，正文不重复读库', async () => {
+  const { host, api, worldbooks, llmCalls } = makeHost();
+  const old = { uid: 0, name: '剧情记忆-旧约定', enabled: true, strategy: { type: 'constant' },
+    content: '<!--yzy {"id":"mabc","t":"episode","src":"story","o":"story"} -->\n> 记录于 2025/4/1 ｜ 剧情记忆\n旧剧情' };
+  const handwritten = { uid: 1, name: '剧情记忆-手记', enabled: true, content: '> 记录于 昨日 ｜ 剧情记忆\n手写条目' };
+  const foreign = { uid: 2, name: '插件记录', enabled: true, content: '<!--yzy {"schema":"another-plugin","id":"mabc","t":"episode"} -->\n插件资料' };
+  for (const name of ['当前记忆本', '先前的全局记忆本', '另一张卡的旧本', '未挂载的资料']) {
+    worldbooks[name] = clone([old, handwritten, foreign]);
+  }
+  const events = new Map(), reads = [], writes = [];
+  let catalog = [], globalBooks = [], extraBooks = [];
+  const kit = { ...api.kit, on: (name, handler) => events.set(name, handler),
+    localRead: () => ({ oceanBook: '当前记忆本' }), worldbookNames: () => catalog,
+    worldbookScopes: () => ({ all: catalog, global: globalBooks }), linkedWorldbooks: async () => extraBooks,
+    readWorldbook: name => { reads.push(name); return api.kit.readWorldbook(name); },
+    updateWorldbook: (name, fn) => { writes.push(name); return api.kit.updateWorldbook(name, fn); } };
+  const modules = host.__ReaderIIModules;
+  const env = modules.createEnv(host);
+  const memory = modules.createMemorySystem(env, { chat() { assert.fail('正文不可整理记忆'); } }, kit, modules.createAgentHistory(env, kit));
+  memory.install();
+  await events.get('CHAT_CHANGED')();
+  assert.deepEqual(reads, [], '启动时目录尚未就绪');
+  catalog = Object.keys(worldbooks);
+  globalBooks = ['先前的全局记忆本'];
+  await events.get('GENERATION_AFTER_COMMANDS')();
+  assert.deepEqual(writes, ['当前记忆本', '先前的全局记忆本']);
+  same(worldbooks['当前记忆本'], [{ ...old, enabled: false }, handwritten, foreign]);
+  same(worldbooks['先前的全局记忆本'], [{ ...old, enabled: false }, handwritten, foreign]);
+  extraBooks = ['另一张卡的旧本', '先前的全局记忆本'];
+  await events.get('CHAT_CHANGED')();
+  same(worldbooks['另一张卡的旧本'], [{ ...old, enabled: false }, handwritten, foreign]);
+  await events.get('GENERATION_AFTER_COMMANDS')();
+  assert.deepEqual(reads, ['当前记忆本', '先前的全局记忆本', '另一张卡的旧本']);
+  same(worldbooks['未挂载的资料'], [old, handwritten, foreign]);
+  worldbooks['先前的全局记忆本'][0].enabled = true;
+  events.get('WORLDINFO_UPDATED')('先前的全局记忆本');
+  await events.get('GENERATION_AFTER_COMMANDS')();
+  assert.equal(worldbooks['先前的全局记忆本'][0].enabled, false);
+  assert.equal(llmCalls.length, 0);
+  await memory.dispose();
+});
+
+test('正文消息与生成事件不触发助手记忆整理；手动、自动与工具共用助手历史游标', async () => {
+  const { host, api, agent, llmCalls, vars, ctx } = makeHost({ replies: ['好的，我之后会尽量简短。', '{"memories":[{"op":"add","type":"fact","title":"简短回答","content":"用户喜欢简短回答。","keys":["简短"]}]}'] });
+  const modules = host.__ReaderIIModules;
+  const events = new Map();
+  const env = modules.createEnv(host);
+  const kit = { ...api.kit, on: (event, handler) => events.set(event, handler), readChat() { throw new Error('记忆不应读取正文'); } };
+  const separate = modules.createMemorySystem(env, { chat() { throw new Error('正文不应调用记忆模型'); } }, kit, modules.createAgentHistory(env, kit));
+  separate.install();
+  for (const event of ['MESSAGE_RECEIVED', 'MESSAGE_EDITED', 'MESSAGE_SWIPED', 'MESSAGE_DELETED', 'GENERATION_ENDED', 'GENERATION_STOPPED', 'GENERATION_AFTER_COMMANDS', 'CHAT_CHANGED']) {
+    await events.get(event)?.();
+  }
+  assert.equal((await separate.consolidate()).window, 0);
+  assert.equal(vars.chat[separate.chatKey], undefined);
+  assert.equal(llmCalls.length, 0);
+  vars.chat.reader_ii_agent = { v: 1, extracted: 0, turns: [
+    { role: 'user', text: '升级前尚未整理的用户消息' }, { role: 'assistant', text: '升级前尚未整理的助手回复' }
+  ] };
+  assert.equal(agent.getHistory().length, 2);
+  assert.equal((await api.memory.consolidate()).window, 0);
+  assert.equal(llmCalls.length, 0);
+  api.memory.saveSettings({ agentEveryTurns: 1 });
+  ctx.name1 = '正文主角名字';
+  await agent.run('以后请说简短一点。');
+  const report = await api.memory.consolidate();
+  assert.ok(report.ok, report.error);
+  const inputs = llmCalls.filter(messages => messages[0].content.includes('整理真实用户'));
+  assert.equal(inputs.length, 1);
+  assert.match(inputs[0][1].content, /真实用户：以后请说简短一点。/);
+  assert.match(inputs[0][1].content, /夜梦助手：好的/);
+  assert.doesNotMatch(JSON.stringify(inputs), /升级前尚未整理|正文主角名字|酒馆的门|清晨，王都/);
+  assert.equal(vars.chat.reader_ii_agent.v, 2);
+  assert.equal(vars.chat.reader_ii_agent.extracted, 4);
+  assert.equal((await api.memory.list({ store: 'chat' }))[0].title, '简短回答');
+  assert.equal((await api.memory.status()).pending.turns, 0);
+  const tool = modules.createAgentTools(env, api.kit, { memory: api.memory }).find('memory_consolidate');
+  assert.equal((await tool.run({}, {})).added.length, 0);
+  assert.equal(llmCalls.length, 2);
+});
+
+test('助手记忆仅在当前批次成功落盘后前移：编辑、模型格式错误或世界书写入失败后可重试', async () => {
+  const { host, api, vars, ctx } = makeHost();
+  const modules = host.__ReaderIIModules;
+  const env = modules.createEnv(host);
+  const history = modules.createAgentHistory(env, api.kit);
+  history.write({ v: 1, turns: [{ role: 'user', text: '叫我小白', id: 'u' }, { role: 'assistant', text: '记下啦', id: 'a' }], extracted: 0 });
+  const response = JSON.stringify({ memories: [{ type: 'fact', title: '称呼', content: '用户希望被叫作小蓝' }] });
+  let answer = () => '<html>upstream error</html>';
+  let failWrite = false;
+  const kit = { ...api.kit, addWorldbookEntries(...args) {
+    if (failWrite) throw new Error('写入失败');
+    return api.kit.addWorldbookEntries(...args);
+  } };
+  const memory = modules.createMemorySystem(env, { chat: () => answer() }, kit, history);
+  assert.match((await memory.consolidate()).error, /JSON/);
+  assert.equal(history.read().extracted, 0);
+  answer = () => {
+    vars.chat.reader_ii_agent.turns[0].text = '叫我小蓝';
+    return response;
+  };
+  assert.match((await memory.consolidate()).error, /变更/);
+  same(await memory.list(), []);
+  assert.equal(history.read().extracted, 0);
+  memory.saveSettings({ store: 'ocean' });
+  answer = () => response;
+  failWrite = true;
+  assert.match((await memory.consolidate()).error, /写入失败/);
+  assert.equal(history.read().extracted, 0);
+  failWrite = false;
+  const saveMetadata = ctx.saveMetadata;
+  ctx.saveMetadata = async () => { throw new Error('存盘失败'); };
+  assert.match((await memory.consolidate()).error, /存盘失败/);
+  assert.equal(history.read().extracted, 0);
+  ctx.saveMetadata = saveMetadata;
+  const retry = await memory.consolidate();
+  assert.ok(retry.ok, retry.error);
+  assert.equal(history.read().extracted, 2);
+  assert.equal((await memory.list()).length, 1);
+  const more = history.read();
+  more.turns.push({ role: 'user', text: '嗯', id: 'u2' }, { role: 'assistant', text: '嗯嗯', id: 'a2' });
+  history.write(more);
+  answer = () => '{"memories":[]}';
+  assert.equal((await memory.consolidate()).ok, true);
+  assert.equal(history.read().extracted, 4);
 });
 
 test('知识：目录只列名字，skill 才读正文；kb:/ 可读参考文件', async () => {

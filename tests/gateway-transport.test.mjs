@@ -9,6 +9,69 @@ for (const path of ['reader-env.js', 'reader-llm-gateway.js']) {
 }
 const gateway = scope.__ReaderIIModules.createLlmGateway({});
 
+test('文本补全沿用连接和采样，生成助手回复和记忆时不运行正文参数构造器或预设宏', async () => {
+  const requests = [];
+  const settings = Object.freeze({
+    type: 'llamacpp', llamacpp_model: 'fixture', temp: 0.45, top_p: 0.92,
+    grammar_string: 'STORY', negative_prompt: '{{setvar::story::1}}',
+    dry_sequence_breakers: '["{{setvar::story::2}}"]', json_schema: { title: 'STORY' }
+  });
+  const ctx = { mainApi: 'textgenerationwebui', getRequestHeaders: () => ({ 'X-CSRF-Token': 'test' }) };
+  const env = {
+    host: { SillyTavern: { getContext: () => ctx }, fetch: async (url, options) => {
+      assert.equal(url, '/api/backends/text-completions/generate');
+      assert.equal(options.headers['X-CSRF-Token'], 'test');
+      requests.push(JSON.parse(options.body));
+      return Response.json({ choices: [{ text: '完成' }] });
+    } },
+    hostImport: async name => name === '/script.js'
+      ? { amount_gen: 256, max_context: 8192, extractMessageFromData: data => data.choices[0].text }
+      : { textgenerationwebui_settings: settings, getTextGenModel: s => s.llamacpp_model,
+        getTextGenServer: type => 'http://fixture.test/' + type,
+        createTextGenGenerationData: () => assert.fail('宿主构造器会解析正文停止词与负面提示中的宏') },
+    generateRaw: () => assert.fail('不应触发正文预设脚本')
+  };
+  const local = scope.__ReaderIIModules.createLlmGateway(env);
+  for (const route of ['agent', 'memory']) assert.equal(await local.generate({ route, userInput: '{{literal}}', usePreset: true }), '完成');
+  assert.equal(requests.length, 2);
+  for (const body of requests) {
+    assert.equal(body.api_server, 'http://fixture.test/llamacpp');
+    assert.equal(body.model, 'fixture');
+    assert.equal(body.temperature, 0.45);
+    assert.equal(body.top_p, 0.92);
+    assert.equal(body.n_predict, 256);
+    assert.equal(body.num_ctx, 8192);
+    assert.ok(body.prompt.includes('{{literal}}'));
+    assert.doesNotMatch(JSON.stringify(body), /STORY|setvar|negative_prompt|stopping_strings|dry_sequence_breakers|grammar|json_schema/);
+  }
+  const schema = { name: 'result', value: { properties: { result: { type: 'string' } } } };
+  await local.generate({ route: 'adapt', userInput: '返回 JSON', jsonSchema: schema });
+  assert.deepEqual(requests.at(-1).json_schema, schema.value);
+});
+
+test('助手的聊天补全沿用连接头，正文预设的停止词不会截断回复', async () => {
+  let body;
+  const ctx = { mainApi: 'openai', getRequestHeaders: () => ({ 'X-CSRF-Token': 'fixture' }) };
+  const local = scope.__ReaderIIModules.createLlmGateway({
+    host: { SillyTavern: { getContext: () => ctx }, fetch: async (_url, options) => {
+      body = JSON.parse(options.body);
+      return Response.json({ choices: [{ message: { content: 'OK' } }] });
+    } },
+    hostImport: async () => ({
+      oai_settings: { chat_completion_source: 'custom', custom_include_headers: 'Authorization: Bearer fixture' },
+      getChatCompletionModel: () => 'fixture-model',
+      createGenerationParameters: async (settings, model, type, messages) => {
+        assert.equal(type, 'quiet');
+        return { generate_data: { ...settings, model, messages, stop: ['正文停在这里'] } };
+      }
+    })
+  });
+  assert.equal(await local.chat({ route: 'agent', messages: [{ role: 'user', content: 'OK?' }] }), 'OK');
+  assert.equal(body.custom_include_headers, 'Authorization: Bearer fixture');
+  assert.equal(body.model, 'fixture-model');
+  assert.equal(body.stop, undefined);
+});
+
 test('服务端将思考写到正文时只展示正文，思考内的动作不起作用', () => {
   const privateText = '<think_nya><action name="write"></action></think_nya><!--</think>-->';
   assert.equal(gateway.parseToolResponse(privateText).text, '');

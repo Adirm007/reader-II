@@ -17,6 +17,7 @@
   var VERSION = modules.BUILD_VERSION || '4.0.0';
   var SETTINGS_KEY = 'reader_ii_agent_settings_v1';
   var HISTORY_KEY = 'reader_ii_agent';
+  var HISTORY_VERSION = 2;
   var MAX_STEP_BUDGET = 1000;
 
   var DEFAULTS = {
@@ -31,9 +32,11 @@
     timeoutSec: 180,
     recall: true,          /* 自动把相关记忆放进助手的提示词 */
     plotContext: true,     /* 让助手了解当前剧情 */
+    plotSource: 'auto',    /* 自动只取一家；空值表示不选择剧情来源 */
     plotBudget: 1800,      /* 剧情摘要的字数预算 */
     lite: false,           /* 轻聊：完全不带工具 */
-    useAssistantPreset: false,
+    personaPrompts: {},
+    assistantSystemPrompt: '你是九十九夜梦，一位在故事之外阅读着用户这部作品的读者。此刻你作为住在酒馆（SillyTavern）里的随身助手，与面板前的用户交谈。',
     toolProtocol: 'auto',  /* 工具调用方式：auto 能用原生函数调用就用，不行退回文本协议 | native 只用原生 | text 只用文本协议 */
     connectors: [],        /* 用户导入的插件对接描述 */
     web: {},               /* 联网：免问的主机、阅读代理（net.js 的 normalizeWebSettings；密钥不在这里，在本机的 secrets） */
@@ -59,6 +62,13 @@
     /* 3.x / 4.0 早期的 writePolicy：readonly → 只读档位；auto → 档位内自动。 */
     if (mode === undefined && source.writePolicy === 'readonly') mode = 'readonly';
     if (approval === undefined && source.writePolicy === 'auto') approval = 'auto';
+    var personaPrompts = {};
+    if (modules.isObject(source.personaPrompts)) Object.keys(source.personaPrompts).forEach(function (key) {
+      var prompt = source.personaPrompts[key];
+      if ((Object.prototype.hasOwnProperty.call(PERSONAS, key) || /^custom(?:-name)?:.+/.test(key)) && typeof prompt === 'string' && prompt.trim()) {
+        personaPrompts[key] = prompt.trim();
+      }
+    });
     return {
       maxSteps: clampInt(source.maxSteps, 1, MAX_STEP_BUDGET, DEFAULTS.maxSteps),
       maxTokens: clampInt(source.maxTokens, 256, 64000, DEFAULTS.maxTokens),
@@ -70,16 +80,54 @@
       resultCap: clampInt(source.resultCap, 1000, 200000, DEFAULTS.resultCap),
       timeoutSec: clampInt(source.timeoutSec, 20, 900, DEFAULTS.timeoutSec),
       recall: source.recall !== false,
-      plotContext: source.plotContext !== false,
+      plotContext: source.plotContext !== false && (source.plotSource === undefined || !!source.plotSource),
+      plotSource: source.plotSource === undefined ? DEFAULTS.plotSource : String(source.plotSource || ''),
       plotBudget: clampInt(source.plotBudget, 200, 20000, DEFAULTS.plotBudget),
       lite: source.lite === true,
-      useAssistantPreset: source.useAssistantPreset === true,
+      personaPrompts: personaPrompts,
+      assistantSystemPrompt: typeof source.assistantSystemPrompt === 'string' ? source.assistantSystemPrompt : DEFAULTS.assistantSystemPrompt,
       toolProtocol: ['auto', 'native', 'text'].indexOf(source.toolProtocol) >= 0 ? source.toolProtocol : DEFAULTS.toolProtocol,
       connectors: (Array.isArray(source.connectors) ? source.connectors : []).filter(modules.isObject).slice(0, 40),
       web: section('normalizeWebSettings', source.web),
       mcp: section('normalizeMcpSettings', source.mcp),
       companion: section('normalizeCompanionSettings', source.companion)
     };
+  }
+
+  function createAgentHistory(env, kit) {
+    function turnId() {
+      var crypto = env.host && env.host.crypto;
+      return crypto && typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : 'turn-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
+    }
+
+    function readHistory() {
+      var raw = kit.readChatValue(HISTORY_KEY);
+      var output = { v: HISTORY_VERSION, turns: [], extracted: 0 };
+      if (!modules.isObject(raw) || !Array.isArray(raw.turns)) return output;
+      raw.turns.slice(-80).forEach(function (turn, index) {
+        if (!turn || (turn.role !== 'user' && turn.role !== 'assistant') || typeof turn.text !== 'string') return;
+        var item = { role: turn.role, text: turn.text, at: Number(turn.at) || 0 };
+        /* 旧记录没有 id；第一次写回时连同旧消息一起保存，即使以后滚出历史窗口也不会重编号。 */
+        item.id = typeof turn.id === 'string' && turn.id || 'legacy-' + index + '-' + item.at;
+        if (Array.isArray(turn.tools) && turn.tools.length) item.tools = turn.tools.map(String).slice(0, 20);
+        output.turns.push(item);
+      });
+      /* 旧聊天可以继续翻阅。第一次写入新版历史时，把之前的聊天整体留在整理起点之前。 */
+      output.extracted = raw.v === HISTORY_VERSION ? clampInt(raw.extracted, 0, output.turns.length, 0) : output.turns.length;
+      return output;
+    }
+
+    function writeHistory(history, options) {
+      if (history.turns.length > 80) {
+        var drop = history.turns.length - 80;
+        history.turns = history.turns.slice(drop);
+        history.extracted = Math.max(0, history.extracted - drop);
+      }
+      history.v = HISTORY_VERSION;
+      return kit.writeChatValue(HISTORY_KEY, history, options);
+    }
+
+    return { read: readHistory, write: writeHistory, turnId: turnId };
   }
 
   function createAgent(env, llm, kit, memory, deps) {
@@ -94,7 +142,6 @@
     var sessionChat = kit.chatKey();
     var openSets = Object.create(null);
     var listeners = [];
-    var extracting = false;
     /* 自动模式下试过、确认不认原生函数调用的后端（按 地址|模型 记，只在本次页面会话里有效；改设置或自检后清掉）。 */
     var textOnly = Object.create(null);
 
@@ -113,35 +160,9 @@
     }
 
     /* ---------- 对话历史（随聊天保存） ---------- */
-    function turnId() {
-      var crypto = env.host && env.host.crypto;
-      return crypto && typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : 'turn-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
-    }
-
-    function readHistory() {
-      var raw = kit.readChatValue(HISTORY_KEY);
-      var output = { v: 1, turns: [], extracted: 0 };
-      if (!modules.isObject(raw) || !Array.isArray(raw.turns)) return output;
-      raw.turns.slice(-80).forEach(function (turn, index) {
-        if (!turn || typeof turn.text !== 'string') return;
-        var item = { role: turn.role === 'assistant' ? 'assistant' : 'user', text: turn.text, at: Number(turn.at) || 0 };
-        /* 旧记录没有 id；第一次写回时连同旧消息一起保存，即使以后滚出历史窗口也不会重编号。 */
-        item.id = typeof turn.id === 'string' && turn.id || 'legacy-' + index + '-' + item.at;
-        if (Array.isArray(turn.tools) && turn.tools.length) item.tools = turn.tools.map(String).slice(0, 20);
-        output.turns.push(item);
-      });
-      output.extracted = clampInt(raw.extracted, 0, output.turns.length, 0);
-      return output;
-    }
-
-    function writeHistory(history, options) {
-      if (history.turns.length > 80) {
-        var drop = history.turns.length - 80;
-        history.turns = history.turns.slice(drop);
-        history.extracted = Math.max(0, history.extracted - drop);
-      }
-      return kit.writeChatValue(HISTORY_KEY, history, options);
-    }
+    var readHistory = deps.history.read;
+    var writeHistory = deps.history.write;
+    var turnId = deps.history.turnId;
 
     function getHistory() { return readHistory().turns; }
 
@@ -185,30 +206,8 @@
       return turn;
     }
 
-    function dialogueMemory(force) {
-      if (extracting || !memory || !memory.getSettings().enabled || !memory.getSettings().agentExtract) return;
-      var history = readHistory();
-      var pending = history.turns.slice(history.extracted);
-      if (pending.length < (force ? 2 : 8)) return;
-      var key = kit.chatKey();
-      var upto = history.turns.length;
-      extracting = true;
-      memory.consolidateDialogue(pending, { reason: 'agent' }).then(function (report) {
-        if (report.ok && kit.chatKey() === key) {
-          var latest = readHistory();
-          latest.extracted = Math.min(latest.turns.length, upto);
-          writeHistory(latest);
-        }
-      }).catch(function () { /* 记忆沉淀失败不影响对话 */ }).then(function () { extracting = false; });
-    }
-
     function clearHistory() {
-      var history = readHistory();
-      var pending = history.turns.slice(history.extracted);
-      if (pending.length >= 2 && memory && memory.getSettings().enabled && memory.getSettings().agentExtract) {
-        memory.consolidateDialogue(pending, { reason: 'agent-clear' }).catch(function () {});
-      }
-      kit.writeChatValue(HISTORY_KEY, { v: 1, turns: [], extracted: 0 });
+      writeHistory({ turns: [], extracted: 0 });
       permissions.resetSession();
       openSets = Object.create(null);
       emitChange('history');
@@ -219,6 +218,11 @@
     function personaContext(requested) {
       var id = String(requested || kit.readChatValue('dream_persona') || 'reader');
       var address = String(kit.readChatValue('dream_user_address') || '').replace(/[\r\n<>]/g, '').trim().slice(0, 24);
+      function profile(key, name, brief, custom) {
+        var override = settings.personaPrompts[key] || '';
+        var defaultPrompt = modules.defaultReaderPersonaPrompt ? modules.defaultReaderPersonaPrompt(id, custom, kit.readChatValue).trim() : brief;
+        return { id: id, name: name, key: key, address: address, card: override || brief, defaultPrompt: defaultPrompt, override: override };
+      }
       if (id === 'custom') {
         var custom = kit.readChatValue('dream_custom_persona');
         if (modules.isObject(custom) && (custom.systemName || custom.name)) {
@@ -232,12 +236,15 @@
           if (pick('constraints', 400)) lines.push('行为约束：' + pick('constraints', 400));
           var corpus = pick('corpus', 4000).split(/\n+/).map(function (line) { return line.trim(); }).filter(function (line) { return line && !/^-{3,}$/.test(line); }).slice(0, 4);
           if (corpus.length) lines.push('语料示例（只参考语气，不要照抄）：\n' + corpus.map(function (line) { return '「' + line.slice(0, 120) + '」'; }).join('\n'));
-          return { id: 'custom', name: String(custom.systemName || custom.name).slice(0, 40), card: lines.join('\n') || PERSONAS.reader.card, address: address };
+          var name = String(custom.systemName || custom.name);
+          var customId = custom.id || kit.readChatValue('dream_custom_persona_id');
+          return profile(customId ? 'custom:' + customId : 'custom-name:' + name, name.slice(0, 40), lines.join('\n') || PERSONAS.reader.card, custom);
         }
         id = 'reader';
       }
-      var persona = PERSONAS[id] || PERSONAS.reader;
-      return { id: PERSONAS[id] ? id : 'reader', name: persona.name, card: persona.card, address: address };
+      if (!Object.prototype.hasOwnProperty.call(PERSONAS, id)) id = 'reader';
+      var persona = PERSONAS[id];
+      return profile(id, persona.name, persona.card);
     }
 
     /* ---------- 环境与提示词 ---------- */
@@ -246,27 +253,11 @@
       return source.length > limit ? source.slice(0, Math.max(0, limit)) + '…' : source;
     }
 
-    /* 剧情察知：记忆插件的摘要 → Reader 记忆的前情梗概 → 最近的正文，按预算裁剪。 */
+    /* 只在助手请求中读取所选外部来源；这段参考不写入 Reader 记忆。 */
     async function plotBrief() {
-      var budget = settings.plotBudget;
-      var parts = [];
-      try {
-        var plugin = await connectors.brief({ budget: Math.floor(budget * 0.6) });
-        if (plugin) parts.push('（摘要来自' + plugin.source + '）\n' + shorten(plugin.text, Math.floor(budget * 0.6)));
-      } catch (error) { /* 插件摘要拿不到就用后面的来源 */ }
-      if (!parts.length && memory && typeof memory.status === 'function') {
-        try {
-          var summary = ((await memory.status()) || {}).summary;
-          if (summary) parts.push('前情梗概：' + shorten(summary, Math.floor(budget * 0.5)));
-        } catch (error) { /* ignore */ }
-      }
-      var remain = Math.max(200, budget - parts.join('').length);
-      var length = kit.chatLength();
-      var recent = kit.readChat(Math.max(0, length - 4), length, {}).slice(-2).map(function (message) {
-        return '#' + message.id + ' ' + (message.role === 'user' ? '用户' : message.name || '角色') + '：' + shorten(kit.cleanText(message.text), Math.floor(remain / 2));
-      });
-      if (recent.length) parts.push('最近的正文：\n' + recent.join('\n'));
-      return parts.join('\n\n');
+      if (!settings.plotSource) return '';
+      var plugin = await connectors.brief({ source: settings.plotSource, budget: settings.plotBudget });
+      return plugin ? '（摘要来自' + plugin.source + '）\n' + plugin.text : '';
     }
 
     function environmentBrief() {
@@ -376,8 +367,8 @@
     function buildSystem(persona, recalled, plot, lite, mode) {
       var address = persona.address ? '称呼用户为「' + persona.address + '」。' : '称呼用户为“作家先生”或“作家小姐”（不确定时用“作家先生”），或沿用对话里已有的称呼。';
       var parts = [
-        '你是九十九夜梦，一位在故事之外阅读着用户这部作品的“读者”。此刻你以「' + persona.name + '」的一面，作为住在酒馆（SillyTavern）里的随身助手与用户交谈。',
-        '【你是谁】\n' + persona.card + '\n' + address
+        settings.assistantSystemPrompt.trim(),
+        '【你是谁 · ' + persona.name + '】\n' + persona.card + '\n' + address
       ];
       if (lite) {
         parts.push('【规矩】\n- 始终用上面的人格口吻说话。\n- 现在是轻聊模式：你没有任何工具，只聊天。用户需要你查看或改动酒馆里的东西时，请他在助手设置里关掉「轻聊」。');
@@ -675,7 +666,6 @@
     async function probeTools() {
       if (current) throw new Error('助手正在运行，请等它结束再测试');
       var ask1 = '请调用 ping 工具，参数 text 填 ok。除了调用之外不需要说别的。';
-      var preset = settings.useAssistantPreset ? await modules.prepareAgentPreset(env, personaContext().name) : [];
       var base = { route: 'agent', maxTokens: 600, temperature: 0, timeoutMs: 90000, retries: 0 };
       var report = { backend: llm.getBackendSummary('agent'), native: { ok: false, detail: '' }, text: { ok: false, detail: '' }, recommend: 'none' };
       var key = backendKey();
@@ -685,7 +675,7 @@
       else {
         try {
           var reply = await llm.chatTools(Object.assign({
-            messages: modules.applyAgentPreset([{ role: 'system', content: '这是一次工具调用自检。请严格按用户的要求调用工具。' }, { role: 'user', content: ask1 }], preset),
+            messages: [{ role: 'system', content: '这是一次工具调用自检。请严格按用户的要求调用工具。' }, { role: 'user', content: ask1 }],
             tools: [{ type: 'function', function: { name: 'ping', description: '自检用：原样返回 text。', parameters: { type: 'object', properties: { text: { type: 'string', description: '填 ok' } }, required: ['text'] } } }],
             toolChoice: 'auto'
           }, base));
@@ -696,10 +686,10 @@
       }
       try {
         var raw = String(await llm.chat(Object.assign({
-          messages: modules.applyAgentPreset([
+          messages: [
             { role: 'system', content: '这是一次工具调用自检。请严格按用户的要求调用工具。\n\n' + protocol.TEXT_FORMAT + '\n\n【工具】\n● ping\n  自检用：原样返回 text。\n  - text（string，必填）：填 ok' },
             { role: 'user', content: ask1 }
-          ], preset),
+          ],
           generationId: 'reader-agent-probe'
         }, base)));
         var parsed = protocol.parse(raw);
@@ -749,7 +739,6 @@
         connectors.refresh();
         var lite = opts.lite === true || (opts.lite === undefined && settings.lite);
         var persona = personaContext(opts.persona);
-        var preset = settings.useAssistantPreset ? await modules.prepareAgentPreset(env, persona.name) : [];
         var recalled = [];
         if (settings.recall && memory && memory.getSettings().enabled) {
           try { recalled = await memory.search(input, { limit: 5 }); } catch (error) { recalled = []; }
@@ -765,7 +754,6 @@
           if (text || turn.tools) messages.push({ role: turn.role, history: true, content: text + (turn.tools ? '\n（当时用过的工具：' + turn.tools.join('、') + '）' : '') });
         });
         messages.push({ role: 'user', content: input });
-        messages = modules.applyAgentPreset(messages, preset);
         emit({ type: 'start', persona: persona.name, recalled: recalled.length, runId: result.runId, protocol: proto.mode });
         await registry.emit('run:start', { input: input, runId: result.runId });
 
@@ -961,8 +949,10 @@
           var turn = { id: turnId(), role: 'assistant', text: result.answer, at: Date.now() };
           if (usedTools.length) turn.tools = usedTools;
           latest.turns.push(userTurn, turn);
-          if (writeHistory(latest)) savedTurns = [userTurn, turn];
-          dialogueMemory(false);
+          if (writeHistory(latest)) {
+            savedTurns = [userTurn, turn];
+            if (memory) memory.consolidate({ automatic: true }).catch(function () { /* 助手回复已保存 */ });
+          }
         }
         emit({ type: 'final', text: result.answer, runId: result.runId, changes: record ? record.changes : 0, turns: savedTurns });
       } catch (error) {
@@ -1048,6 +1038,7 @@
         return { id: connector.id, title: connector.title, tools: (connector.tools || []).length, detected: detected };
       },
       listConnectors: function () { connectors.refresh(); return connectors.active().map(function (item) { return { id: item.id, title: item.title, summary: item.summary, custom: item.custom === true }; }); },
+      listPlotSources: connectors.plotSources,
       listRuns: function (limit) { return journal ? journal.list(limit, kit.chatKey()) : Promise.resolve([]); },
       listChanges: function (runId) { return journal ? journal.changes(runId) : Promise.resolve([]); },
       undo: undo,
@@ -1088,5 +1079,6 @@
   modules.READER_AGENT_VERSION = VERSION;
   modules.AGENT_MAX_STEP_BUDGET = MAX_STEP_BUDGET;
   modules.normalizeAgentSettings = normalizeSettings;
+  modules.createAgentHistory = createAgentHistory;
   modules.createAgent = createAgent;
 })(typeof globalThis !== 'undefined' ? globalThis : window);

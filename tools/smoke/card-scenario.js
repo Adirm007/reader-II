@@ -29,7 +29,8 @@ async function main() {
     assert(!document.querySelector('iframe[id^="th-script-"]'), '加载了旧主脚本');
     assert(!mock.worldbooks['reader-ii.worldbook'], '加载了旧世界书');
     if (mock.native) assert(!window.TavernHelper && !window.Mvu, '原生模式仍提供了插件');
-    window.ReaderII.memory.saveSettings({ enabled: false }); // 假模型只负责事件，不做自动记忆整理。
+    // 升级用户即使保留最积极的旧阈值，正文事件也不应发起任何整理请求。
+    window.ReaderII.memory.saveSettings({ enabled: true, autoExtract: true, everyTurns: 1, keepRecent: 0 });
     return mock.native ? '没有酒馆助手、没有 MVU' : '有酒馆助手与 MVU';
   });
   await step('未启用时不注入；菜单确认后按卡启用并进入大厅', async () => {
@@ -42,6 +43,14 @@ async function main() {
     await until(() => window.ReaderII.lobby.isEnabled() && $('#dlb-overlay'), '启用并打开大厅', 20000);
     assert(mock.confirms.length === 1, '应先问一次');
     assert(mock.ctx.characters[0].data.extensions.reader_ii.enabled === true, '没有保存角色卡开关');
+  });
+  await step('旧存档打开后助手记忆从零开始，原聊天仍可查看', async () => {
+    const memory = window.ReaderII.memory;
+    assert(window.ReaderII.agent.getHistory().some(turn => turn.id === 'old-user'), '原助手聊天无法查看');
+    assert((await memory.list()).length === 0 && (await memory.status()).pending.turns === 0, '旧记忆或升级前的聊天进入了新库');
+    const before = mock.llmCalls.length;
+    await memory.consolidate();
+    assert(mock.llmCalls.length === before, '打开旧存档后重新整理了旧聊天');
   });
   await step('三套大厅主题与服务台四个入口', async () => {
     for (const theme of ['cafe', 'summer', 'ink']) {
@@ -72,12 +81,16 @@ async function main() {
     await window.__smokeView('cafe', 'settings');
     const mode = $('select[data-s="a.toolProtocol"]');
     assert(mode && ['auto', 'native', 'text'].every((value) => [...mode.options].some((o) => o.value === value)), '缺少工具调用方式');
-    const preset = $('[data-s="a.useAssistantPreset"]');
-    assert(preset && !preset.checked, '预设开关应默认关闭');
-    preset.click();
+    assert($('[data-s="a.plotContext"]').checked && $('[data-s="a.plotSource"]').value === 'auto', '新安装应默认自动读取剧情来源');
+    assert(!$('[data-s="a.useAssistantPreset"]'), '仍有旧预设开关');
+    const persona = $('textarea[data-s="personaPrompt"]');
+    const system = $('textarea[data-s="a.assistantSystemPrompt"]');
+    assert(persona && system, '缺少人格或助手独立的文本编辑框');
+    persona.value = '冒烟当前人格：说话前先放下手中的书。';
+    system.value = '冒烟助手专用：办完任务后发一份清单。';
     mode.value = 'text'; $('[data-act="save-settings"]').click();
     await until(() => window.ReaderII.agent.getSettings().toolProtocol === 'text' && $('[data-ra-status="settings"]')?.textContent.includes('设置已保存'), '设置保存');
-    assert(window.ReaderII.agent.getSettings().useAssistantPreset === true, '预设选项未保存');
+    assert(window.ReaderII.agent.getSettings().assistantSystemPrompt === system.value, '助手专用文本未保存');
     const toggle = () => $('#ra-reader-card [data-act="card-toggle"]');
     assert(toggle()?.getAttribute('aria-checked') === 'true', '卡开关应开启'); toggle().click();
     await until(() => !window.ReaderII.lobby.isEnabled() && toggle()?.getAttribute('aria-checked') === 'false', '卡停用');
@@ -87,6 +100,7 @@ async function main() {
   });
   await step('三段正文提示词可分别设置世界书位置、深度、角色和出口，保存后重新打开仍生效', async () => {
     await window.__smokeView('cafe', 'settings');
+    assert($('textarea[data-s="personaPrompt"]').value.includes('冒烟当前人格') && $('textarea[data-s="a.assistantSystemPrompt"]').value.includes('冒烟助手专用'), '重新打开后提示词有误');
     const field = key => $('#ra-placement-card [data-s="p.' + key + '"]');
     const change = (key, value) => {
       const input = field(key);
@@ -125,17 +139,22 @@ async function main() {
       const item = mock.prompts[id]; assert(item?.text && item.position === position && item.depth === depth, '提示词缺失或位置不对：' + id);
       assert(!/<%|%>/.test(item.text), '模板没有编译');
     }
+    assert(mock.prompts.reader_ii_core.text.includes('冒烟当前人格'), '当前人格提示词未进入正文');
+    assert(!Object.values(mock.prompts).some(item => (item?.text || '').includes('冒烟助手专用')), '助手共用提示词泄漏到正文');
     const event = '<READER_FP_EVENT>{"event_id":"hidden"}</READER_FP_EVENT>';
     const data = { chat: [{ content: '正文' + event }, { content: [{ type: 'text', text: '正文' + event }] }] };
     await mock.eventSource.emit(mock.ctx.eventTypes.CHAT_COMPLETION_PROMPT_READY, data);
     assert(data.chat[0].content === '正文' && data.chat[1].content[0].text === '正文', '事件块进了提示词');
   });
   await step('生成一轮 FP 记账，事件不显示且新轻信挂上', async () => {
+    const modelCalls = mock.llmCalls.length;
     const before = Number(await window.ReaderCore.getFpBalance());
     const id = await mock.receive('下一页。\n<READER_FP_EVENT>{"source":"reader_owned","category":"resurrection","event_id":"smoke-fp","evidence":"冒烟"}</READER_FP_EVENT>\n<dream>「这一页送给你。」</dream>');
     await until(async () => Number(await window.ReaderCore.getFpBalance()) === before + 200, 'FP 入账');
     assert(!/READER_FP_EVENT|smoke-fp/.test($(`.mes[mesid="${id}"]`).textContent), '事件显示出来了');
     await until(() => /这一页送给你/.test(letterBody(id)?.textContent || ''), '新轻信');
+    await new Promise(resolve => setTimeout(resolve, 2800));
+    assert(mock.llmCalls.length === modelCalls, '正文生成后调用了记忆整理模型');
     return `${before} → ${before + 200}`;
   });
   await step('大厅的命运抽卡能打开', async () => {
