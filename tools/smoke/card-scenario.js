@@ -85,6 +85,31 @@ async function main() {
     assert(!document.querySelector('[data-act="upd-inspect"], [data-act="upd-apply"], #ra-upd-scope'), '仍有旧组件安装入口');
     window.ReaderII.agent.close();
   });
+  await step('三段正文提示词可分别设置世界书位置、深度、角色和出口，保存后重新打开仍生效', async () => {
+    await window.__smokeView('cafe', 'settings');
+    const field = key => $('#ra-placement-card [data-s="p.' + key + '"]');
+    const change = (key, value) => {
+      const input = field(key);
+      input.value = value;
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    };
+    assert(field('core.position').options.length === 8 && field('core.position').value === '0', '核心默认位置或位置选项不对');
+    assert(field('rules.depth').value === '4' && field('list.depth').value === '1', '两条默认深度不对');
+    change('core.position', '7');
+    assert(!field('core.outletName').closest('[hidden]') && field('core.role').closest('[hidden]'), '出口字段显示不对');
+    change('core.outletName', '夜梦正文');
+    change('rules.depth', '7'); change('rules.role', '2'); change('rules.order', '199');
+    field('list.enabled').click();
+    $('[data-act="save-settings"]').click();
+    const stored = mock.ctx.extensionSettings.reader_ii.storyPromptPlacement;
+    assert(stored.core.position === 7 && stored.core.outletName === '夜梦正文', '宏出口未保存');
+    assert(stored.rules.depth === 7 && stored.rules.role === 2 && stored.rules.order === 199 && !stored.list.enabled, '深度设置或开关未保存');
+    window.ReaderII.agent.close(); await window.__smokeView('cafe', 'settings');
+    assert(field('core.outletName').value === '夜梦正文' && field('rules.role').value === '2' && !field('list.enabled').checked, '重开后设置丢失');
+    change('core.position', '0'); change('rules.depth', '4'); change('rules.role', '0'); change('rules.order', '100');
+    field('list.enabled').click(); $('[data-act="save-settings"]').click();
+    window.ReaderII.agent.close();
+  });
   await step('无 MessageFormatter 时两条内置正则挂轻信并隐藏事件', async () => {
     assert(!mock.ctx.MessageFormatter, '此场景必须覆盖正则兜底');
     assert(mock.ctx.extensionSettings.regex.length === 2, '应有两条内置正则');

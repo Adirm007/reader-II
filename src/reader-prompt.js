@@ -5,7 +5,7 @@
    * 提示词与正文处理。原先靠世界书（要装提示词模板 ST-Prompt-Template 来跑里面的 EJS）和三条正则，现在都由扩展自己做：
    *
    *  · 提示词：更新规则、读者核心、变量列表三份模板在构建时编译成函数（modules.READER_PROMPT_TEMPLATES，build/prompts.mjs），
-   *    每次生成前（GENERATION_AFTER_COMMANDS）渲染，经酒馆的扩展提示词注入。模板只用到五个宿主函数：
+   *    每次正文生成时渲染为临时世界书条目，预设漏掉位置时在最终请求中补全。模板只用到五个宿主函数：
    *    getvar / getLocalVar / setLocalVar / getChatMessage / matchChatMessages，这里照提示词模板的语义实现。
    *  · 事件块 <READER_*_EVENT>：发给模型前从提示词里摘掉（CHAT_COMPLETION_PROMPT_READY / GENERATE_AFTER_COMBINE_PROMPTS）；
    *    显示时去掉。宿主卡没有在跑 MVU 时，<UpdateVariable> 也一样处理（那时它是我们让模型写的）。
@@ -16,7 +16,7 @@
   var modules = root.__ReaderIIModules = root.__ReaderIIModules || {};
 
   var PROMPTS = [
-    /* 位置：2 = 提示词最前面（原世界书条目的「角色定义之前」），1 = 聊天内按深度。 */
+    /* 这里是旧版扩展提示词的编号；世界书位置由 reader-prompt-placement.js 保存。 */
     { id: 'reader_ii_core', template: 'core', position: 2, depth: 0 },
     { id: 'reader_ii_rules', template: 'rules', position: 1, depth: 4 },
     { id: 'reader_ii_list', template: 'list', position: 1, depth: 1 }
@@ -77,6 +77,8 @@
     var disposed = false;
     var saveTimer = null;
     var retired = Object.create(null);
+    var placement = modules.readerPromptPlacement;
+    var turn = null;
 
     function context() { try { return env.context() || null; } catch (error) { return null; } }
     /* 延后做的事不该拖住进程（Node 里的测试）：定时器 unref。 */
@@ -85,9 +87,10 @@
     function hostHasMvu() { try { return !!(api && typeof api.hostMvu === 'function' && api.hostMvu()); } catch (error) { return false; } }
 
     /* ---------- 模板的宿主函数（照提示词模板 ST-Prompt-Template 的语义） ---------- */
-    function chatMessages(role) {
+    function chatMessages(role, generationType) {
       var ctx = context();
       var list = ctx && Array.isArray(ctx.chat) ? ctx.chat : [];
+      if (generationType === 'swipe') list = list.slice(0, -1);
       return list.filter(function (message) {
         if (!message || message.is_system) return false;
         if (role === 'user') return message.is_user === true;
@@ -102,14 +105,26 @@
       return list[number < 0 ? list.length + number : number];
     }
 
-    function locals() {
+    function locals(generationType) {
       var ctx = context() || {};
       if (ctx.chatMetadata && !isObject(ctx.chatMetadata.variables)) ctx.chatMetadata.variables = {};
       var chatVars = ctx.chatMetadata ? ctx.chatMetadata.variables : {};
       var messageVars = {};
-      try { messageVars = env.getVariables({ type: 'message', message_id: 'latest' }) || {}; } catch (error) { messageVars = {}; }
+      try {
+        if (generationType === 'swipe') {
+          // Swipe keeps the rejected answer in ctx.chat, but the host excludes it from this request.
+          for (var at = ctx.chat.length - 2; at >= 0; at -= 1) {
+            if (!ctx.chat[at] || ctx.chat[at].is_system) continue;
+            var candidate = env.getVariables({ type: 'message', message_id: at }) || {};
+            if (isObject(candidate.stat_data)) { messageVars = Object.assign({}, candidate, messageVars); break; }
+            if (!Object.keys(messageVars).length) messageVars = candidate;
+          }
+        } else {
+          messageVars = env.getVariables({ type: 'message', message_id: 'latest' }) || {};
+        }
+      } catch (error) { messageVars = {}; }
       /* 最后一楼还没有变量时（宿主没有 MVU、新楼层刚到），用语义层往前找到的那一份。 */
-      if (!isObject(messageVars.stat_data) && api && typeof api.readFloor === 'function') {
+      if (generationType !== 'swipe' && !isObject(messageVars.stat_data) && api && typeof api.readFloor === 'function') {
         try { messageVars = api.readFloor() || messageVars; } catch (error) { /* 用空的 */ }
       }
       var globals = {};
@@ -134,13 +149,13 @@
           return value;
         },
         getChatMessage: function (index, role) {
-          var message = pick(chatMessages(role), index);
+          var message = pick(chatMessages(role, generationType), index);
           return message ? String(message.mes == null ? '' : message.mes) : '';
         },
         /* patterns：字符串、正则或它们的数组；start / end 是按角色筛过之后的下标（可用负数），默认只看最后一条。 */
         matchChatMessages: function (patterns, options) {
           var opts = options || {};
-          var list = chatMessages(opts.role);
+          var list = chatMessages(opts.role, generationType);
           var from = opts.start === undefined ? -1 : Math.trunc(Number(opts.start));
           var to = opts.end === undefined ? list.length : Math.trunc(Number(opts.end));
           if (from < 0) from = Math.max(0, list.length + from);
@@ -166,11 +181,11 @@
     }
 
     /* 渲染三份模板，返回 { core, rules, list }（没启用 Reader 的聊天里都是空串）。 */
-    async function render() {
+    async function render(generationType) {
       var output = { core: '', rules: '', list: '' };
       var templates = modules.READER_PROMPT_TEMPLATES;
       if (!enabled() || !templates) return output;
-      var bridge = locals();
+      var bridge = locals(generationType);
       var ctx = context();
       /* 顺序同原世界书：核心在前（它会写「系统名」等聊天变量），再是更新规则与变量列表。 */
       for (var index = 0; index < PROMPTS.length; index += 1) {
@@ -188,20 +203,38 @@
       return output;
     }
 
-    function setPrompt(id, text, position, depth) {
+    function setPrompt(id, text, position, depth, role) {
       var ctx = context();
       if (!ctx || typeof ctx.setExtensionPrompt !== 'function') return false;
-      ctx.setExtensionPrompt(id, text || '', text ? position : -1, depth, false, 0);
+      ctx.setExtensionPrompt(id, text || '', text ? position : -1, depth, false, role || 0);
       return true;
+    }
+
+    function legacyInject(config, output) {
+      var ctx = context() || {};
+      var canPlaceInChat = ctx.mainApi === 'openai' && (hasEvent('GENERATE_AFTER_DATA') || hasEvent('CHAT_COMPLETION_SETTINGS_READY'));
+      PROMPTS.forEach(function (item) {
+        var p = config[item.template];
+        var position = p.position === 4 ? 1 : p.position === 0 ? 2 : 0;
+        // The old extension-prompt API has no example, author's-note or after-character slot.
+        var defer = canPlaceInChat && p.position !== 0 && p.position !== 4;
+        setPrompt(item.id, p.enabled && p.position !== 7 && !defer ? output[item.template] : '', position, p.depth, p.role);
+      });
     }
 
     async function inject() {
       var output = await render();
-      PROMPTS.forEach(function (item) { setPrompt(item.id, output[item.template], item.position, item.depth); });
+      if (!hasEvent('WORLDINFO_ENTRIES_LOADED')) legacyInject(placement.placements(context()), output);
       return output;
     }
 
     function clear() {
+      if (turn) turn.listeners.forEach(function (remove) { remove(); });
+      turn = null;
+      clearExtensionPrompts();
+    }
+
+    function clearExtensionPrompts() {
       PROMPTS.forEach(function (item) { setPrompt(item.id, '', item.position, item.depth); });
     }
 
@@ -370,39 +403,380 @@
       Promise.resolve(retireLegacy()).catch(function (error) { log.warn('[ReaderII] 接管旧组件失败', error); });
     }
 
-    /* ---------- 装配 ---------- */
-    function listen(name, handler, first) {
+    function eventType(name) {
+      var ctx = context();
+      var types = ctx && (ctx.eventTypes || ctx.event_types) || env.tavern_events || {};
+      return types[name];
+    }
+    function hasEvent(name) { return !!(context() && context().eventSource && eventType(name)); }
+    function subscribe(name, handler, last) {
       var ctx = context();
       var source = ctx && ctx.eventSource;
-      var types = ctx && (ctx.eventTypes || ctx.event_types) || env.tavern_events || {};
-      var event = types[name];
+      var event = eventType(name);
       if (!source || !event) return;
-      if (first && typeof source.makeLast === 'function') source.makeLast(event, handler);
+      if (last && typeof source.makeLast === 'function') source.makeLast(event, handler);
       else source.on(event, handler);
-      stops.push(function () { try { source.removeListener(event, handler); } catch (error) { /* ignore */ } });
+      return function () { source.removeListener(event, handler); };
+    }
+    function listen(name, handler, last) {
+      var remove = subscribe(name, handler, last);
+      if (remove) stops.push(remove);
     }
 
-    /* 生成前渲染并注入；放在别的监听之后（常驻壳要先把控制器备好，记忆要先整理好）。试算（dryRun）时不重渲染。 */
-    listen('GENERATION_AFTER_COMMANDS', function (_type, _options, dryRun) {
-      if (dryRun) return undefined;
-      if (!enabled()) { clear(); return undefined; }
-      return inject().then(function () { return undefined; }, function (error) { log.error('[ReaderII] 提示词注入失败', error); });
+    function isStory(type) { return !type || ['normal', 'regenerate', 'swipe', 'continue', 'group_chat', 'group'].indexOf(type) >= 0; }
+    function current(t) { return t && t === turn && !t.auxiliary.length && enabled() && t.key === kit.chatKey(); }
+
+    // Cache only inside this generation. ST deletes the old floor / adds the new user message
+    // between GENERATION_AFTER_COMMANDS and the actual world-info scan.
+    async function contents(t) {
+      if (!t.pending) {
+        var request = render(t.type).then(function (out) {
+          if (t.pending === request) t.output = out;
+          return out;
+        });
+        t.pending = request;
+      }
+      return t.pending;
+    }
+
+    // A preset can await Generate('quiet') or a token-count preview inside a story hook.
+    // Neither request owns the story templates. ST previews finish at GENERATE_AFTER_DATA
+    // without raising ENDED, and the stop button can emit ENDED for a nested quiet request.
+    function pauseForAuxiliary(type, dryRun, started) {
+      if (!turn || (!dryRun && isStory(type))) return false;
+      var frames = turn.auxiliary;
+      var top = frames[frames.length - 1];
+      if (!started && top && top.started && top.type === type && top.dryRun === !!dryRun) {
+        top.started = false;
+      } else {
+        if (turn.legacy && !frames.length) clearExtensionPrompts();
+        frames.push({ type: type, dryRun: !!dryRun, started: started });
+      }
+      return true;
+    }
+
+    function resumeAfterAuxiliary(t) {
+      t.auxiliary.pop();
+      if (current(t) && t.legacy && t.output) legacyInject(t.config, t.output);
+    }
+
+    function finishLegacyPreview(dryRun) {
+      if (!turn || !dryRun || hasEvent('GENERATE_AFTER_DATA')) return;
+      var frame = turn.auxiliary[turn.auxiliary.length - 1];
+      if (frame && frame.dryRun) resumeAfterAuxiliary(turn);
+    }
+
+    async function refreshLegacy() {
+      var t = turn;
+      if (!current(t) || !t.legacy) return;
+      t.pending = t.output = null;
+      var output = await contents(t);
+      if (current(t) && t.output === output) legacyInject(t.config, output);
+    }
+
+    // Activated entries contain ST's own macro-expanded text. The prompt builder then
+    // applies WORLD_INFO regex (including per-preset scripts) at the entry's depth.
+    var regexEngine;
+    listen('WORLD_INFO_ACTIVATED', async function (entries) {
+      var t = turn;
+      if (!current(t) || !Array.isArray(entries)) return;
+      var own = entries.filter(function (entry) { return entry && entry.world === placement.world; });
+      if (!own.length) return;
+      if (!regexEngine && typeof env.hostImport === 'function') {
+        regexEngine = env.hostImport('/scripts/extensions/regex/engine.js').catch(function () { return null; });
+      }
+      var engine = await regexEngine;
+      if (!current(t)) return;
+      var disabled = ((context() || {}).extensionSettings || {}).disabledExtensions || [];
+      var rules = !disabled.includes('regex') && engine && typeof engine.getRegexScripts === 'function' && engine.regex_placement
+        ? engine.getRegexScripts({ allowedOnly: true }).filter(function (rule) {
+          return !rule.disabled && rule.promptOnly && Array.isArray(rule.placement) && rule.placement.includes(engine.regex_placement.WORLD_INFO);
+        }) : [];
+      t.worldEntries = {};
+      own.forEach(function (entry) {
+        var section = placement.sections.find(function (item) { return item.uid === entry.uid; });
+        if (!section) return;
+        var depth = entry.position === 4 ? entry.depth : null;
+        var applicable = rules.filter(function (rule) {
+          return depth == null || !((rule.minDepth != null && depth < rule.minDepth)
+            || (rule.maxDepth != null && rule.maxDepth >= 0 && depth > rule.maxDepth));
+        });
+        var dynamic = applicable.some(function (rule) { return regexUsesMacros(rule, entry.content); });
+        t.worldEntries[section.key] = { entry: entry, engine: engine, rules: applicable, dynamic: dynamic };
+      });
+    });
+
+    function regexUsesMacros(rule, text) {
+      var replacement = String(rule.replaceString || '').replace(/{{match}}/gi, '$0');
+      return (Number(rule.substituteRegex) > 0 && String(rule.findRegex).includes('{{')) || replacement.includes('{{')
+        || (rule.trimStrings || []).some(function (s) { return String(s).includes('{{'); })
+        || (text.includes('{{') && /\$(?:\d+|<)/.test(replacement));
+    }
+
+    function applyWithoutMacros(found) {
+      var engine = found.engine;
+      if (typeof engine.runRegexScript !== 'function') return null;
+      var text = found.entry.content;
+      for (var i = 0; i < found.rules.length; i += 1) {
+        var rule = found.rules[i];
+        if (!regexUsesMacros(rule, text)) {
+          text = engine.runRegexScript(rule, text);
+          continue;
+        }
+        if (Number(rule.substituteRegex) > 0 && String(rule.findRegex).includes('{{')) return null;
+        // Use ST's regex parser and execution limits, with a literal replacement confined
+        // to this probe. A preset's unrelated macro regex must not silence this section.
+        var marker = 'ReaderII_regex_probe';
+        while (text.includes(marker)) marker += '_';
+        var probe = Object.assign({}, rule, { replaceString: marker, trimStrings: [] });
+        if (engine.runRegexScript(probe, text) !== text) return null;
+      }
+      return text;
+    }
+
+    function worldText(t, key, original) {
+      var found = t.worldEntries && t.worldEntries[key];
+      if (!found) return original;
+      if (found.text !== undefined) return found.text;
+      // Replaying a regex containing macros could write a variable twice or reroll a value.
+      // Retain the native output; only restore a version that was actually observed.
+      var entry = found.entry, engine = found.engine;
+      found.text = entry.content;
+      if (engine && typeof engine.getRegexedString === 'function' && engine.regex_placement) {
+        try {
+          found.text = found.dynamic ? applyWithoutMacros(found) : engine.getRegexedString(entry.content, engine.regex_placement.WORLD_INFO, {
+            depth: entry.position === 4 ? entry.depth : null, isMarkdown: false, isPrompt: true
+          });
+        } catch (error) { if (found.dynamic) found.text = null; log.warn('[ReaderII] 无法取得世界书正则处理后的文本', error); }
+      }
+      return found.text;
+    }
+
+    function cleanHistory(text) {
+      // Reader instructions themselves contain sample event and UpdateVariable blocks.
+      // Clean old events around any attached template, leaving its instructions intact.
+      if (turn && turn.worldEntries) Object.values(turn.worldEntries).forEach(function (found) {
+        if (found.dynamic && found.entry.content && text.includes(found.entry.content)) found.text = found.entry.content;
+      });
+      if (!/<(?:READER_(?:FP|TASK|ACTION)_EVENT|UpdateVariable)>/i.test(text)) return text;
+      var templates = turn && turn.output;
+      var chunks = [text];
+      var unknown = false;
+      if (templates) Object.keys(templates).forEach(function (key) {
+        var block = templates[key];
+        if (block && !text.includes(block)) block = worldText(turn, key, block);
+        if (block === null) unknown = true;
+        if (!block) return;
+        chunks = chunks.flatMap(function (chunk) {
+          if (typeof chunk !== 'string' || !chunk.includes(block)) return [chunk];
+          var pieces = chunk.split(block);
+          return pieces.flatMap(function (piece, i) { return i ? [{ text: block }, piece] : [piece]; });
+        });
+      });
+      // If a dynamic script changed a template, only discard events attested by chat history.
+      if (unknown && !turn.historyEvents) {
+        turn.historyEvents = new Set();
+        ((context() || {}).chat || []).forEach(function (message) {
+          var body = String(message && message.mes || '');
+          (body.match(EVENT_RE) || []).concat(body.match(UPDATE_RE) || []).forEach(function (tag) { turn.historyEvents.add(tag); });
+        });
+      }
+      function historical(match) { return turn.historyEvents.has(match) ? '' : match; }
+      return chunks.map(function (chunk) {
+        if (typeof chunk !== 'string') return chunk.text;
+        if (!unknown) return stripForPrompt(chunk);
+        var cleaned = chunk.replace(EVENT_RE, historical);
+        return hostHasMvu() ? cleaned : cleaned.replace(UPDATE_RE, historical);
+      }).join('');
+    }
+    function messageText(msg) {
+      if (!msg) return '';
+      if (typeof msg.content === 'string') return msg.content;
+      if (!Array.isArray(msg.content)) return '';
+      return msg.content.filter(function (part) { return part && typeof part.text === 'string'; }).map(function (part) { return part.text; }).join('\n');
+    }
+    function normalized(text) { return text.replace(/\s+/g, ' ').trim(); }
+    function containsBlock(delivered, block) {
+      return delivered.includes(normalized(block)) || delivered.includes(normalized(JSON.stringify(block).slice(1, -1)));
+    }
+    function absent(t, output, text) {
+      var delivered = normalized(text);
+      return PROMPTS.map(function (slot) {
+        var block = output[slot.template];
+        var p = t.config[slot.template];
+        if (!block || !p.enabled || p.position === 7) return null;
+        var found = t.worldEntries && t.worldEntries[slot.template];
+        if (found && found.dynamic && found.entry.content && containsBlock(delivered, found.entry.content)) found.text = found.entry.content;
+        if (containsBlock(delivered, block)) return null;
+        var processed = worldText(t, slot.template, block);
+        if (!processed || (processed !== block && containsBlock(delivered, processed))) return null;
+        return { p: p, text: processed };
+      }).filter(Boolean);
+    }
+
+    function insertionIndex(messages, p) {
+      if (p.position === 0) return 0;
+      var firstExample = -1, lastExample = -1, history = [];
+      var end = messages.length;
+      // Keep a trailing assistant prefill as the final message.
+      if (end && messages[end - 1].role === 'assistant' && !messages[end - 1].tool_calls) end -= 1;
+      for (var i = 0; i < end; i += 1) {
+        var msg = messages[i];
+        if (msg && /^example_(?:user|assistant)$/i.test(msg.name || '')) {
+          if (firstExample < 0) firstExample = i;
+          lastExample = i;
+        } else if (msg && (msg.role === 'user' || msg.role === 'assistant') && !msg.tool_calls && !msg.function_call) {
+          history.push(i);
+        }
+      }
+      if (p.position === 5 && firstExample >= 0) return firstExample;
+      if (p.position === 6 && lastExample >= 0) return lastExample + 1;
+      var first = history.length ? history[0] : end;
+      if (p.position === 1 || p.position === 5 || p.position === 6) return firstExample >= 0 ? Math.min(first, firstExample) : first;
+      var depth = p.depth;
+      if (p.position === 2 || p.position === 3) {
+        var metadata = (context() || {}).chatMetadata || {};
+        var note = metadata.note_prompt;
+        if (note) for (var n = 0; n < end; n += 1) {
+          if (messageText(messages[n]).includes(note) && messages[n].role !== 'tool' && !messages[n].tool_calls) return n + (p.position === 3 ? 1 : 0);
+        }
+        depth = metadata.note_depth == null ? 4 : Number(metadata.note_depth);
+      }
+      return depth > 0 && history.length ? history[Math.max(0, history.length - depth)] : end;
+    }
+
+    function ensureChat(t, output, messages) {
+      var missing = absent(t, output, messages.map(messageText).join('\n'));
+      var groups = new Map();
+      missing.forEach(function (item) {
+        var index = insertionIndex(messages, item.p);
+        if (!groups.has(index)) groups.set(index, []);
+        groups.get(index).push(item);
+      });
+      Array.from(groups.keys()).sort(function (a, b) { return b - a; }).forEach(function (index) {
+        var rows = groups.get(index).sort(function (a, b) { return a.p.order - b.p.order; }).map(function (item) {
+          return { role: item.p.position === 4 ? ['system', 'user', 'assistant'][item.p.role] : 'system', content: item.text };
+        });
+        messages.splice(index, 0, ...rows);
+      });
+    }
+
+    async function ensureRequest(data, field, dryRun) {
+      var t = turn;
+      if (!current(t) || !data || dryRun || !isStory(data.type) || (data.type && t.type && data.type !== t.type)) return;
+      var value = data[field];
+      if (!Array.isArray(value) && typeof value !== 'string') return;
+      var output = await contents(t);
+      if (!current(t)) return;
+      if (Array.isArray(value)) ensureChat(t, output, value);
+      else {
+        // A flattened text-completion prompt no longer has role/depth anchors. Keep its
+        // generation suffix intact if a preset discarded a world-info slot.
+        var missing = absent(t, output, value).sort(function (a, b) { return a.p.order - b.p.order; });
+        if (missing.length) {
+          // NovelAI Erato requires this pair at the very start of its input.
+          var eratoStart = '<|startoftext|><|reserved_special_token81|>';
+          var offset = field === 'input' && value.startsWith(eratoStart) ? eratoStart.length : 0;
+          // ST may already have wrapped the story in the selected instruct template's system turn.
+          var power = (context() || {}).powerUserSettings;
+          var instruct = power && power.instruct;
+          if (instruct && instruct.enabled && typeof instruct.story_string_prefix === 'string' && instruct.story_string_prefix) {
+            var storyPrefix = instruct.story_string_prefix.replace(/{{name}}/gi, 'System') + (instruct.wrap ? '\n' : '');
+            if (value.startsWith(storyPrefix, offset)) offset += storyPrefix.length;
+          }
+          var insert = missing.map(function (item) { return item.text; }).join('\n\n');
+          data[field] = value.slice(0, offset) + insert + '\n\n' + value.slice(offset);
+        }
+      }
+    }
+
+    function onGenerateData(data, dryRun) {
+      var t = turn;
+      if (t && t.auxiliary.length) {
+        var frame = t.auxiliary[t.auxiliary.length - 1];
+        if (frame.dryRun === !!dryRun) {
+          if (!dryRun) t.auxiliaryEnds += 1;
+          resumeAfterAuxiliary(t);
+        }
+        return;
+      }
+      // ST sends NovelAI's input directly, while Kobold, TextGen and chat assembly use prompt.
+      var field = data && data.prompt == null && typeof data.input === 'string' ? 'input' : 'prompt';
+      if (current(t) && !dryRun && data && (!data.type || data.type === t.type)) {
+        t.auxiliaryEnds = 0;
+        t.submitted = typeof data[field] === 'string' || !hasEvent('CHAT_COMPLETION_SETTINGS_READY');
+      }
+      return ensureRequest(data, field, dryRun);
+    }
+    function onSettingsReady(data) {
+      // generateRaw / assistant side calls can fire this event while a story is running.
+      // ST stamps the request type on the outgoing payload (raw/connection tests use quiet).
+      if (data && typeof data.type === 'string') {
+        if (turn && turn.type === data.type) {
+          // A quiet request can fail before either its data or its UI end event. The typed
+          // send is unambiguous: a token-count dry run never sends a provider request.
+          turn.auxiliary.length = 0;
+          turn.auxiliaryEnds = 0;
+          turn.submitted = true;
+        }
+        return ensureRequest(data, 'messages', false);
+      }
+    }
+    listen('GENERATION_STARTED', function (type, _options, dryRun) { pauseForAuxiliary(type, dryRun, true); });
+    listen('GENERATION_AFTER_COMMANDS', async function (type, _options, dryRun) {
+      if (pauseForAuxiliary(type, dryRun, false) || dryRun) return;
+      clear();
+      if (!isStory(type) || !enabled()) return;
+      var t = turn = { key: kit.chatKey(), type: type || 'normal', config: placement.placements(context()),
+        listeners: [], auxiliary: [], auxiliaryEnds: 0, legacy: !hasEvent('WORLDINFO_ENTRIES_LOADED') };
+      // A newly selected preset can install its own makeLast handlers after startup.
+      t.listeners = [subscribe('GENERATE_AFTER_DATA', onGenerateData, true),
+        subscribe('CHAT_COMPLETION_SETTINGS_READY', onSettingsReady, true)].filter(Boolean);
+      if (t.legacy) {
+        var chat = (context() || {}).chat || [];
+        var awaitingDeletion = type === 'regenerate' && hasEvent('MESSAGE_DELETED') && chat.length && !chat[chat.length - 1].is_user;
+        if (!awaitingDeletion) await refreshLegacy();
+      }
     }, true);
+    // ST writes the user's input or deletes the rejected answer after AFTER_COMMANDS.
+    // Older hosts take their extension-prompt snapshot after these message events.
+    listen('MESSAGE_SENT', refreshLegacy);
+    listen('MESSAGE_DELETED', refreshLegacy);
+    listen('WORLDINFO_ENTRIES_LOADED', async function (data) {
+      var t = turn;
+      if (!current(t) || !data || !Array.isArray(data.characterLore)) return;
+      var out = await contents(t);
+      if (!current(t)) return;
+      placement.entries(t.config, out).forEach(function (entry) {
+        entry.triggers = [t.type === 'group_chat' || t.type === 'group' ? 'normal' : t.type];
+        if (!data.characterLore.some(function (old) { return old.world === entry.world && old.uid === entry.uid; })) data.characterLore.push(entry);
+      });
+    });
+    listen('GENERATION_ENDED', function () {
+      if (turn && !turn.submitted && turn.auxiliaryEnds) { turn.auxiliaryEnds -= 1; return; }
+      if (turn && turn.auxiliary.length) { resumeAfterAuxiliary(turn); return; }
+      clear();
+    });
+    listen('GENERATION_STOPPED', clear);
     listen('CHAT_CHANGED', function () {
       clear();
       later(retireOnce, 1500);
     });
     listen('CHAT_COMPLETION_PROMPT_READY', function (data) {
       if (!enabled() || !data || !Array.isArray(data.chat)) return;
+      finishLegacyPreview(data.dryRun);
       data.chat.forEach(function (message) {
-        if (!message) return;
-        if (typeof message.content === 'string') message.content = stripForPrompt(message.content);
-        else if (Array.isArray(message.content)) message.content.forEach(function (part) { if (part && typeof part.text === 'string') part.text = stripForPrompt(part.text); });
+        if (!message || message.role === 'tool' || message.role === 'function') return;
+        if (typeof message.content === 'string') message.content = cleanHistory(message.content);
+        else if (Array.isArray(message.content)) message.content.forEach(function (part) { if (part && typeof part.text === 'string') part.text = cleanHistory(part.text); });
       });
+      if (!hasEvent('GENERATE_AFTER_DATA') && !hasEvent('CHAT_COMPLETION_SETTINGS_READY')) return ensureRequest(data, 'chat', data.dryRun);
     });
     listen('GENERATE_AFTER_COMBINE_PROMPTS', function (data) {
       if (!enabled() || !data || typeof data.prompt !== 'string') return;
-      data.prompt = stripForPrompt(data.prompt);
+      finishLegacyPreview(data.dryRun);
+      data.prompt = cleanHistory(data.prompt);
+      if (!hasEvent('GENERATE_AFTER_DATA')) return ensureRequest(data, 'prompt', data.dryRun);
     });
 
     var formatter = installFormatter();

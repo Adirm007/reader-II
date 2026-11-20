@@ -113,13 +113,20 @@
     }
 
     /* ---------- 对话历史（随聊天保存） ---------- */
+    function turnId() {
+      var crypto = env.host && env.host.crypto;
+      return crypto && typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : 'turn-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
+    }
+
     function readHistory() {
       var raw = kit.readChatValue(HISTORY_KEY);
       var output = { v: 1, turns: [], extracted: 0 };
       if (!modules.isObject(raw) || !Array.isArray(raw.turns)) return output;
-      raw.turns.slice(-80).forEach(function (turn) {
-        if (!turn || typeof turn.text !== 'string' || !turn.text.trim()) return;
-        var item = { role: turn.role === 'assistant' ? 'assistant' : 'user', text: turn.text.slice(0, 12000), at: Number(turn.at) || 0 };
+      raw.turns.slice(-80).forEach(function (turn, index) {
+        if (!turn || typeof turn.text !== 'string') return;
+        var item = { role: turn.role === 'assistant' ? 'assistant' : 'user', text: turn.text, at: Number(turn.at) || 0 };
+        /* 旧记录没有 id；第一次写回时连同旧消息一起保存，即使以后滚出历史窗口也不会重编号。 */
+        item.id = typeof turn.id === 'string' && turn.id || 'legacy-' + index + '-' + item.at;
         if (Array.isArray(turn.tools) && turn.tools.length) item.tools = turn.tools.map(String).slice(0, 20);
         output.turns.push(item);
       });
@@ -127,16 +134,56 @@
       return output;
     }
 
-    function writeHistory(history) {
+    function writeHistory(history, options) {
       if (history.turns.length > 80) {
         var drop = history.turns.length - 80;
         history.turns = history.turns.slice(drop);
         history.extracted = Math.max(0, history.extracted - drop);
       }
-      kit.writeChatValue(HISTORY_KEY, history);
+      return kit.writeChatValue(HISTORY_KEY, history, options);
     }
 
     function getHistory() { return readHistory().turns; }
+
+    function getGreeting() {
+      var persona = personaContext();
+      var text = persona.id === 'genki' ? '来啦！要查什么、改什么，还是随便聊聊？交给我！'
+        : persona.id === 'weirdo' ? '……啊，你打开了这一页。那么，今天要拜托我什么？'
+        : '我在这里。需要我替您查看卡里的资料、整理记忆，或者只是说说话，都可以。';
+      return { id: 'greeting', role: 'assistant', text: text, at: 0 };
+    }
+
+    async function editHistoryTurn(id, text, snapshot) {
+      if (!snapshot || snapshot.chatKey !== kit.chatKey()) throw new Error('聊天已切换，请在当前对话重新编辑');
+      if (typeof text !== 'string') throw new Error('请输入消息文本');
+      var history = readHistory();
+      var turn = history.turns.find(function (item) { return item.id === id; });
+      var isGreeting = id === 'greeting' && !history.turns.length;
+      if (isGreeting) {
+        turn = getGreeting();
+        turn.id = turnId();
+        turn.at = Date.now();
+        history.turns.push(turn);
+      }
+      if (!turn) throw new Error('这条消息已不在对话记录中');
+      if (turn.text !== snapshot.originalText) throw new Error('这条消息已被修改，请取消并重新编辑');
+      turn.text = text;
+      try {
+        if (!await writeHistory(history, { saveNow: true })) throw new Error('酒馆未能保存这条消息');
+      } catch (error) {
+        if (kit.chatKey() === snapshot.chatKey) {
+          var latest = readHistory();
+          var saved = latest.turns.find(function (item) { return item.id === turn.id; });
+          if (saved && saved.text === text) {
+            if (isGreeting) latest.turns.splice(latest.turns.indexOf(saved), 1);
+            else saved.text = snapshot.originalText;
+            writeHistory(latest);
+          }
+        }
+        throw error;
+      }
+      return turn;
+    }
 
     function dialogueMemory(force) {
       if (extracting || !memory || !memory.getSettings().enabled || !memory.getSettings().agentExtract) return;
@@ -713,7 +760,8 @@
         var history = readHistory();
         var previousTurns = settings.historyTurns ? history.turns.slice(-settings.historyTurns * 2) : [];
         previousTurns.forEach(function (turn) {
-          var text = turn.role === 'assistant' ? llm.visibleText(turn.text) : turn.text;
+          var text = turn.text.slice(0, 12000);
+          if (turn.role === 'assistant') text = llm.visibleText(text);
           if (text || turn.tools) messages.push({ role: turn.role, history: true, content: text + (turn.tools ? '\n（当时用过的工具：' + turn.tools.join('、') + '）' : '') });
         });
         messages.push({ role: 'user', content: input });
@@ -722,7 +770,7 @@
         await registry.emit('run:start', { input: input, runId: result.runId });
 
         /* 用户亲口说过的话（这一句与历史里的用户发言）：联网工具据此判断某个网址是不是用户自己给的。 */
-        var userText = [input].concat(previousTurns.filter(function (turn) { return turn.role === 'user'; }).map(function (turn) { return turn.text; })).join('\n');
+        var userText = [input].concat(previousTurns.filter(function (turn) { return turn.role === 'user'; }).map(function (turn) { return turn.text.slice(0, 12000); })).join('\n');
         var state = {
           seen: Object.create(null), opts: opts, emit: emit, run: record, chatKey: job.key,
           toolCtx: {
@@ -906,16 +954,17 @@
         if (forced) result.stopReason = forced;
         result.protocol = proto.mode;
         result.answer = answer || '（模型没有给出回答，请再试一次。）';
+        var savedTurns = null;
         if (opts.remember !== false && kit.chatKey() === job.key) {
           var latest = readHistory();
-          latest.turns.push({ role: 'user', text: input, at: Date.now() });
-          var turn = { role: 'assistant', text: result.answer, at: Date.now() };
+          var userTurn = { id: turnId(), role: 'user', text: input, at: Date.now() };
+          var turn = { id: turnId(), role: 'assistant', text: result.answer, at: Date.now() };
           if (usedTools.length) turn.tools = usedTools;
-          latest.turns.push(turn);
-          writeHistory(latest);
+          latest.turns.push(userTurn, turn);
+          if (writeHistory(latest)) savedTurns = [userTurn, turn];
           dialogueMemory(false);
         }
-        emit({ type: 'final', text: result.answer, runId: result.runId, changes: record ? record.changes : 0 });
+        emit({ type: 'final', text: result.answer, runId: result.runId, changes: record ? record.changes : 0, turns: savedTurns });
       } catch (error) {
         if (error && error.name === 'AbortError') {
           result.aborted = true;
@@ -984,6 +1033,8 @@
       probeTools: probeTools,
       isBusy: function () { return !!current; },
       getHistory: getHistory,
+      getGreeting: getGreeting,
+      editHistoryTurn: editHistoryTurn,
       clearHistory: clearHistory,
       personaContext: personaContext,
       permissions: permissions,

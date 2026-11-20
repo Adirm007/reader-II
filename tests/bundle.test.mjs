@@ -42,7 +42,7 @@ test('扩展包按依赖顺序包含全部模块和两个生成模块，发布�
 });
 
 function promptHost({ local = {}, stat = {}, formatter = false, kit = {}, resolve = () => null } = {}) {
-  const { m } = modules([PROMPTS_MODULE, 'src/reader-prompt.js']);
+  const { m } = modules([PROMPTS_MODULE, 'src/reader-prompt-placement.js', 'src/reader-prompt.js']);
   const calls = [], hooks = [], errors = [];
   const ctx = {
     chatMetadata: { variables: structuredClone(local) }, extensionSettings: { regex: [] },

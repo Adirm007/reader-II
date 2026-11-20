@@ -138,7 +138,7 @@
     }
 
     var saveTimer = null;
-    function writeChatValue(key, value) {
+    function writeChatValue(key, value, options) {
       var vars = chatVariables();
       if (vars) {
         if (value === undefined) delete vars[key];
@@ -147,6 +147,10 @@
         if (ctx && typeof ctx.saveMetadata === 'function') {
           /* 连续写入合并成一次保存。 */
           if (saveTimer) clearTimeout(saveTimer);
+          if (options && options.saveNow) {
+            saveTimer = null;
+            return Promise.resolve(ctx.saveMetadata()).then(function () { return true; });
+          }
           saveTimer = setTimeout(function () {
             saveTimer = null;
             try { Promise.resolve(ctx.saveMetadata()).catch(function () {}); } catch (error) { /* best-effort */ }
@@ -159,7 +163,8 @@
       try {
         var payload = {};
         payload[key] = modules.clone(value);
-        insert(payload, { type: 'chat' });
+        var result = insert(payload, { type: 'chat' });
+        if (options && options.saveNow) return Promise.resolve(result).then(function () { return true; });
         return true;
       } catch (error) { return false; }
     }

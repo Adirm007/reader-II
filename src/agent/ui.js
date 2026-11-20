@@ -12,9 +12,9 @@
   var OVERLAY_ID = 'reader-agent-overlay';
   var TYPE_ORDER = ['episode', 'fact', 'bond', 'howto'];
   var INPUT_MAX_HEIGHT = 160;   /* 输入框随内容长高到这里为止，再多就在框里滚动 */
-  /* 设置页的各块，也是左边目录的顺序。前四块之外的改动都是立即生效的。 */
+  /* 设置页和目录使用相同的顺序。 */
   var SECTIONS = [
-    ['ra-reader-card', '这张卡'], ['ra-agent-card', '助手'], ['ra-tools-card', '工具调用'], ['ra-rules-card', '权限规则'],
+    ['ra-reader-card', '这张卡'], ['ra-placement-card', '正文提示词位置'], ['ra-agent-card', '助手'], ['ra-tools-card', '工具调用'], ['ra-rules-card', '权限规则'],
     ['ra-memory-card', '记忆'], ['ra-model-card', '模型'], ['ra-conn-card', '插件对接'], ['ra-net-card', '联网'],
     ['ra-comp-card', '后端伴侣'], ['ra-upd-card', '版本更新'], ['ra-runs-card', '改动记录']
   ];
@@ -43,6 +43,7 @@
     var tab = 'chat';
     var running = false;
     var runningChat = null;
+    var pendingUserNode = null;
     var pendingConfirms = [];
     var permissionReview = null;
     var memoryFilter = { type: '', store: '', query: '' };
@@ -108,20 +109,63 @@
       if (node) node.setAttribute('data-notice', kind);
     }
 
+    function showTurn(node, turn) {
+      if (!node) return;
+      node.dataset.turnId = turn.id;
+      node.__raSnapshot = { chatKey: kit.chatKey(), originalText: turn.text };
+      node.classList.remove('is-editing');
+      var label = turn.role === 'user' ? '编辑用户消息' : '编辑夜梦消息';
+      node.innerHTML = '<div class="ra-msg-text">' + rich(turn.text) + '</div>'
+        + '<button type="button" class="ra-msg-edit" data-act="turn-edit" aria-label="' + label + '" title="' + label + '">' + icon('pencil') + '</button>';
+    }
+
+    async function editTurn(action, button) {
+      var node = button.closest('.ra-msg');
+      if (!node || !node.__raSnapshot) return;
+      var snapshot = node.__raSnapshot;
+      if (kit.chatKey() !== snapshot.chatKey) { renderHistory(); return; }
+      var id = node.dataset.turnId;
+      if (action === 'turn-edit') {
+        node.classList.add('is-editing');
+        node.innerHTML = '<textarea rows="4" data-turn-text aria-label="消息正文"></textarea>'
+          + '<div class="ra-row"><button type="button" class="ra-btn is-small is-main" data-act="turn-save">保存</button>'
+          + '<button type="button" class="ra-btn is-small" data-act="turn-cancel">取消</button><span role="status" class="ra-turn-status"></span></div>';
+        var field = node.querySelector('[data-turn-text]');
+        field.value = snapshot.originalText;
+        field.focus();
+        return;
+      }
+      var turn;
+      if (action === 'turn-save') {
+        var controls = node.querySelectorAll('textarea,button');
+        controls.forEach(function (control) { control.disabled = true; });
+        try { turn = await agent.editHistoryTurn(id, node.querySelector('[data-turn-text]').value, snapshot); }
+        catch (error) {
+          controls.forEach(function (control) { control.disabled = false; });
+          node.querySelector('.ra-turn-status').textContent = message(error);
+          return;
+        }
+      } else {
+        var history = agent.getHistory();
+        turn = id === 'greeting' && !history.length ? agent.getGreeting() : history.find(function (item) { return item.id === id; });
+      }
+      if (!node.isConnected) return;
+      if (!turn || kit.chatKey() !== snapshot.chatKey) { renderHistory(); return; }
+      showTurn(node, turn);
+      node.querySelector('[data-act="turn-edit"]').focus({ preventScroll: true });
+    }
+
     function renderHistory() {
       var log = logNode();
       if (!log) return;
       log.innerHTML = '';
       var turns = agent.getHistory();
       if (!turns.length) {
-        var persona = agent.personaContext();
-        append(rich(persona.id === 'genki' ? '来啦！要查什么、改什么，还是随便聊聊？交给我！'
-          : persona.id === 'weirdo' ? '……啊，你打开了这一页。那么，今天要拜托我什么？'
-          : '我在这里。需要我替您查看卡里的资料、整理记忆，或者只是说说话，都可以。'), 'ra-msg ra-ai');
+        showTurn(append('', 'ra-msg ra-ai'), agent.getGreeting());
         return;
       }
       turns.forEach(function (turn) {
-        append(rich(turn.text), 'ra-msg ' + (turn.role === 'assistant' ? 'ra-ai' : 'ra-user'));
+        showTurn(append('', 'ra-msg ' + (turn.role === 'assistant' ? 'ra-ai' : 'ra-user')), turn);
         if (turn.tools && turn.tools.length) append(esc('用过的工具：' + turn.tools.join('、')), 'ra-thought');
       });
       log.scrollTop = log.scrollHeight;
@@ -295,7 +339,17 @@
         if (pre) pre.textContent = (pre.textContent ? pre.textContent + '\n' : '') + '→ ' + (event.summary || '');
         return;
       }
-      if (event.type === 'final') { clearIndicator(); append(rich(event.text), 'ra-msg ra-ai'); return; }
+      if (event.type === 'final') {
+        clearIndicator();
+        var replyNode = append(rich(event.text), 'ra-msg ra-ai');
+        if (event.turns) {
+          var greeting = $('#ra-log [data-turn-id="greeting"]:not(.is-editing)');
+          if (greeting) greeting.remove();
+          showTurn(pendingUserNode, event.turns[0]);
+          showTurn(replyNode, event.turns[1]);
+        }
+        return;
+      }
       if (event.type === 'error') { clearIndicator(); append(esc('没能完成：' + event.message), 'ra-thought'); return; }
       if (event.type === 'aborted') { clearIndicator(); append('已停止。', 'ra-thought'); }
     }
@@ -310,7 +364,7 @@
       var text = String(textOverride !== undefined ? textOverride : input && input.value || '').trim();
       if (!text) return;
       if (input && textOverride === undefined) { input.value = ''; fitInput(); }
-      append(rich(text), 'ra-msg ra-user');
+      pendingUserNode = append(rich(text), 'ra-msg ra-user');
       var log = logNode();
       if (log) log.scrollTop = log.scrollHeight;
       runningChat = kit.chatKey();
@@ -325,6 +379,7 @@
         setRunning(false);
         if (runningChat !== kit.chatKey()) renderHistory();
         runningChat = null;
+        pendingUserNode = null;
         refreshFoot();
         /* 触屏上不抢焦点：不然每答完一轮软键盘都弹出来。 */
         if (input && !touchInput()) { try { input.focus(); } catch (error) { /* 面板可能已关闭 */ } }
@@ -609,6 +664,38 @@
       }
       replaceCard('ra-reader-card', readerCardHtml());
       refreshBack();
+    }
+
+    function placementCardHtml() {
+      var placement = modules.readerPromptPlacement;
+      if (!placement) return '';
+      var config = placement.placements(kit.context());
+      var body = placement.sections.map(function (section) {
+        var v = config[section.key];
+        var prefix = 'p.' + section.key + '.';
+        var positionOptions = placement.positions.map(function (entry) { return option(entry[0], entry[1], v.position); }).join('');
+        var chatOnly = ' data-placement-position="4"' + (v.position === 4 ? '' : ' hidden');
+        return '<section data-placement-section="' + section.key + '" aria-label="' + section.label + '">'
+          + switchField(prefix + 'enabled', v.enabled, section.label)
+          + '<div data-placement-fields' + (v.enabled ? '' : ' hidden') + '><div class="ra-nums">'
+          + '<label class="ra-num">注入位置<select data-s="' + prefix + 'position">' + positionOptions + '</select></label>'
+          + numberField(prefix + 'order', '插入顺序', v.order, 0, 9999)
+          + '<label class="ra-num"' + chatOnly + '>聊天深度<input type="number" min="0" max="9999" required data-s="' + prefix + 'depth" value="' + v.depth + '"></label>'
+          + '<label class="ra-num"' + chatOnly + '>消息角色<select data-s="' + prefix + 'role">'
+          + option(0, '系统', v.role) + option(1, '用户', v.role) + option(2, '助手', v.role) + '</select></label>'
+          + '<label class="ra-num" data-placement-position="7"' + (v.position === 7 ? '' : ' hidden') + '>出口名称<input data-s="' + prefix + 'outletName" value="' + esc(v.outletName) + '"></label>'
+          + '</div><p class="ra-note" data-placement-position="7"' + (v.position === 7 ? '' : ' hidden')
+          + '>在目标位置填写 <code>{{outlet::出口名称}}</code>，酒馆会在展开该宏时放入这一段。</p></div></section>';
+      }).join('');
+      return card('ra-placement-card', '正文提示词位置',
+        '<p class="ra-note">用于所有已启用 Reader-II 的角色卡，从下一次正文生成或重掷生效。位置和插入顺序沿用酒馆世界书规则，聊天深度 0 表示末尾。</p>' + body);
+    }
+
+    function updatePlacementFields(section) {
+      var prefix = 'p.' + section.dataset.placementSection + '.';
+      section.querySelector('[data-placement-fields]').hidden = !section.querySelector('[data-s="' + prefix + 'enabled"]').checked;
+      var position = section.querySelector('[data-s="' + prefix + 'position"]').value;
+      section.querySelectorAll('[data-placement-position]').forEach(function (node) { node.hidden = node.dataset.placementPosition !== position; });
     }
 
     function agentCardHtml(a) {
@@ -948,6 +1035,7 @@
       var m = memory.getSettings();
       var scroll = pane.scrollTop;
       pane.innerHTML = readerCardHtml()
+        + placementCardHtml()
         + agentCardHtml(a)
         + toolsCardHtml(a)
         + rulesCardHtml(a.rules)
@@ -970,14 +1058,29 @@
         budget.focus();
         return;
       }
-      var agentPatch = {}, memoryPatch = {};
+      var agentPatch = {}, memoryPatch = {}, placements = {};
+      var invalid = null;
       overlay.querySelectorAll('[data-s]').forEach(function (input) {
         var key = input.getAttribute('data-s');
         var value = input.type === 'checkbox' ? input.checked : input.type === 'number' ? Number(input.value) : input.value;
         if (key.indexOf('a.') === 0) agentPatch[key.slice(2)] = value;
-        else memoryPatch[key.slice(2)] = value;
+        else if (key.indexOf('m.') === 0) memoryPatch[key.slice(2)] = value;
+        else if (key.indexOf('p.') === 0) {
+          var parts = key.split('.');
+          var section = placements[parts[1]] || (placements[parts[1]] = {});
+          section[parts[2]] = value;
+          if (!invalid && !input.closest('[hidden]')) {
+            if (input.type === 'number' && (input.value === '' || !input.validity.valid)) invalid = [input, '请填写 0 至 9999 的整数'];
+            if (parts[2] === 'outletName' && !modules.readerPromptPlacement.validOutlet(value.trim())) invalid = [input, '请填写有效的出口名称'];
+          }
+        }
       });
+      if (invalid) { toast(invalid[1], true); invalid[0].focus(); return; }
       if ($('#ra-rules')) agentPatch.rules = readRules();
+      if ($('#ra-placement-card')) {
+        try { modules.readerPromptPlacement.save(kit.context(), placements); }
+        catch (error) { toast('正文提示词位置保存失败：' + message(error), true); return; }
+      }
       agent.saveSettings(agentPatch);
       memory.saveSettings(memoryPatch);
       renderSettings();
@@ -1059,7 +1162,8 @@
         var actor = event.target.closest('[data-act]');
         if (!actor) return;
         var action = actor.getAttribute('data-act');
-        if (action === 'close') close();
+        if (action.indexOf('turn-') === 0) editTurn(action, actor);
+        else if (action === 'close') close();
         else if (action === 'back-lobby') backToLobby();
         else if (action === 'clear') {
           if (running) return;
@@ -1082,6 +1186,8 @@
       });
       overlay.addEventListener('change', function (event) {
         if (event.target.closest && event.target.closest('[data-s],[data-r]')) setDirty(true);
+        var placementSection = event.target.closest && event.target.closest('[data-placement-section]');
+        if (placementSection) updatePlacementFields(placementSection);
         if (netUi && netUi.change(event)) return;
         if (event.target.id === 'ra-store') {
           try { memory.setChatStoreOverride(event.target.value); renderMemory(); refreshFoot(); } catch (error) { toast(message(error), true); }
@@ -1099,6 +1205,10 @@
         }
       });
       overlay.addEventListener('keydown', function (event) {
+        if (event.target.matches('[data-turn-text]') && !event.isComposing) {
+          var editAction = event.key === 'Escape' ? 'turn-cancel' : event.key === 'Enter' && (event.ctrlKey || event.metaKey) ? 'turn-save' : '';
+          if (editAction) { event.preventDefault(); event.target.closest('.ra-msg').querySelector('[data-act="' + editAction + '"]').click(); }
+        }
         if (event.target.id === 'ra-text' && event.key === 'Enter' && !event.shiftKey && !event.isComposing && !touchInput()) { event.preventDefault(); send(); }
         /* 输入事件不冒泡到酒馆：聊天页的快捷键不该在面板里触发。 */
         event.stopPropagation();

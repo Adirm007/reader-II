@@ -3,9 +3,9 @@
   "loading_order": 90,
   "requires": [],
   "optional": [],
-  "js": "index.js?v=4.1.0-alpha.4",
+  "js": "index.js?v=4.1.0-alpha.5",
   "author": "Adirm007",
-  "version": "4.1.0-alpha.4",
+  "version": "4.1.0-alpha.5",
   "homePage": "https://github.com/Adirm007/reader-II",
   "auto_update": false
 }

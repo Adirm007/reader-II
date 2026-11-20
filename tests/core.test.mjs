@@ -20,7 +20,7 @@ const CORE_SOURCES = [
   'reader-env.js', 'reader-mvu-guard.js', 'reader-runtime-store.js', 'reader-economy.js', 'reader-host-adapter.js',
   'reader-semantic-codec.js', 'reader-semantic-router.js', 'reader-character-scan.js', 'reader-llm-gateway.js',
   'reader-adaptation-llm.js', 'reader-event-parser.js', 'reader-ui-bridge.js', 'reader-host-kit.js', 'reader-native-host.js',
-  'reader-auto-adapt.js', 'reader-lwb-host.js', 'reader-assets', 'reader-prompts', 'reader-shell.js', 'reader-prompt.js', 'reader-core.js',
+  'reader-auto-adapt.js', 'reader-lwb-host.js', 'reader-assets', 'reader-prompts', 'reader-shell.js', 'reader-prompt-placement.js', 'reader-prompt.js', 'reader-core.js',
 ];
 /* reader-assets 由 7.F 的构建生成；这里用假资源包占位（这些 mock 里没有 DOM，壳不会真去解它，见 tests/shell.test.mjs）。 */
 const ASSETS_MODULE = '(function (root) { var m = root.__ReaderIIModules = root.__ReaderIIModules || {}; m.READER_ASSETS_GZIP = '

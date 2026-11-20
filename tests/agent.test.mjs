@@ -615,6 +615,70 @@ test('超长预算下连续三次同样的失败会收尾，不继续花费剩�
   assert.match(fixture.llmCalls.at(-1).at(-1).content, /连续三轮相同调用/);
 });
 
+test('默认欢迎语保持临时显示，主动保存后成为首条助手消息并带进下一轮', async () => {
+  const fresh = makeHost({ replies: ['答复。'] });
+  const greeting = fresh.agent.getGreeting();
+  assert.equal(fresh.agent.getHistory().length, 0);
+  await fresh.agent.run('第一问', { lite: true });
+  assert.equal(fresh.llmCalls[0].some(t => t.content === greeting.text), false);
+
+  const edited = makeHost({ replies: ['答复。'] });
+  await edited.agent.editHistoryTurn(greeting.id, '新的欢迎语', { chatKey: '0|chat-1', originalText: greeting.text });
+  assert.equal(edited.agent.getHistory()[0].role, 'assistant');
+  assert.equal(edited.agent.getHistory()[0].text, '新的欢迎语');
+  assert.notEqual(edited.agent.getHistory()[0].id, greeting.id);
+  await edited.agent.run('第一问', { lite: true });
+  assert.equal(edited.llmCalls[0].filter(t => t.content === '新的欢迎语').length, 1);
+});
+
+test('双方旧消息可编辑，保留工具记录与长原文，下一轮模型读取修订稿', async () => {
+  const { agent, ctx, vars, llmCalls } = makeHost({ replies: ['继续。'] });
+  const original = '长'.repeat(13000) + '旧结尾';
+  vars.chat.reader_ii_agent = { v: 1, extracted: 1, turns: [
+    { role: 'user', text: '原问题', at: 1 },
+    { role: 'assistant', text: original, at: 1, tools: ['read'] },
+  ] };
+  let saves = 0;
+  ctx.saveMetadata = async () => { saves++; };
+  const [user, ai] = agent.getHistory();
+  assert.equal(ai.text, original);
+  assert.notEqual(user.id, ai.id);
+  const snapshot = originalText => ({ chatKey: '0|chat-1', originalText });
+  await agent.editHistoryTurn(user.id, '修订的问题', snapshot('原问题'));
+  const revised = '修订的回答\n' + original;
+  await agent.editHistoryTurn(ai.id, revised, snapshot(original));
+  assert.equal(saves, 2);
+  assert.equal(llmCalls.length, 0);
+  same(vars.chat.reader_ii_agent.turns.map(t => t.id), [user.id, ai.id]);
+  assert.equal(vars.chat.reader_ii_agent.extracted, 1);
+  const run = await agent.run('继续', { lite: true });
+  assert.equal(run.answer, '继续。');
+  assert.equal(llmCalls[0].find(t => t.role === 'user').content, '修订的问题');
+  const answerInPrompt = llmCalls[0].find(t => t.role === 'assistant').content;
+  assert.match(answerInPrompt, /^修订的回答/);
+  assert.doesNotMatch(answerInPrompt, /旧结尾/);
+  assert.match(answerInPrompt, /当时用过的工具：read/);
+  const turns = agent.getHistory();
+  assert.equal(turns[1].text, revised);
+  same(turns[1].tools, ['read']);
+  assert.equal(new Set(turns.map(t => t.id)).size, 4);
+});
+
+test('消息改动冲突、聊天切换、存盘失败都保留其余记录', async () => {
+  const { agent, ctx } = makeHost({ replies: ['回答。'] });
+  await agent.run('问题', { lite: true });
+  const [user, ai] = agent.getHistory();
+  const snapshot = { chatKey: '0|chat-1', originalText: user.text };
+  await agent.editHistoryTurn(user.id, '先保存的内容', snapshot);
+  await assert.rejects(agent.editHistoryTurn(user.id, '旧编辑器', snapshot), /已被修改/);
+  ctx.getCurrentChatId = () => 'chat-2';
+  await assert.rejects(agent.editHistoryTurn(user.id, '另一聊天', snapshot), /聊天已切换/);
+  ctx.getCurrentChatId = () => 'chat-1';
+  ctx.saveMetadata = async () => { throw new Error('磁盘不可写'); };
+  await assert.rejects(agent.editHistoryTurn(ai.id, '未落盘', { ...snapshot, originalText: ai.text }), /磁盘不可写/);
+  same(agent.getHistory().map(t => t.text), ['先保存的内容', ai.text]);
+});
+
 test('省 token：轻聊不带工具；关掉剧情察知；工具箱按需打开', async () => {
   const lite = makeHost({ replies: ['晚上好，作家先生。'] });
   lite.agent.saveSettings({ lite: true, plotContext: false });

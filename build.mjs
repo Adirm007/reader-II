@@ -37,7 +37,7 @@ export const CORE_MODULES = [
   'src/reader-semantic-codec.js', 'src/reader-semantic-router.js', 'src/reader-character-scan.js',
   'src/reader-adaptation-llm.js', 'src/reader-event-parser.js', 'src/reader-ui-bridge.js', 'src/reader-auto-adapt.js', 'src/reader-lwb-host.js',
   /* 读者界面与提示词 */
-  ASSETS_MODULE, PROMPTS_MODULE, 'src/reader-shell.js', 'src/reader-prompt.js', 'src/reader-core.js',
+  ASSETS_MODULE, PROMPTS_MODULE, 'src/reader-shell.js', 'src/reader-prompt-placement.js', 'src/reader-prompt.js', 'src/reader-core.js',
 ];
 export const AGENT_MODULES = [
   'src/reader-memory.js', 'src/reader-agent-preset.js',

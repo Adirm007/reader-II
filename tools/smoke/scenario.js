@@ -112,6 +112,13 @@ async function main() {
   });
 
   await step('对话：读 → 改 → 确认卡点「允许」→ 回答', async () => {
+    const greeting = $('#ra-log [data-turn-id="greeting"]');
+    if (greeting) {
+      greeting.querySelector('[data-act="turn-edit"]').click();
+      greeting.querySelector('textarea').value = '这里是修订后的欢迎语。';
+      greeting.querySelector('[data-act="turn-save"]').click();
+      await until(() => greeting.querySelector('.ra-msg-text')?.textContent === '这里是修订后的欢迎语。', '保存欢迎语');
+    }
     await ask('把王都人口改成三十万', [
       '我先看看这个条目。\n' + call('read', { path: 'wb:/设定集/王都' }),
       call('edit', { path: 'wb:/设定集/王都', old: '人口十万', new: '人口三十万' }),
@@ -120,10 +127,37 @@ async function main() {
     assert(/人口三十万/.test(capital()), '世界书没有被修改：' + capital());
     assert(/已经把王都的人口改成三十万了/.test($('#ra-log').textContent), '面板里没有出现最终回答');
     assert(/【核心工具】/.test(mock.llmCalls[0][0].content), '系统提示词里没有核心工具');
+    if (greeting) assert(mock.llmCalls[0].some(turn => turn.role === 'assistant' && turn.content === '这里是修订后的欢迎语。'), '第一轮没有收到已编辑的欢迎语');
+  });
+
+  await step('双方气泡支持编辑、保存、取消，重开后保留原角色与工具记录', async () => {
+    const calls = mock.llmCalls.length;
+    for (const [role, newText] of [['user', '请核对王都人口。'], ['ai', '核对完毕，人口三十万。']]) {
+      const node = Array.from(document.querySelectorAll('#ra-log .ra-' + role + '[data-turn-id]')).at(-1);
+      const original = node.querySelector('.ra-msg-text').textContent;
+      node.querySelector('[data-act="turn-edit"]').click();
+      node.querySelector('textarea').value = '放弃的修改';
+      node.querySelector('[data-act="turn-cancel"]').click();
+      assert(node.querySelector('.ra-msg-text').textContent === original, '取消编辑后原文有误');
+      node.querySelector('[data-act="turn-edit"]').click();
+      node.querySelector('textarea').value = newText;
+      node.querySelector('[data-act="turn-save"]').click();
+      await until(() => node.querySelector('.ra-msg-text')?.textContent === newText, '保存消息');
+    }
+    assert(mock.llmCalls.length === calls && capital().includes('人口三十万'), '编辑触发了模型或工具');
+    assert($('#ra-log .ra-step[data-state="ok"]'), '编辑后丢失本轮工具详情');
+    agent.close();
+    agent.open('chat');
+    const [user, ai] = agent.getHistory().slice(-2);
+    assert(user.text === '请核对王都人口。' && ai.text === '核对完毕，人口三十万。', '重开后消息不符');
+    assert(ai.tools.includes('edit') && $('#ra-log').textContent.includes('用过的工具'), '重开后丢失工具记录');
   });
 
   await step('对话：确认卡点「拒绝」不会写入', async () => {
+    const before = mock.llmCalls.length;
     await ask('再改成一万', [call('edit', { path: 'wb:/设定集/王都', old: '人口三十万', new: '人口一万' }), '你没有同意，我没有改。'], 'deny');
+    assert(mock.llmCalls[before].some(turn => turn.role === 'user' && turn.content === '请核对王都人口。'), '下一轮缺少修订后的用户消息');
+    assert(mock.llmCalls[before].some(turn => turn.role === 'assistant' && turn.content.includes('核对完毕，人口三十万。')), '下一轮缺少修订后的助手消息');
     assert(/人口三十万/.test(capital()), '被拒绝的修改还是写进去了');
   });
 
