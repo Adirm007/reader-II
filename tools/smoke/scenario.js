@@ -112,7 +112,8 @@ async function main() {
   });
 
   await step('扩展菜单入口与 /yume 命令', async () => {
-    await until(() => $('#reader-ii-menu'), '菜单入口');
+    const item = await until(() => $('#reader-ii-menu'), '菜单入口');
+    assert(item.matches('#extensionsMenu > div.list-group-item') && item.firstElementChild.matches('.extensionsMenuExtensionButton'), '扩展菜单条目必须匹配酒馆原生菜单与图标样式');
     assert(mock.slash.some((command) => command.name === 'yume'), '没有注册 /yume');
   });
 

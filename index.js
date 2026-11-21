@@ -22,19 +22,27 @@ function openReader() {
 }
 
 function addEntries() {
-  function readerButton(parent, id, className) {
-    if (!parent || document.getElementById(id)) return;
+  const menu = document.getElementById('extensionsMenu');
+  if (menu && !document.getElementById('reader-ii-menu')) {
+    const item = document.createElement('div');
+    item.id = 'reader-ii-menu';
+    item.className = 'list-group-item flex-container flexGap5 interactable';
+    item.setAttribute('role', 'button');
+    item.innerHTML = '<div class="fa-solid fa-book-open extensionsMenuExtensionButton" aria-hidden="true"></div><span>Reader-II</span>';
+    item.addEventListener('click', openReader);
+    menu.appendChild(item);
+  }
+
+  const settings = document.getElementById('extensions_settings2') || document.getElementById('extensions_settings');
+  if (settings && !document.getElementById('reader-ii-settings-entry')) {
     const button = document.createElement('button');
     button.type = 'button';
-    button.id = id;
-    button.className = className;
+    button.id = 'reader-ii-settings-entry';
+    button.className = 'menu_button menu_button_icon interactable';
     button.innerHTML = '<i class="fa-solid fa-book-open" aria-hidden="true"></i><span>Reader-II</span>';
     button.addEventListener('click', openReader);
-    parent.appendChild(button);
+    settings.appendChild(button);
   }
-  readerButton(document.getElementById('extensionsMenu'), 'reader-ii-menu', 'list-group-item flex-container flexGap5 interactable');
-  readerButton(document.getElementById('extensions_settings2') || document.getElementById('extensions_settings'),
-    'reader-ii-settings-entry', 'menu_button menu_button_icon interactable');
   try {
     const ctx = context();
     if (ctx?.SlashCommandParser && ctx?.SlashCommand && !window.__ReaderIISlash) {
