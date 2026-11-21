@@ -3,18 +3,20 @@
   var modules = root.__ReaderIIModules = root.__ReaderIIModules || {};
   var TASK_KEY = 'reader_ii_task_connections_v1';
   var EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
-  function efforts(record, model) {
+  function efforts(record, model, geminiSpec) {
     var meta = record && record.metadata || {};
     var capabilities = record && record.capabilities || {};
     if (record && (record.supports_reasoning === false || record.reasoning === false || capabilities.reasoning === false || capabilities.thinking === false)) return [];
     var offered = record && (record.supported_reasoning_efforts || record.reasoning_efforts || meta.supported_reasoning_efforts ||
       capabilities.reasoning_efforts || capabilities.reasoning && capabilities.reasoning.efforts);
     if (Array.isArray(offered)) return EFFORTS.filter(function (level) { return offered.indexOf(level) >= 0; });
+    var gemini = typeof geminiSpec === 'function' ? geminiSpec(model) : null;
+    if (gemini) return gemini.efforts.slice();
     var id = model.split('/').pop().toLowerCase();
     if (/^(?:gpt-5\.[45](?:-(?:mini|nano))?|gpt-5\.2)(?:-\d{4}-\d\d-\d\d)?$/.test(id)) return ['none','low','medium','high','xhigh'];
     if (/^(?:gpt-5\.[23]-codex|gpt-5\.1-codex-max)$/.test(id)) return ['low','medium','high','xhigh'];
-    if (/^(?:gpt-5(?:-(?:mini|nano))?|o[134](?:-mini)?|gemini-2\.5-(?:pro|flash)(?:-lite)?)$/.test(id)) return ['low','medium','high'];
-    if (/^claude-(?:opus|sonnet)-[45]|^gemini-3(?:\.\d)?-(?:pro|flash)/.test(id) && !/image/.test(id)) return ['low','medium','high'];
+    if (/^(?:gpt-5(?:-(?:mini|nano))?|o[134](?:-mini)?)$/.test(id)) return ['low','medium','high'];
+    if (/^claude-(?:opus|sonnet)-[45]/.test(id) && !/image/.test(id)) return ['low','medium','high'];
     var parameters = record && record.supported_parameters;
     if (Array.isArray(parameters) && (parameters.includes('reasoning_effort') || parameters.includes('reasoning'))) return ['low','medium','high'];
     return [];
@@ -140,7 +142,7 @@
         else if (/embedding/i.test(record.type) || /(?:^|[-/])embed(?:ding)?s?[-/]/i.test(id)) modes = ['embeddings'];
       }
       var nonChat = /^(?:embedding|rerank|transcription|tts)$/i.test(record.type) || /(?:^|[-/])(?:rerank(?:er)?|whisper|transcribe)(?:[-/]|$)/i.test(id);
-      return { id: id, contextWindow: d.metadataLimit(record) || d.catalogWindow(id) || 0, reasoningEfforts: efforts(record, id),
+      return { id: id, contextWindow: d.metadataLimit(record) || d.catalogWindow(id) || 0, reasoningEfforts: efforts(record, id, d.geminiThinkingSpec),
         supportsTextChat: !nonChat && (!modes.length || modes.includes('text')),
         outputModalities: Array.isArray(modes) ? modes.filter(function (mode) { return ['text','image','video','audio','embeddings'].includes(mode); }) : [] };
     }

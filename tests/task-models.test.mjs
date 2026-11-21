@@ -229,3 +229,23 @@ test('酒馆文本补全查询实际服务器、切换端点后重新识别同�
   assert.equal(calls.filter(c=>c.url.endsWith('/status')).length,2);
   assert.doesNotMatch(JSON.stringify(calls),/stale\.test|stale-chat-model/);
 });
+
+test('子代理模型列表识别 Gemini 2.5 / 3 / 4 各代的思考档位与上下文窗口', async () => {
+  const { gateway:g, add } = fixture(() => Response.json({ data:[
+    { id:'gemini-4-neon' }, { id:'gemini-4-argon' }, { id:'gemini-3.1-pro-preview' },
+    { id:'gemini-3-pro-preview' }, { id:'gemini-3-flash-preview' }, { id:'gemini-2.5-flash' },
+    { id:'gemini-2.5-flash-image' },
+  ] }));
+  const p = add('google');
+  g.saveAgentConnection({ selected:p.id });
+  const records = await g.listTaskModels('delegate');
+  const byId = Object.fromEntries(records.map(r => [r.id, r]));
+  assert.deepEqual(plain(byId['gemini-4-neon'].reasoningEfforts), ['low','medium','high','xhigh']);
+  assert.equal(byId['gemini-4-neon'].contextWindow, 1048576);
+  assert.deepEqual(plain(byId['gemini-4-argon'].reasoningEfforts), ['low','medium','high']);
+  assert.deepEqual(plain(byId['gemini-3.1-pro-preview'].reasoningEfforts), ['low','medium','high']);
+  assert.deepEqual(plain(byId['gemini-3-pro-preview'].reasoningEfforts), ['low','high']);
+  assert.deepEqual(plain(byId['gemini-3-flash-preview'].reasoningEfforts), ['minimal','low','medium','high']);
+  assert.deepEqual(plain(byId['gemini-2.5-flash'].reasoningEfforts), ['none','minimal','low','medium','high']);
+  assert.deepEqual(plain(byId['gemini-2.5-flash-image'].reasoningEfforts), []);
+});

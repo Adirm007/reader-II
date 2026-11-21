@@ -293,3 +293,104 @@ test('无卡首次保存助手设置保留旧单方案；其他任务开始共�
   assert.equal(local.resolveApi('memory').model, 'first');
   assert.equal(local.resolveApi('adapt').model, 'old');
 });
+
+test('跟随模型时不泄露酒馆预设的 min/auto 思考档，并清理 custom_include_body 里的宿主内部值', async () => {
+  const sent = [];
+  const settings = {
+    chat_completion_source: 'custom', custom_model: 'gemini-4-neon',
+    custom_include_body: JSON.stringify({ reasoning_effort: 'auto', keep: 1 }),
+  };
+  const ctx = { mainApi: 'openai', chatCompletionSettings: settings, getRequestHeaders: () => ({ 'X-CSRF-Token': 'x' }) };
+  const local = scope.__ReaderIIModules.createLlmGateway({
+    host: {
+      SillyTavern: { getContext: () => ctx },
+      __TAURITAVERN__: { invoke: { safeInvoke: async (_cmd, args) => { sent.push(args.dto); return { choices: [{ message: { content: 'OK' } }] }; } } },
+      fetch: async (_url, options) => { sent.push(JSON.parse(options.body)); return Response.json({ choices: [{ message: { content: 'OK' } }] }); },
+    },
+    hostImport: async () => ({
+      oai_settings: settings,
+      getChatCompletionModel: s => s.custom_model || s.google_model,
+      createGenerationParameters: async (s, model, _type, messages) => ({
+        generate_data: { ...s, model, messages, reasoning_effort: 'min' },
+      }),
+    }),
+  });
+  await local.chatTools({ ...ask, reasoningEffort: 'auto' });
+  assert.equal(sent[0].reasoning_effort, undefined);
+  assert.deepEqual(JSON.parse(sent[0].custom_include_body), { keep: 1 });
+  delete settings.custom_include_body;
+  await local.chatTools({ ...ask, reasoningEffort: 'auto' });
+  assert.equal(sent[1].reasoning_effort, undefined);
+  settings.custom_include_body = JSON.stringify({ reasoning_effort: 'min', keep: 2 });
+  await local.chatTools({ ...ask, reasoningEffort: 'auto' });
+  assert.equal(sent[2].reasoning_effort, undefined);
+  assert.deepEqual(JSON.parse(sent[2].custom_include_body), { reasoning_effort: 'low', keep: 2 });
+  settings.chat_completion_source = 'makersuite';
+  settings.google_model = 'gemini-4-neon';
+  delete settings.custom_model;
+  delete settings.custom_include_body;
+  await local.chatTools({ ...ask, reasoningEffort: 'auto' });
+  assert.equal(sent[3].reasoning_effort, undefined);
+  await local.chatTools({ ...ask, reasoningEffort: 'xhigh' });
+  assert.equal(sent[4].reasoning_effort, 'xhigh');
+});
+
+test('Gemini 各代在 OpenAI 兼容反代、自定义原生格式与原生连接下按模型支持的档位映射', async () => {
+  const ctx = { getRequestHeaders: () => ({ 'X-CSRF-Token': 'test' }) };
+  const { local, requests, select } = proxyGateway(() => ({ choices: [{ message: { content: 'ok' } }] }), ctx);
+  for (const [model, effort, expected] of [
+    ['gemini-4-neon', 'max', 'xhigh'],
+    ['gemini-4-neon', 'xhigh', 'xhigh'],
+    ['gemini-4-neon', 'minimal', 'low'],
+    ['gemini-4-argon', 'xhigh', 'high'],
+    ['gemini-4-argon', 'max', 'high'],
+    ['google/gemini-3.1-pro-preview', 'minimal', 'low'],
+    ['google/gemini-3.1-pro-preview', 'max', 'high'],
+    ['gemini-3-pro-preview', 'medium', 'low'],
+    ['gemini-3-flash-preview', 'minimal', 'minimal'],
+    ['gemini-3-flash-preview', 'xhigh', 'high'],
+    ['gemini-3.7-flash', 'minimal', 'low'],
+    ['gemini-2.5-pro', 'max', 'high'],
+    ['gemini-2.5-flash', 'none', 'none'],
+    ['gemini-2.5-flash', 'max', 'high'],
+  ]) {
+    select({ source: 'custom', model });
+    await local.chatTools({ ...ask, reasoningEffort: effort });
+    assert.equal(JSON.parse(requests.at(-1).body.custom_include_body).reasoning_effort, expected, `${model} ${effort}`);
+    assert.equal(requests.at(-1).body.reasoning_effort, undefined);
+  }
+  for (const model of ['gemini-4-neon', 'gemini-3.1-pro-preview', 'gemini-2.5-pro']) {
+    select({ source: 'custom', model });
+    await assert.rejects(local.chatTools({ ...ask, reasoningEffort: 'none' }), /不支持关闭思考/);
+    assert.equal(local.getModelCapabilities('agent').contextWindow, 1048576);
+  }
+  select({ source: 'makersuite', model: 'gemini-2.5-flash' });
+  await local.chatReply({ ...ask, reasoningEffort: 'auto' });
+  assert.equal(requests.at(-1).body.reasoning_effort, 'auto');
+  await local.chatReply({ ...ask, reasoningEffort: 'none' });
+  assert.equal(requests.at(-1).body.reasoning_effort, 'min');
+  assert.equal(requests.at(-1).body.include_reasoning, false);
+  const customNative = [];
+  const customSettings = { chat_completion_source: 'custom', custom_api_format: 'gemini_generate_content', custom_model: 'gemini-4-neon' };
+  const customHost = scope.__ReaderIIModules.createLlmGateway({
+    host: {
+      SillyTavern: { getContext: () => ({ mainApi: 'openai', chatCompletionSettings: customSettings, getRequestHeaders: () => ({}) }) },
+      fetch: async (_url, options) => { customNative.push(JSON.parse(options.body)); return Response.json({ choices: [{ message: { content: 'ok' } }] }); },
+    },
+    hostImport: async () => ({
+      oai_settings: customSettings,
+      getChatCompletionModel: s => s.custom_model,
+      createGenerationParameters: async (s, model, _type, messages) => ({ generate_data: { ...s, model, messages, reasoning_effort: 'min' } }),
+    }),
+  });
+  await customHost.chatTools({ ...ask, reasoningEffort: 'auto' });
+  assert.equal(customNative[0].reasoning_effort, undefined);
+  assert.equal(customNative[0].custom_include_body, undefined);
+  await customHost.chatTools({ ...ask, reasoningEffort: 'max', modelParameters: { extra_flag: true } });
+  assert.equal(customNative[1].reasoning_effort, 'xhigh');
+  assert.deepEqual(JSON.parse(customNative[1].custom_include_body), { extra_flag: true });
+  customSettings.custom_api_format = 'gemini_interactions';
+  await customHost.chatTools({ ...ask, reasoningEffort: 'minimal' });
+  assert.equal(customNative[2].reasoning_effort, 'low');
+  assert.equal(customNative[2].custom_include_body, undefined);
+});

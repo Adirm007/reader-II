@@ -91,6 +91,62 @@
     return 0;
   }
 
+  function parseGeminiModel(model) {
+    var id = String(model || '').trim().toLowerCase();
+    var match = /(?:^|[\/:\[\]()\s_-])gemini-(\d+)(?:\.(\d+))?-([a-z0-9._-]+)/.exec(id);
+    if (!match) return null;
+    var major = Number(match[1]), minor = Number(match[2] || 0), name = match[3];
+    var isImage = /(?:^|-)image(?:-|$)/.test(name);
+    var family = function (prefix) { return name === prefix || name.indexOf(prefix + '-') === 0; };
+    return { major: major, minor: minor, name: name, isImage: isImage, family: family };
+  }
+
+  function geminiThinkingSpec(model) {
+    var g = parseGeminiModel(model);
+    if (!g || g.isImage) return null;
+    if (g.major === 2 && g.minor === 5) {
+      if (g.family('flash-lite') || g.family('flash')) return { canDisable: true, efforts: ['none', 'minimal', 'low', 'medium', 'high'] };
+      if (g.family('pro')) return { canDisable: false, efforts: ['minimal', 'low', 'medium', 'high'] };
+      return null;
+    }
+    if (g.major === 3) {
+      if (g.minor === 0 && g.family('pro')) return { canDisable: false, efforts: ['low', 'high'] };
+      if (g.family('pro') || ((g.minor === 7 || g.minor === 8) && g.family('flash'))) return { canDisable: false, efforts: ['low', 'medium', 'high'] };
+      if (g.family('flash-lite') || g.family('flash')) return { canDisable: false, efforts: ['minimal', 'low', 'medium', 'high'] };
+      return null;
+    }
+    if (g.major >= 4) {
+      if (g.family('argon') || g.family('carbon')) return { canDisable: false, efforts: ['low', 'medium', 'high'] };
+      return { canDisable: false, efforts: ['low', 'medium', 'high', 'xhigh'] };
+    }
+    return null;
+  }
+
+  function geminiWireEffort(model, effort) {
+    var spec = geminiThinkingSpec(model);
+    if (!spec) {
+      if (effort === 'none') throw new Error('此 Gemini 模型不支持关闭思考，请选择最低或低档位');
+      return effort === 'max' ? 'high' : effort;
+    }
+    if (effort === 'none') {
+      if (!spec.canDisable) throw new Error('此 Gemini 模型不支持关闭思考，请选择最低或低档位');
+      return 'none';
+    }
+    if (spec.efforts.indexOf(effort) >= 0) return effort;
+    if (effort === 'minimal') return spec.efforts.indexOf('minimal') >= 0 ? 'minimal' : 'low';
+    if (effort === 'medium') return spec.efforts.indexOf('medium') >= 0 ? 'medium' : 'low';
+    if (effort === 'xhigh' || effort === 'max') return spec.efforts.indexOf('xhigh') >= 0 ? 'xhigh' : 'high';
+    return effort;
+  }
+
+  function compatibleEffort(model, effort) {
+    if (geminiThinkingSpec(model)) return geminiWireEffort(model, effort);
+    if (effort === 'max' && /^(?:.*\/)?(?:gpt-|o[1-9]|codex)/i.test(model)) {
+      return /^(?:.*\/)?gpt-(?:5\.6|6(?:\.\d+)?)(?:-|$)/i.test(model) ? 'max' : 'xhigh';
+    }
+    return effort;
+  }
+
   function catalogWindow(model) {
     var id = String(model || '').toLowerCase().split('/').pop().replace(/-(?:\d{4}-\d\d-\d\d|\d{8})$/, '');
     if (/^gpt-4\.1(?:-(?:mini|nano))?$/.test(id)) return 1047576;
@@ -101,9 +157,8 @@
     if (/^gpt-5\.(?:4|5)(?:-pro)?$/.test(id)) return 1050000;
     if (/^claude-(?:(?:opus|sonnet)-4[-.]6|opus-4[-.][78]|(?:opus|sonnet)-5(?:[-.]5)?|haiku-5[-.]5|(?:fable|mythos)-5(?:[-.][12])?)$/.test(id)) return 1000000;
     if (/^claude-(?:(?:opus|sonnet|haiku)-4(?:[-.]1|[-.]5)?|3[-.][57]-sonnet)$/.test(id)) return 200000;
-    if (/^gemini-2\.5-(?:pro|flash|flash-lite)$/.test(id)) return 1048576;
-    if (/^gemini-(?:3\.1-pro|3-flash)-preview$/.test(id)) return 1048576;
-    if (id === 'gemini-2.5-flash-image') return 32768;
+    if (/^gemini-2\.5-flash-image(?:-preview)?$/.test(id)) return 32768;
+    if (geminiThinkingSpec(id)) return 1048576;
     return 0;
   }
 
@@ -925,11 +980,58 @@
       return !request.textOnly && (request.imageMode === 'chat' || imageChatModel(model) || modelProfile(request.route).imageChatModel);
     }
 
+    function isTauriHost() {
+      var abi = env && env.host && env.host.__TAURITAVERN__;
+      return !!(abi && abi.invoke && typeof abi.invoke.safeInvoke === 'function');
+    }
+
+    function parseCustomBody(raw, yaml) {
+      if (!raw) return {};
+      if (modules.isObject(raw)) return modules.clone(raw);
+      var parsed;
+      try { parsed = JSON.parse(raw); }
+      catch (_) {
+        if (!yaml || !yaml.parse) throw new Error('当前宿主无法合并自定义端点已有的 YAML 请求参数');
+        parsed = yaml.parse(raw) || {};
+      }
+      if (Array.isArray(parsed)) parsed = Object.assign.apply(Object, [{}].concat(parsed));
+      return modules.isObject(parsed) ? parsed : {};
+    }
+
+    function applyNativeProviderEffort(body, isClaude, effort, tauri) {
+      if (!effort) {
+        if (tauri) delete body.reasoning_effort;
+        else body.reasoning_effort = 'auto';
+        return;
+      }
+      if (effort === 'none') {
+        if (isClaude) {
+          if (/(?:^|\/)claude-(?:(?:fable|mythos|opus|sonnet|haiku)-5|mythos-preview)/i.test(body.model)) throw new Error('此 Claude 模型强制启用思考，请选择思考档位');
+          if (tauri) delete body.reasoning_effort;
+          else body.reasoning_effort = 'auto';
+          body.include_reasoning = false;
+          return;
+        }
+        var spec = geminiThinkingSpec(body.model);
+        if (!spec || !spec.canDisable) throw new Error('此 Gemini 模型不支持关闭思考，请选择最低或低档位');
+        body.reasoning_effort = tauri ? 'minimal' : 'min';
+        body.include_reasoning = false;
+        return;
+      }
+      if (tauri) {
+        var parsed = !isClaude && parseGeminiModel(body.model);
+        body.reasoning_effort = isClaude || (parsed && parsed.major === 2 && parsed.minor === 5)
+          ? effort : geminiThinkingSpec(body.model) ? geminiWireEffort(body.model, effort) : effort;
+        return;
+      }
+      body.reasoning_effort = effort === 'minimal' ? 'min' : effort === 'xhigh' ? 'max' : effort;
+    }
+
     // Chat Completions compatible proxies receive the wire value even for model aliases unknown to SillyTavern.
     function compatibleParameters(model, request) {
       var options = modelParameters(request), effort = requestedEffort(request);
       if (effort && options.reasoning_effort === undefined && options.reasoning === undefined) {
-        options.reasoning_effort = effort === 'max' && /^(?:.*\/)?(?:gpt-|o[1-9]|codex)/i.test(model) ? 'xhigh' : effort;
+        options.reasoning_effort = compatibleEffort(model, effort);
       }
       if (request.textOnly) delete options.modalities;
       else if (imageChat(request, model) && !options.modalities) {
@@ -942,43 +1044,97 @@
     function applyBackendParameters(body, request, independent, yaml) {
       var source = body.chat_completion_source, effort = requestedEffort(request);
       var extra = modelParameters(request), wantsImages = imageChat(request, body.model);
+      var tauri = isTauriHost();
       if (request.textOnly) delete body.request_images;
-      var isCompatibleProxy = source === 'custom' || source === 'openai' && body.reverse_proxy;
+      var customFormat = source === 'custom' ? String(body.custom_api_format || '').trim().toLowerCase() : '';
+      var opencodeFormat = source === 'opencode' ? String(body.opencode_api_format || '').trim().toLowerCase() : '';
+      var openaiResponses = source === 'openai' && String(body.openai_api_format || '').trim().toLowerCase() === 'openai_responses';
+      var isCompatibleProxy = (source === 'custom' && (!customFormat || customFormat === 'openai_compat'))
+        || (source === 'openai' && body.reverse_proxy && !openaiResponses);
       if (isCompatibleProxy) {
         var options = compatibleParameters(body.model, request);
-        if (!Object.keys(options).length) return;
+        var hasCustomBody = !independent && body.custom_include_body;
+        var previous = null, sanitized = false;
+        if (hasCustomBody && Object.keys(options).length) {
+          previous = parseCustomBody(body.custom_include_body, yaml);
+        } else if (hasCustomBody && !effort) {
+          var rawText = modules.isObject(body.custom_include_body) ? JSON.stringify(body.custom_include_body) : String(body.custom_include_body);
+          if (/reasoning_effort/i.test(rawText)) {
+            try { previous = parseCustomBody(body.custom_include_body, yaml); } catch (_) { previous = null; }
+          }
+        }
+        if (previous && !effort && options.reasoning_effort === undefined && typeof previous.reasoning_effort === 'string') {
+          var rawEffort = previous.reasoning_effort.trim().toLowerCase();
+          if (!rawEffort || rawEffort === 'auto') { delete previous.reasoning_effort; sanitized = true; }
+          else if (rawEffort === 'min' || rawEffort === 'minimum') { previous.reasoning_effort = compatibleEffort(body.model, 'minimal'); sanitized = true; }
+          else if (rawEffort === 'maximum') { previous.reasoning_effort = compatibleEffort(body.model, 'max'); sanitized = true; }
+        }
+        if (!effort) delete body.reasoning_effort;
+        if (!Object.keys(options).length && !sanitized) return;
         if (source === 'openai') {
           body.chat_completion_source = 'custom';
           body.custom_url = body.reverse_proxy;
           // The custom backend may have a different saved secret. Override its Authorization even for keyless proxies.
           body.custom_include_headers = 'Authorization: ' + JSON.stringify(body.proxy_password ? 'Bearer ' + body.proxy_password : '');
         }
-        var previous = {};
-        if (!independent && body.custom_include_body) {
-          try { previous = JSON.parse(body.custom_include_body); }
-          catch (_) {
-            if (!yaml || !yaml.parse) throw new Error('当前宿主无法合并自定义端点已有的 YAML 请求参数');
-            previous = yaml.parse(body.custom_include_body) || {};
-          }
-          if (Array.isArray(previous)) previous = Object.assign.apply(Object, [{}].concat(previous));
+        body.custom_include_body = JSON.stringify(Object.assign({}, previous || {}, options));
+        delete body.reasoning_effort; // Some hosts would rewrite the supplied value a second time.
+        return;
+      }
+      if (source === 'custom') {
+        if (Object.keys(extra).length) {
+          var prevCustom = !independent && body.custom_include_body ? parseCustomBody(body.custom_include_body, yaml) : {};
+          body.custom_include_body = JSON.stringify(Object.assign({}, prevCustom, extra));
         }
-        body.custom_include_body = JSON.stringify(Object.assign({}, previous, options));
-        if (effort) delete body.reasoning_effort; // Some hosts would rewrite the supplied value a second time.
+        if (wantsImages && customFormat === 'gemini_generate_content') body.request_images = true;
+        if (!effort) { delete body.reasoning_effort; return; }
+        if (customFormat === 'gemini_generate_content') {
+          if (effort === 'none') {
+            var gSpec = geminiThinkingSpec(body.model);
+            if (!gSpec || !gSpec.canDisable) throw new Error('此 Gemini 模型不支持关闭思考，请选择最低或低档位');
+            body.reasoning_effort = 'minimal';
+            body.include_reasoning = false;
+          } else body.reasoning_effort = geminiWireEffort(body.model, effort);
+        } else if (customFormat === 'gemini_interactions') {
+          body.reasoning_effort = geminiWireEffort(body.model, effort);
+        } else if (customFormat === 'claude_messages') {
+          if (effort === 'none') {
+            if (/(?:^|\/)claude-(?:(?:fable|mythos|opus|sonnet|haiku)-5|mythos-preview)/i.test(body.model)) throw new Error('此 Claude 模型强制启用思考，请选择思考档位');
+            delete body.reasoning_effort;
+            body.include_reasoning = false;
+          } else body.reasoning_effort = effort === 'minimal' ? 'low' : effort;
+        } else {
+          body.reasoning_effort = compatibleEffort(body.model, effort);
+        }
         return;
       }
       if (Object.keys(extra).length) throw new Error('此连接不转发自定义模型参数，请选择 OpenAI 兼容反代或自定义端点');
-      if (wantsImages && (source === 'makersuite' || source === 'vertexai')) body.request_images = true;
-      if (!effort) return;
-      if (source === 'claude' || source === 'makersuite' || source === 'vertexai') {
-        if (effort === 'none') {
-          if (source === 'claude' && /^claude-(?:(?:fable|mythos|opus|sonnet|haiku)-5|mythos-preview)/.test(body.model)) throw new Error('此 Claude 模型强制启用思考，请选择思考档位');
-          if (source !== 'claude' && !/^gemini-2\.5-flash(?:-|$)/.test(body.model)) throw new Error('此 Gemini 模型无法通过宿主关闭思考，请选择最低档位');
-          body.reasoning_effort = source === 'claude' ? 'auto' : 'min';
-          body.include_reasoning = false;
-        } else body.reasoning_effort = effort === 'minimal' ? 'min' : effort === 'xhigh' ? 'max' : effort;
+      var isGoogle = source === 'makersuite' || source === 'vertexai' || (source === 'opencode' && opencodeFormat === 'gemini');
+      var isVertexClaude = source === 'vertexai' && /(?:^|\/)claude-/i.test(body.model);
+      if (wantsImages && isGoogle && !isVertexClaude) body.request_images = true;
+      if (source === 'claude' || isGoogle) {
+        applyNativeProviderEffort(body, source === 'claude' || isVertexClaude, effort, tauri);
         return;
       }
-      body.reasoning_effort = effort === 'max' && (source === 'openai' || source === 'openrouter') ? 'xhigh' : effort;
+      if (!effort) { delete body.reasoning_effort; return; }
+      if (source === 'opencode' && opencodeFormat === 'claude_messages') {
+        if (effort === 'none') {
+          if (/(?:^|\/)claude-(?:(?:fable|mythos|opus|sonnet|haiku)-5|mythos-preview)/i.test(body.model)) throw new Error('此 Claude 模型强制启用思考，请选择思考档位');
+          delete body.reasoning_effort;
+          body.include_reasoning = false;
+        } else body.reasoning_effort = effort === 'minimal' ? 'low' : effort;
+        return;
+      }
+      if (geminiThinkingSpec(body.model)) {
+        body.reasoning_effort = geminiWireEffort(body.model, effort);
+        return;
+      }
+      if (source === 'openai' || source === 'openrouter') {
+        body.reasoning_effort = effort === 'max' && !/^(?:.*\/)?(?:claude-|gpt-(?:5\.6|6(?:\.\d+)?)(?:-|$))/i.test(body.model)
+          ? 'xhigh' : effort;
+        return;
+      }
+      body.reasoning_effort = effort;
     }
 
     /* 独立 API 经酒馆后端代发：与酒馆助手的 custom_api 同一种写法（reverse_proxy + proxy_password）。 */
@@ -1082,7 +1238,8 @@
       hostChatModule = api;
       var yaml = env.host && env.host.YAML;
       if (!yaml && settings && settings.chat_completion_source === 'custom' && settings.custom_include_body &&
-          (requestedEffort(request) || Object.keys(modelParameters(request)).length || imageChat(request, settings.custom_model))) {
+          (requestedEffort(request) || Object.keys(modelParameters(request)).length || imageChat(request, settings.custom_model)
+            || /reasoning_effort/i.test(String(settings.custom_include_body)))) {
         try { yaml = (await env.hostImport('/lib.js')).yaml; } catch (_) { /* JSON presets do not need a YAML parser. */ }
       }
       var isolated = isolatedRoute(request);
@@ -1251,6 +1408,7 @@
       env: env, gateway: gateway, state: connectionState, read: readJson, write: writeJson, presetKey: PRESET_KEY,
       presetApi: presetApi, usablePreset: usablePreset, validateEndpoint: validateEndpoint, context: nativeContext, fetcher: hostFetch,
       metadataLimit: metadataLimit, catalogWindow: catalogWindow, imageModel: imageModel, imageChatModel: imageChatModel,
+      geminiThinkingSpec: geminiThinkingSpec,
       parseReply: parseToolResponse, requestImages: generateImages, readFailure: readFailure, delay: delay, abortError: abortError
     }));
     return gateway;
