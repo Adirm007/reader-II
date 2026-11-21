@@ -20,10 +20,13 @@
       var attached = config.selected !== 'agent' && llm.getConnectionPreset(config.selected);
       return config.enabled ? '当前启用 · ' + (config.model || (attached && attached.model) || activeModel()) : '当前关闭';
     }
+    function hasKey(object, key) {
+      return !!object && Object.prototype.hasOwnProperty.call(object, key);
+    }
     function presetOptions(selected, base) {
       var items = presets();
       var html = choices(base, selected) + items.map(function (p) { return opt(p.id, p.name + (p.name === p.model ? '' : ' · ' + p.model), selected); }).join('');
-      if (selected && !Object.hasOwn(base, selected) && !items.some(function (p) { return p.id === selected; })) html += opt(selected, '方案已移除 · ' + selected, selected);
+      if (selected && !hasKey(base, selected) && !items.some(function (p) { return p.id === selected; })) html += opt(selected, '方案已移除 · ' + selected, selected);
       return html;
     }
     function field(label, control) { return '<label class="ra-model-field"><span>' + label + '</span>' + control + '</label>'; }
@@ -33,7 +36,7 @@
         + '<select data-model-results aria-label="从接口返回的模型中选择" hidden></select>'
         + '<span class="ra-note" data-model-hint role="status"></span></div>';
     }
-    function sourceOptions(value) { return choices(SOURCES, value) + (!Object.hasOwn(SOURCES, value) && value ? opt(value, value, value) : ''); }
+    function sourceOptions(value) { return choices(SOURCES, value) + (!hasKey(SOURCES, value) && value ? opt(value, value, value) : ''); }
     function presetForm(p) {
       p = p || {};
       return '<div class="ra-model-grid" data-editor="preset" data-preset-id="' + esc(p.id || '') + '">'
@@ -46,13 +49,14 @@
     }
     function connectionsHtml() {
       var active = llm.getAgentConnection();
+      var chev = view.icon ? view.icon('chevron') : '';
       return view.card('ra-connections-card', '模型连接', '<div data-editor="main">'
         + field('主助手使用', '<select id="ra-agent-route" data-preset-options="main">' + presetOptions(active.selected, { default: '跟随默认方案', tavern: '酒馆当前连接' }) + '</select>')
         + '<div class="ra-row"><button type="button" class="ra-btn is-small" data-act="models-main-save">应用主助手连接</button>'
         + '<span class="ra-note" id="ra-model-active">当前使用 · ' + esc(activeModel()) + '</span></div></div>'
-        + '<details class="ra-fold" id="ra-preset-manager"><summary>新增或编辑独立 API 方案</summary>'
+        + '<details class="ra-fold" id="ra-preset-manager"><summary>' + chev + '新增或编辑独立 API 方案</summary><div class="ra-fold-body">'
         + field('编辑方案', '<select id="ra-preset-choice" data-preset-options="edit">' + presetOptions('', { '': '新建独立方案' }) + '</select>')
-        + '<div id="ra-preset-form">' + presetForm() + '</div></details>', '单独保存');
+        + '<div id="ra-preset-form">' + presetForm() + '</div></div></details>', '单独保存');
     }
     function roleHtml(rule) {
       var rid = rule.id || ('role-' + Date.now().toString(36) + '-' + (++serial).toString(36));
@@ -67,22 +71,27 @@
     function delegationHtml() {
       var conf = agent.getSettings().subagents;
       return view.card('ra-delegation-card', '子代理', '<div data-delegation>'
-        + '<label class="ra-check"><input type="checkbox" id="ra-subagents-enabled"' + (conf.enabled ? ' checked' : '') + '><span class="ra-switch" aria-hidden="true"></span><span>允许主助手派发子代理<span class="ra-hint">开关立即生效。角色、模型与思考档位会保留。</span></span></label>'
-        + field('派发时如何选模型', '<select data-s="sub.mode" id="ra-delegate-mode">'
-          + choices({ current: '始终沿用主助手模型', rules: '按任务倾向选择角色', smart: '智能代理：从当前助手连接的模型列表选择' }, conf.mode) + '</select>')
-        + field('沿用主助手模型时的子代理思考档位', '<select data-s="sub.effort">' + choices(EFFORT, conf.effort || 'auto') + '</select>')
+        + '<label class="ra-check"><input type="checkbox" id="ra-subagents-enabled"' + (conf.enabled ? ' checked' : '') + '><span class="ra-switch" aria-hidden="true"></span><span>允许主助手派发子代理</span></label>'
+        + '<div class="ra-model-grid ra-mt">'
+        + field('派发选模方式', '<select data-s="sub.mode" id="ra-delegate-mode">'
+          + choices({ current: '始终沿用主助手模型', rules: '按任务倾向选择角色', smart: '智能代理（从模型列表选择）' }, conf.mode) + '</select>')
+        + field('沿用主模型时的思考档位', '<select data-s="sub.effort">' + choices(EFFORT, conf.effort || 'auto') + '</select>')
+        + '</div>'
         + '<p class="ra-note" id="ra-delegation-note"></p>'
         + '<div id="ra-roles"><div id="ra-role-rows">' + conf.rules.map(roleHtml).join('') + '</div>'
-        + '<button type="button" class="ra-btn is-small" data-act="models-role-add">新增任务角色</button></div></div>', '角色与派发方式点底部保存');
+        + '<button type="button" class="ra-btn is-small" data-act="models-role-add">新增任务角色</button></div></div>', '开关立即生效');
     }
     function syncMode() {
       var mode = $('#ra-delegate-mode');
       if (!mode) return;
-      $('#ra-roles').hidden = mode.value !== 'rules';
-      var enabled = $('#ra-subagents-enabled').checked;
-      $('#ra-delegation-note').textContent = !enabled ? '当前已关闭派发。' : mode.value === 'smart'
-        ? '需要派发时，主助手读取当前连接的模型列表并自行选择。所选模型不可用时沿用主助手模型。'
-        : mode.value === 'rules' ? '主助手按角色的任务说明派发。没有匹配的角色或指定模型不可用时，沿用主助手模型。' : '子代理使用主助手当前的连接与模型。';
+      var roles = $('#ra-roles');
+      if (roles) roles.hidden = mode.value !== 'rules';
+      var enabledBox = $('#ra-subagents-enabled');
+      var enabled = !!(enabledBox && enabledBox.checked);
+      var note = $('#ra-delegation-note');
+      if (note) note.textContent = !enabled ? '状态：已关闭派发' : mode.value === 'smart'
+        ? '状态：智能选模（不可用时回退主助手）'
+        : mode.value === 'rules' ? '状态：按任务角色分工（无匹配时回退主助手）' : '状态：沿用主助手连接与模型';
     }
     function readDelegation() {
       var rules = [];

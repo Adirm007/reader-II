@@ -605,7 +605,7 @@
 
     tool({
       name: 'memory_save', tier: 'memory',
-      summary: '记下你与真实用户聊过的偏好、约定、情感或做法。不得保存正文剧情、角色状态或剧情插件摘要。store 留空跟随用户设置，明确要求跨存档时使用 ocean。',
+      summary: '保存你与真实用户的偏好、约定、情感或已验证的做法（仅用于助手与用户的交流记忆）。store 留空跟随用户设置，需跨存档保留时填 ocean。',
       params: [
         { name: 'type', type: 'string', required: true, desc: 'episode | fact | bond | howto' },
         { name: 'title', type: 'string', required: true, desc: '不超过 18 字的标题' },
@@ -664,17 +664,17 @@
     /* ---------- 界面 ---------- */
     tool({
       name: 'reader_ui', tier: 'read', volatile: true,
-      summary: '替用户打开读者的界面：lobby 大厅、gacha 命运抽卡、bookshelf 书架、gallery 相册、chess 棋局、panel 语义适配面板、memory 记忆管理。',
-      params: [{ name: 'open', type: 'string', required: true, desc: 'lobby | gacha | bookshelf | gallery | chess | panel | memory' }],
+      summary: '替用户打开读者界面：lobby 大厅、gacha 命运抽卡、bookshelf 书架、gallery 相册、chess 棋局、panel 语义适配面板、memory 记忆管理、guide 功能说明。',
+      params: [{ name: 'open', type: 'string', required: true, desc: 'lobby | gacha | bookshelf | gallery | chess | panel | memory | guide' }],
       run: async function (args) {
         var target = String(args.open || '');
         if (target === 'panel') { await core().openPanel(); return { ok: true }; }
-        if (target === 'memory') { if (deps.openUi) deps.openUi('memory'); return { ok: true }; }
+        if (target === 'memory' || target === 'guide') { if (deps.openUi) deps.openUi(target); return { ok: true }; }
         var shell = deps.shell ? deps.shell() : null;
         if (!shell) throw new Error('读者界面尚未就绪');
         var commands = { gacha: 'openGacha', bookshelf: 'openBookshelf', gallery: 'openDreamGallery', chess: 'openChessGame' };
         if (target === 'lobby') return { ok: !!(await shell.open('lobby')) };
-        if (!commands[target]) throw new Error('open 只能是 lobby / gacha / bookshelf / gallery / chess / panel / memory');
+        if (!commands[target]) throw new Error('open 只能是 lobby / gacha / bookshelf / gallery / chess / panel / memory / guide');
         return { ok: (await shell.command(commands[target])) !== false };
       }
     });

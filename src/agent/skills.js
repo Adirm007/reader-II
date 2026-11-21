@@ -14,19 +14,28 @@
 
   var BUILTIN = [
     { name: 'tavern-anatomy', summary: '酒馆里各样东西在哪：角色卡、世界书、正则、酒馆助手脚本、预设、变量各自的路径与写法要点' },
-    { name: 'debugging', summary: '排查「爆红 / 不渲染 / 变量不更新 / 脚本没反应」的固定步骤' },
-    { name: 'ejs-prompt-template', summary: '写与排查酒馆 EJS（提示词模板 ST-Prompt-Template 的 <% %> 语法）', files: {
+    { name: 'debugging', summary: '排查「爆红 / 不渲染 / 变量不更新 / 脚本没反应」的标准定位步骤' },
+    { name: 'ejs-prompt-template', summary: '酒馆 EJS（ST-Prompt-Template）语法、@@ 装饰器、作用域、多阶段动态世界书与排错', files: {
       'reference.md': 'https://cdn.jsdelivr.net/gh/zonde306/ST-Prompt-Template@main/docs/reference_cn.md',
-      'features.md': 'https://cdn.jsdelivr.net/gh/zonde306/ST-Prompt-Template@main/docs/features_cn.md'
+      'features.md': 'https://cdn.jsdelivr.net/gh/zonde306/ST-Prompt-Template@main/docs/features_cn.md',
+      'features_en.md': 'https://cdn.jsdelivr.net/gh/zonde306/ST-Prompt-Template@main/docs/features.md'
     } },
-    { name: 'mvu', summary: 'MVU 变量框架：stat_data 结构、<UpdateVariable> 更新、初始化与常见故障' },
-    { name: 'lwb-variables', summary: '小白X 的变量：存放位置、<state> 写法、模板与约束' },
-    { name: 'card-workflow', summary: '制卡工作流：从设定到角色卡、世界书、开场白，再在当前酒馆里试跑；也说明怎么自定义工作流' },
+    { name: 'mvu', summary: 'MVU Beta 与 MVUzod 变量框架：Zod 4 Schema、[InitVar]、[mvu_update]/[mvu_plot]、命令与 JSON Patch、$meta 与排错', files: {
+      'stat_var.md': 'https://cdn.jsdelivr.net/gh/MagicalAstrogy/MagVarUpdate@beta/doc/stat_var.md',
+      'supplementary-tutorial.md': 'https://cdn.jsdelivr.net/gh/MagicalAstrogy/MagVarUpdate@beta/doc/supplementary-tutorial.md'
+    } },
+    { name: 'lwb-variables', summary: '小白X（LittleWhiteBox）变量 2.0 与 3.0：宏、<varevent>、V2 <state>/$schema/JSON apply、V3 卡规则包/动作/结算/扩展', files: {
+      'variables.md': 'https://cdn.jsdelivr.net/gh/RT15548/LittleWhiteBox@main/docs/user/variables.md',
+      'variables-v2.md': 'https://cdn.jsdelivr.net/gh/RT15548/LittleWhiteBox@main/docs/user/variables-v2.md',
+      'variables-v3.md': 'https://cdn.jsdelivr.net/gh/RT15548/LittleWhiteBox@main/docs/user/variables-v3.md',
+      'variables-v3-external.md': 'https://cdn.jsdelivr.net/gh/RT15548/LittleWhiteBox@main/docs/user/variables-v3-external.md'
+    } },
+    { name: 'card-workflow', summary: '制卡工作流：从设定到角色卡、世界书、开场白、变量系统，再在当前酒馆里试跑验证' },
     { name: 'connector-authoring', summary: '给没有预置对接的插件写对接：找接口、起草 connector.json、试调、启用' },
-    { name: 'reader-ii', summary: 'Reader-II 自己：FP、语义槽、轻信、大厅、抽卡各是什么，出问题看哪里' },
-    { name: 'web-github', summary: '联网与 GitHub：抓网页、读仓库（gh:/）、搜代码、把工作区里做好的东西推送上去' },
-    { name: 'mcp', summary: 'MCP 服务器：怎么接入、工具箱怎么用、连不上时怎么排查' },
-    { name: 'device', summary: '在设备上做事（要后端伴侣）：dev:/ 文件、跑命令与后台任务、装依赖、无头浏览器、给酒馆写扩展的流程' }
+    { name: 'reader-ii', summary: 'Reader-II 自身结构：FP、七槽语义适配、轻信、大厅、抽卡与排错入口' },
+    { name: 'web-github', summary: '联网与 GitHub：抓网页、读仓库（gh:/）、搜代码、把工作区成果推送到仓库' },
+    { name: 'mcp', summary: 'MCP 服务器：接入、使用工具箱与连接排查' },
+    { name: 'device', summary: '通过后端伴侣在本地设备工作：dev:/ 文件、命令与后台任务、无头浏览器与酒馆扩展开发' }
   ];
 
   function parseFrontmatter(text) {

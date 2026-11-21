@@ -480,13 +480,15 @@
     }
 
     function tauriTools(server) {
-      if (!tauriDirectory) return server.tools;
+      var list = server && Array.isArray(server.tools) ? server.tools : [];
+      if (!tauriDirectory) return list;
       var item = tauriDirectory.get(server.id);
       if (!item) return [];
-      return server.tools.filter(function (tool) {
-        return ['ask', 'allow'].includes(item.permissions[tool.name]);
+      var perms = modules.isObject(item.permissions) ? item.permissions : {};
+      return list.filter(function (tool) {
+        return tool && ['ask', 'allow'].includes(perms[tool.name]);
       }).map(function (tool) {
-        return Object.assign({}, tool, { permission: item.permissions[tool.name] });
+        return Object.assign({}, tool, { permission: perms[tool.name] });
       });
     }
 
@@ -684,10 +686,11 @@
           hasSecret: Object.keys(secret(server.id)).length > 0
         };
       });
-      tauri.servers.forEach(function (server) {
+      (Array.isArray(tauri.servers) ? tauri.servers : []).forEach(function (server) {
+        if (!server || !server.id) return;
         var tools = tauriTools(server);
         var active = !tauriDirectory || tauriDirectory.has(server.id);
-        rows.push({ id: server.id, name: tauriDirectory && active ? tauriDirectory.get(server.id).name : server.name,
+        rows.push({ id: server.id, name: tauriDirectory && active ? tauriDirectory.get(server.id).name : (server.name || server.id),
           source: 'tt', enabled: true, available: active, tools: tools.length, toolNames: tools.map(function (tool) { return tool.name; }), at: server.at || tauri.at });
       });
       if (tauriDirectory) tauriDirectory.forEach(function (item) {

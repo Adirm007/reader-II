@@ -37,6 +37,53 @@
     return source.length > budget ? source.slice(0, budget - 1) + '…' : source;
   }
 
+  function cloneJson(value) {
+    return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
+  }
+
+  function readPath(rootObj, pathStr) {
+    if (!pathStr) return rootObj;
+    var text = String(pathStr).trim();
+    var segs = text.charAt(0) === '/'
+      ? text.slice(1).split('/').map(function (s) { return s.replace(/~1/g, '/').replace(/~0/g, '~'); })
+      : text.split('.');
+    var cur = rootObj;
+    for (var i = 0; i < segs.length; i += 1) {
+      if (cur == null || typeof cur !== 'object') return undefined;
+      var key = segs[i];
+      if (/^(?:__proto__|constructor|prototype)$/.test(key)) return undefined;
+      cur = cur[key];
+    }
+    return cur;
+  }
+
+  function diffTrees(before, after, prefix, out) {
+    out = out || [];
+    if (out.length >= 80) return out;
+    if (before === after) return out;
+    var leftObj = before && typeof before === 'object' && !Array.isArray(before);
+    var rightObj = after && typeof after === 'object' && !Array.isArray(after);
+    if (leftObj && rightObj) {
+      var keys = Object.keys(before).concat(Object.keys(after)).filter(function (k, idx, arr) { return arr.indexOf(k) === idx; });
+      for (var i = 0; i < keys.length && out.length < 80; i += 1) {
+        var k = keys[i];
+        diffTrees(before[k], after[k], prefix ? prefix + '.' + k : k, out);
+      }
+      return out;
+    }
+    if (JSON.stringify(before) !== JSON.stringify(after)) {
+      out.push({ path: prefix || '(root)', before: before, after: after });
+    }
+    return out;
+  }
+
+  function mvuTargetOption(args) {
+    var id = args && args.message_id;
+    if (id === undefined || id === null || id === '' || id === 'latest') return { type: 'message', message_id: 'latest' };
+    var num = Number(id);
+    return { type: 'message', message_id: Number.isFinite(num) ? Math.trunc(num) : String(id) };
+  }
+
   // The database exports merged sheets with a header row. Its history-context API
   // returns chat/isolation identifiers, not the table contents.
   function databaseBrief(tables, budget) {
@@ -182,27 +229,211 @@
     });
 
     list.push({
-      id: 'mvu', title: 'MVU 变量框架', summary: '可查看角色卡用 MVU 记录的状态，例如好感度、物品或当前地点。',
-      detect: function () { return !!(host.Mvu && typeof host.Mvu.getMvuData === 'function'); }, skill: 'mvu'
+      id: 'mvu', title: 'MVU 变量框架', summary: '查看、试跑和应用角色卡的 MVU 变量状态（stat_data / display_data / delta_data / schema）。',
+      detect: function () { return !!(host.Mvu && typeof host.Mvu.getMvuData === 'function'); }, skill: 'mvu',
+      tools: [{
+        name: 'mvu_inspect', effect: 'read', scope: 'chat',
+        summary: '读取指定楼层（默认最新楼层）的 MVU 数据。category 可选 stat_data（默认）/ display_data / delta_data / schema / all；可传 path（点路径或 JSON Pointer）读取子树。',
+        params: [
+          { name: 'message_id', type: 'string', desc: '楼层号（从 0 起、负数倒数，或 latest；默认 latest）' },
+          { name: 'category', type: 'string', desc: 'stat_data / display_data / delta_data / schema / all（默认 stat_data）' },
+          { name: 'path', type: 'string', desc: '可选子树路径，如 角色.艾琳.好感度 或 /角色/艾琳/好感度' }
+        ],
+        run: async function (args) {
+          var api = host.Mvu;
+          var opt = mvuTargetOption(args);
+          var data = api.getMvuData(opt);
+          if (!data || typeof data !== 'object') return { ok: false, note: '指定楼层没有 MVU 数据', target: opt };
+          var category = String(args.category || 'stat_data');
+          if (category === 'all') {
+            var target = args.path ? readPath(data, args.path) : {
+              initialized_lorebooks: data.initialized_lorebooks || {},
+              is_during_extra_analysis: typeof api.isDuringExtraAnalysis === 'function' ? !!api.isDuringExtraAnalysis() : false,
+              stat_data: data.stat_data,
+              display_data: data.display_data,
+              delta_data: data.delta_data,
+              has_schema: data.schema !== undefined
+            };
+            return { target: opt, data: target };
+          }
+          var bucket = data[category];
+          return { target: opt, category: category, value: args.path ? readPath(bucket, args.path) : bucket };
+        }
+      }, {
+        name: 'mvu_test_update', effect: 'read', scope: 'chat', volatile: true,
+        summary: '在不改动当前聊天的情况下，用 MVU 解析器试跑一段更新文本（<UpdateVariable>、_.set/_.add/_.assign/_.remove 或 <JSONPatch>），返回变更 diff 与结果。',
+        params: [
+          { name: 'message', type: 'string', required: true, desc: '待试跑的更新命令或包含 <UpdateVariable> 的文本' },
+          { name: 'message_id', type: 'string', desc: '基准楼层（默认 latest）' }
+        ],
+        run: async function (args) {
+          var api = host.Mvu;
+          if (typeof api.parseMessage !== 'function') throw new Error('当前版本的 MVU 没有开放 parseMessage 接口');
+          var opt = mvuTargetOption(args);
+          var current = api.getMvuData(opt);
+          if (!current || typeof current !== 'object') throw new Error('指定楼层没有 MVU 数据');
+          var before = cloneJson(current);
+          var next = await api.parseMessage(String(args.message || ''), cloneJson(current));
+          if (!next) return { target: opt, changed: false, changes: [] };
+          var changes = diffTrees(before.stat_data, next.stat_data);
+          return { target: opt, changed: changes.length > 0, changes: changes, delta_data: next.delta_data, display_data: next.display_data };
+        }
+      }, {
+        name: 'mvu_apply_update', effect: 'write', scope: 'chat', paths: function () { return ['var:/mvu.json']; },
+        summary: '用 MVU 解析器执行一段更新文本（<UpdateVariable>、_.set/_.add/_.assign/_.remove 或 <JSONPatch>）并写回指定楼层，经过 MVU 的 $meta 与 Zod 校验。',
+        params: [
+          { name: 'message', type: 'string', required: true, desc: '更新命令或包含 <UpdateVariable> 的文本' },
+          { name: 'message_id', type: 'string', desc: '目标楼层（默认 latest）' }
+        ],
+        run: async function (args) {
+          var api = host.Mvu;
+          if (typeof api.parseMessage !== 'function' || typeof api.replaceMvuData !== 'function') throw new Error('当前版本的 MVU 缺少 parseMessage 或 replaceMvuData 接口');
+          var opt = mvuTargetOption(args);
+          var current = api.getMvuData(opt);
+          if (!current || typeof current !== 'object') throw new Error('指定楼层没有 MVU 数据');
+          var before = cloneJson(current);
+          var next = await api.parseMessage(String(args.message || ''), cloneJson(current));
+          if (!next) return { target: opt, applied: false, changes: [] };
+          var changes = diffTrees(before.stat_data, next.stat_data);
+          if (!changes.length) return { target: opt, applied: false, changes: [] };
+          await api.replaceMvuData(next, opt);
+          return { target: opt, applied: true, changes: changes };
+        }
+      }]
     });
 
     list.push({
-      id: 'lwb', title: '小白X（LittleWhiteBox）', summary: '读取小白X保存的事件和剧情线，也能通过它的变量工具查看或修改角色状态。',
-      detect: function () { return !!(host.LittleWhiteBox || host.LWB_StateV2 || host.xiaobaixGenerateInterceptor); }, skill: 'lwb-variables',
+      id: 'lwb', title: '小白X（LittleWhiteBox）', summary: '读取小白X 的剧情摘要，并通过变量 2.0 / 3.0 接口检查、试算、修改状态与规则包。',
+      detect: function () { return !!(host.LittleWhiteBox || host.LWB_StateV2 || host.LWB_StateV3 || host.xiaobaixGenerateInterceptor); }, skill: 'lwb-variables',
       brief: function (options) { return lwbBrief(kit.context() || {}, options.budget); },
       tools: [{
         name: 'lwb_state_apply', effect: 'write', scope: 'chat', paths: function () { return ['var:/chat.json']; },
-        summary: '按小白X「变量 2.0」的 <state> 写法修改变量，例如 <state>数据.角色.金币: +10</state>。会经过它的模板与约束校验。',
-        params: [{ name: 'text', type: 'string', required: true, desc: '完整的 <state>…</state> 文本' }],
+        summary: '按小白X「变量 2.0」的 <state> 文本修改变量（如 <state>数据.角色.金币: +10</state>；绝对负数写 (-5)）。会经过模板与约束校验。',
+        params: [
+          { name: 'text', type: 'string', required: true, desc: '完整的 <state>…</state> 文本' },
+          { name: 'floor', type: 'number', desc: '可选目标楼层号（默认最新楼层）' }
+        ],
         run: async function (args) {
-          if (!host.LWB_StateV2 || typeof host.LWB_StateV2.applyText !== 'function') throw new Error('小白X 的变量 2.0 接口不可用：请在它的设置里开启「变量管理 2.0 (state)」');
-          return host.LWB_StateV2.applyText(String(args.text));
+          if (!host.LWB_StateV2 || typeof host.LWB_StateV2.applyText !== 'function') throw new Error('小白X 的变量 2.0 接口不可用：请在小白X 设置里开启「变量管理 2.0」');
+          var opts = args.floor !== undefined ? { floor: Math.trunc(Number(args.floor)) } : undefined;
+          return host.LWB_StateV2.applyText(String(args.text), opts);
         }
       }, {
-        name: 'lwb_schema', effect: 'read', scope: 'chat', summary: '读取小白X 当前的变量模板与约束。', params: [],
+        name: 'lwb_state_apply_json', effect: 'write', scope: 'chat', paths: function () { return ['var:/chat.json']; },
+        summary: '以结构化 JSON 批量修改小白X 变量 2.0（支持 set / inc / push / remove / del，支持负绝对值与特殊键名路径），返回 { status, changes, corrections, errors, warnings }。',
+        params: [{ name: 'ops', type: 'json', required: true, desc: '操作数组或 { ops: [...] }，例如 [{"op":"set","path":"数据.角色.金币","value":100},{"op":"inc","path":"数据.角色.好感","delta":-5}]' }],
+        run: async function (args) {
+          if (!host.LWB_StateV2 || typeof host.LWB_StateV2.apply !== 'function') throw new Error('当前版本的小白X 未提供变量 2.0 结构化 apply 接口');
+          var payload = Array.isArray(args.ops) ? { ops: args.ops } : args.ops;
+          return host.LWB_StateV2.apply(payload);
+        }
+      }, {
+        name: 'lwb_schema', effect: 'read', scope: 'chat', summary: '读取小白X 变量 2.0 当前的输入模板与约束定义。', params: [],
         run: async function () {
           if (!host.LWB_StateV2 || typeof host.LWB_StateV2.getInputSchema !== 'function') throw new Error('当前版本的小白X 没有提供模板读取接口');
           return host.LWB_StateV2.getInputSchema();
+        }
+      }, {
+        name: 'lwb_v3_inspect', effect: 'read', scope: 'chat',
+        summary: '读取小白X 变量 3.0 当前状态、规则摘要、更新设置、扩展信任状态与上次结算结果。',
+        params: [{ name: 'include_bundle', type: 'boolean', desc: '是否包含完整规则包（默认 false，仅返回规则摘要）' }],
+        run: async function (args) {
+          var api = host.LWB_StateV3;
+          if (!api || typeof api.inspect !== 'function') throw new Error('当前环境未检测到小白X 变量 3.0（LWB_StateV3）');
+          var inspected = await api.inspect();
+          var out = {
+            inspected: inspected && !args.include_bundle && inspected.bundle ? Object.assign({}, inspected, {
+              bundle: {
+                name: inspected.bundle.definition && inspected.bundle.definition.name,
+                updates: inspected.bundle.definition && inspected.bundle.definition.updates,
+                roots: inspected.bundle.definition && Object.keys(inspected.bundle.definition.initial || {}),
+                actions: inspected.bundle.definition && (inspected.bundle.definition.actions || []).map(function (a) { return { id: a.id, title: a.title, stages: a.stages }; }),
+                views: inspected.bundle.definition && Object.keys(inspected.bundle.definition.views || {})
+              }
+            }) : inspected,
+            settings: typeof api.settings === 'function' ? api.settings() : undefined,
+            updateStatus: typeof api.updateStatus === 'function' ? api.updateStatus() : undefined,
+            extensionTrust: typeof api.extensionTrust === 'function' ? api.extensionTrust() : undefined,
+            lastResult: typeof api.lastResult === 'function' ? api.lastResult() : undefined
+          };
+          return out;
+        }
+      }, {
+        name: 'lwb_v3_preview', effect: 'read', scope: 'chat', volatile: true,
+        summary: '在不修改当前聊天的情况下，用小白X 变量 3.0 引擎试算一组动作或直接改值（[{ action, params }] 或 [{ op: "set"|"inc"|"remove", path: [...], ... }]）。',
+        params: [
+          { name: 'input', type: 'json', required: true, desc: '操作数组，如 [{"action":"buy","params":{"item":"剑"}}] 或 [{"op":"inc","path":["hero","coins"],"delta":10}]' },
+          { name: 'stage', type: 'string', desc: '可选阶段：before 或 after' },
+          { name: 'prepared', type: 'json', desc: '可选 prepare 阶段预备数据对象' }
+        ],
+        run: async function (args) {
+          var api = host.LWB_StateV3;
+          if (!api || typeof api.preview !== 'function') throw new Error('当前环境未检测到小白X 变量 3.0（LWB_StateV3）');
+          var opts = {};
+          if (args.stage) opts.stage = String(args.stage);
+          if (args.prepared !== undefined) opts.prepared = args.prepared;
+          return api.preview(args.input, opts);
+        }
+      }, {
+        name: 'lwb_v3_apply', effect: 'write', scope: 'chat', paths: function () { return ['var:/chat.json']; },
+        summary: '通过小白X 变量 3.0 结算引擎提交动作或直接改值并写回当前聊天，整批通过结构与约束校验才生效。',
+        params: [
+          { name: 'input', type: 'json', required: true, desc: '操作数组：[{ action, params }] 或 [{ op: "set"|"inc"|"remove", path: [...], ... }]' },
+          { name: 'stage', type: 'string', desc: '可选阶段：before 或 after' },
+          { name: 'prepared', type: 'json', desc: '可选 prepare 阶段预备数据对象' }
+        ],
+        run: async function (args) {
+          var api = host.LWB_StateV3;
+          if (!api || typeof api.apply !== 'function') throw new Error('当前环境未检测到小白X 变量 3.0（LWB_StateV3）');
+          var opts = {};
+          if (args.stage) opts.stage = String(args.stage);
+          if (args.prepared !== undefined) opts.prepared = args.prepared;
+          return api.apply(args.input, opts);
+        }
+      }, {
+        name: 'lwb_v3_export_rules', effect: 'read', scope: 'card',
+        summary: '导出当前角色卡上保存的变量 3.0 规则包（definition、functions、tools、scripts）。',
+        params: [],
+        run: async function () {
+          var api = host.LWB_StateV3;
+          if (!api || typeof api.exportRules !== 'function') throw new Error('当前环境未检测到小白X 变量 3.0（LWB_StateV3）');
+          return api.exportRules();
+        }
+      }, {
+        name: 'lwb_v3_check_draft', effect: 'read', scope: 'card', volatile: true,
+        summary: '离线校验并试算一份变量 3.0 规则包（{ definition, functions, tools?, scripts? }），不修改当前角色卡与聊天。',
+        params: [
+          { name: 'bundle', type: 'json', required: true, desc: '完整规则包对象 { definition, functions, tools?, scripts? }' },
+          { name: 'input', type: 'json', desc: '可选试算操作数组（默认 []，仅验证定义与开局初始化）' },
+          { name: 'state', type: 'json', desc: '可选自定义起始状态对象（不传则按 opening 计算开局状态）' },
+          { name: 'opening', type: 'number', desc: '可选开场索引（从 0 起）' },
+          { name: 'stage', type: 'string', desc: '可选阶段：before 或 after' },
+          { name: 'prepared', type: 'json', desc: '可选 prepare 预备数据对象' }
+        ],
+        run: async function (args) {
+          var api = host.LWB_StateV3;
+          if (!api || typeof api.tryDefinition !== 'function') throw new Error('当前环境未检测到小白X 变量 3.0（LWB_StateV3）');
+          var opts = {};
+          if (args.state !== undefined) opts.state = args.state;
+          if (args.opening !== undefined) opts.opening = Math.trunc(Number(args.opening));
+          if (args.stage) opts.stage = String(args.stage);
+          if (args.prepared !== undefined) opts.prepared = args.prepared;
+          return api.tryDefinition(args.bundle, args.input === undefined ? [] : args.input, opts);
+        }
+      }, {
+        name: 'lwb_v3_undo', effect: 'write', scope: 'chat', irreversible: true,
+        summary: '撤销小白X 变量 3.0 的结算记录（默认撤销最新一笔）。',
+        params: [
+          { name: 'index', type: 'number', desc: '可选目标楼层号' },
+          { name: 'all', type: 'boolean', desc: '是否撤销该楼层全部结算记录' }
+        ],
+        run: async function (args) {
+          var api = host.LWB_StateV3;
+          if (!api || typeof api.undo !== 'function') throw new Error('当前环境未检测到小白X 变量 3.0（LWB_StateV3）');
+          var opts = {};
+          if (args.index !== undefined) opts.index = Math.trunc(Number(args.index));
+          if (args.all !== undefined) opts.all = args.all === true;
+          return api.undo(opts);
         }
       }]
     });
@@ -277,16 +508,59 @@
     });
 
     list.push({
-      id: 'ejs', title: '提示词模板（ST-Prompt-Template）', summary: '让夜梦试运行世界书或预设里的模板，帮你检查它最终会生成什么文字。',
-      detect: function () { return !!(host.EjsTemplate && typeof host.EjsTemplate.evalTemplate === 'function'); }, skill: 'ejs-prompt-template',
+      id: 'ejs', title: '提示词模板（ST-Prompt-Template）', summary: '检查 EJS 模板语法、查看模板可见变量与开关配置，或在当前聊天中试渲染模板。',
+      detect: function () { return !!(host.EjsTemplate && typeof (host.EjsTemplate.evalTemplate || host.EjsTemplate.evaltemplate) === 'function'); }, skill: 'ejs-prompt-template',
       tools: [{
-        name: 'ejs_render', effect: 'write', scope: 'chat', irreversible: true,
-        summary: '在当前聊天环境里试渲染一段 EJS 模板，返回渲染结果或报错。模板里的 setvar 等会真的生效，所以算写入。',
-        params: [{ name: 'template', type: 'string', required: true }],
+        name: 'ejs_check_syntax', effect: 'read', scope: 'chat',
+        summary: '只读检查 EJS 模板的语法错误（不执行代码、不改变量）。无误返回 { ok: true }，有误返回具体错误与上下文行。',
+        params: [
+          { name: 'template', type: 'string', required: true, desc: '要检查的 EJS 模板文本' },
+          { name: 'context_lines', type: 'number', desc: '出错时展示的附近行数（默认 4）' }
+        ],
         run: async function (args) {
           var api = host.EjsTemplate;
-          var context = typeof api.prepareContext === 'function' ? await api.prepareContext() : {};
-          return api.evalTemplate(String(args.template), context);
+          if (typeof api.getSyntaxErrorInfo !== 'function') throw new Error('当前版本的提示词模板插件没有提供 getSyntaxErrorInfo 接口');
+          var lines = args.context_lines !== undefined ? Math.max(1, Math.min(20, Math.trunc(Number(args.context_lines)))) : undefined;
+          var info = await api.getSyntaxErrorInfo(String(args.template || ''), lines);
+          return info ? { ok: false, error: String(info) } : { ok: true };
+        }
+      }, {
+        name: 'ejs_variables', effect: 'read', scope: 'chat',
+        summary: '读取 EJS 当前可见的合并变量（全局 + 聊天 + 楼层变量并集，只读）。可传 path 查看子树，如 stat_data.角色。',
+        params: [
+          { name: 'path', type: 'string', desc: '可选子树路径（点路径或 JSON Pointer）' },
+          { name: 'end_message_id', type: 'number', desc: '可选楼层上限（默认全部楼层）' }
+        ],
+        run: async function (args) {
+          var api = host.EjsTemplate;
+          if (typeof api.allVariables !== 'function') throw new Error('当前版本的提示词模板插件没有提供 allVariables 接口');
+          var endId = args.end_message_id !== undefined ? Math.trunc(Number(args.end_message_id)) : undefined;
+          var all = api.allVariables(endId);
+          return args.path ? { path: args.path, value: readPath(all, args.path) } : all;
+        }
+      }, {
+        name: 'ejs_features', effect: 'read', scope: 'chat',
+        summary: '读取提示词模板插件的当前开关配置（enabled、generate_enabled、render_enabled、sandbox、invert_enabled、depth_limit 等）。',
+        params: [],
+        run: async function () {
+          var api = host.EjsTemplate;
+          if (typeof api.getFeatures !== 'function') throw new Error('当前版本的提示词模板插件没有提供 getFeatures 接口');
+          return api.getFeatures();
+        }
+      }, {
+        name: 'ejs_render', effect: 'write', scope: 'chat', irreversible: true,
+        summary: '在当前聊天环境里渲染一段 EJS 模板并返回结果。模板里的 setvar 等操作会实际生效。',
+        params: [
+          { name: 'template', type: 'string', required: true, desc: 'EJS 模板文本' },
+          { name: 'data', type: 'json', desc: '可选附加到执行上下文的临时变量对象' },
+          { name: 'last_message_id', type: 'number', desc: '可选合并楼层变量的截止楼层号' }
+        ],
+        run: async function (args) {
+          var api = host.EjsTemplate;
+          var evalFn = api.evalTemplate || api.evaltemplate;
+          var lastId = args.last_message_id !== undefined ? Math.trunc(Number(args.last_message_id)) : undefined;
+          var context = typeof api.prepareContext === 'function' ? await api.prepareContext(args.data, lastId) : (args.data || {});
+          return evalFn.call(api, String(args.template), context);
         }
       }]
     });

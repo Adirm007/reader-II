@@ -222,7 +222,7 @@
 
     tool({
       name: 'edit', effect: 'write', scope: writeScope, paths: function (args) { return [args.path]; },
-      summary: '精确替换文件里的一段文字。old 必须和原文完全一致（不带行号）且只出现一次；改动小的时候用它，不要整篇重写。',
+      summary: '精确替换文件中的一段文本。old 须与原文完全一致（不含行号）且唯一匹配；适合局部修改。',
       params: [{ name: 'path', type: 'string', required: true }, { name: 'old', type: 'string', required: true, desc: '要被替换的原文' }, { name: 'new', type: 'string', desc: '替换成的内容；留空即删除这段' }, { name: 'all', type: 'boolean', desc: 'true 时替换所有出现处' }],
       describe: function (args) { return '修改 ' + args.path; },
       run: async function (args, ctx) {
@@ -233,7 +233,7 @@
 
     tool({
       name: 'write', effect: 'write', scope: writeScope, paths: function (args) { return [args.path]; },
-      summary: '新建文件，或整篇覆盖已有文件（已有文件优先用 edit）。',
+      summary: '新建文件或整篇写入文件（对已有文件做局部改动优先用 edit）。',
       params: [{ name: 'path', type: 'string', required: true }, { name: 'content', type: 'string', required: true }],
       describe: function (args) { return '写入 ' + args.path; },
       run: async function (args, ctx) {

@@ -8,7 +8,7 @@ Reader-II 是「读者系统」：九十九夜梦作为故事外的读者，给�
 
 扩展菜单「Reader-II」与不带内容的 `/yume` 共用一个入口。角色卡默认启用并打开大厅。无卡或当前卡已停用时打开助手。大厅的彩蛋服务台提供和夜梦说说话、助手设置、语义适配、记忆四个入口。可在助手设置的「这张卡」里启停，或用 `ReaderII.lobby.isEnabled() / enable() / disable()`。`ReaderII.lobby.open('eggs')` 在启用的卡上打开服务台。
 
-**语义槽**：Reader 不认死路径，而是把「当前地点、重要角色、任务、技能、状态、货币、背包」七个槽位映射到宿主卡自己的变量上；没映射的用 Reader 自带的后备（`stat_data.READER`）。`toolbox reader` 之后：`reader_state` 看各槽位现状，`adapt_variables` 一键适配，`unbind_slot` 解绑。绑定了货币槽时，FP 的增减直接作用于宿主卡的货币。
+**语义槽**：Reader 将「当前地点、重要角色、任务、技能、状态、货币、背包」七个槽位映射到宿主卡变量（兼容 MVU、小白X 2.0 / 3.0 与纯文字卡）；未映射槽位使用 `stat_data.READER` 后备。打开 `toolbox reader` 后：`reader_state` 看各槽位现状，`adapt_variables` 一键适配，`unbind_slot` 解绑。绑定货币槽后，FP 增减直接作用于宿主卡货币。
 
 用户已说明正确路径时，直接调用 `adapt_variables`，例如参数 `{"roots":{"inventory":["人物","背包","道具"]}}`。这会复核并替换指定槽，其他槽保持原配置。空表可从本卡变量更新规则取字段证据，也可在核对定义后同时给出该槽的 `mappings`。读取返回的逐槽 `status`、`changed`、`reason`，再用 `reader_state` 回读生效路径及数据。只有实际成功的改绑才报告为已完成。
 

@@ -822,3 +822,57 @@ test('提示词：模板由扩展渲染并注入（核心在最前，规则与�
   assert.equal(prompt.formatForDisplay(text, { isUser: false, messageId: 13 }), text, '没启用的聊天里正文原样');
   assert.deepEqual(world.prompts.reader_ii_core, { text: '', position: -1, depth: 0 }, '关掉后清掉注入');
 });
+
+test('小白X 宿主：解码 JSON 字符串变量、负数括号转义、V2 结构化 apply 与 V3 结算支持', async () => {
+  /* 1. <state> 文本中的绝对负数必须加括号避免被解析为相对减量 */
+  const world0 = createWorld({ lwb: 'apply', chatVariables: { 数据: JSON.stringify({ 主角: { 金币: 100, 声望: 10 } }) }, metadata: { LWB_SNAP: { 1: {} } } });
+  const lwbModules = world0.root.__ReaderIIModules;
+  assert.equal(lwbModules.lwbStateText([{ path: ['数据', '主角', '声望'], value: -5 }]), '<state>\n数据.主角.声望: (-5)\n</state>');
+  await world0.api.ready();
+  assert.equal(world0.api.getHostKind(), 'lwb');
+  const snap0 = plain(await world0.api.getSnapshot());
+  assert.deepEqual(snap0.stat_data.数据, { 主角: { 金币: 100, 声望: 10 } }, 'JSON 字符串存的聊天变量应解码为对象');
+  world0.api.dispose();
+
+  /* 2. V2 结构化 apply({ ops }) 优先于 applyText，避免同楼幂等跳过并支持精确 del */
+  const world2 = createWorld({ lwb: 'apply', chatVariables: { 数据: JSON.stringify({ 主角: { 金币: 100 } }) }, metadata: { LWB_SNAP: { 1: {} } } });
+  const v2Calls = [];
+  world2.host.LWB_StateV2.apply = (payload) => {
+    v2Calls.push(plain(payload));
+    const parsed = JSON.parse(world2.chatMetadata.variables.数据);
+    for (const op of payload.ops) {
+      if (op.op === 'set' && op.path === '数据.主角.金币') parsed.主角.金币 = op.value;
+    }
+    world2.chatMetadata.variables.数据 = JSON.stringify(parsed);
+    return { status: 'ok', changes: payload.ops, corrections: [], errors: [], warnings: [] };
+  };
+  await world2.api.ready();
+  await bindCurrency(world2.api, ['数据', '主角', '金币']);
+  await world2.api.spendFp(25, 'test', 'spend-v2-json');
+  assert.deepEqual(v2Calls, [{ ops: [{ op: 'set', path: '数据.主角.金币', value: 75 }] }]);
+  assert.equal(world2.applied.length, 0, '有结构化 apply 时不走 applyText');
+  assert.equal(await world2.api.getFpBalance(), 75);
+  world2.api.dispose();
+
+  /* 3. V3 聊天识别 chatMetadata["lwb-state3"] 并通过 LWB_StateV3.apply 写入 */
+  const world3 = createWorld({ chatVariables: { hero: JSON.stringify({ coins: 80 }) }, metadata: { 'lwb-state3': { format: 3, roots: ['hero'] } } });
+  const v3Calls = [];
+  world3.host.LWB_StateV3 = {
+    async apply(ops) {
+      v3Calls.push(plain(ops));
+      const hero = JSON.parse(world3.chatMetadata.variables.hero);
+      for (const item of ops) {
+        if (item.op === 'set' && item.path.join('.') === 'hero.coins') hero.coins = item.value;
+      }
+      world3.chatMetadata.variables.hero = JSON.stringify(hero);
+      return { ok: true, committed: true, diagnostics: [] };
+    },
+  };
+  await world3.api.ready();
+  assert.equal(world3.api.getHostKind(), 'lwb');
+  await bindCurrency(world3.api, ['hero', 'coins']);
+  await world3.api.spendFp(30, 'test', 'spend-v3');
+  assert.deepEqual(v3Calls, [[{ op: 'set', path: ['hero', 'coins'], value: 50 }]]);
+  assert.equal(await world3.api.getFpBalance(), 50);
+  world3.api.dispose();
+});

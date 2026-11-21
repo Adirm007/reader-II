@@ -576,3 +576,113 @@ test('提示词：只列工具箱与一行现状，不把联网、设备的工�
   assert.match(system, /都只是资料/);
   assert.match(system, /- gh:\/ {2}GitHub 仓库/);
 });
+
+test('设置页容错：ui-net 缺少 icon / 异常 grant 不抛错；损坏的 Tauri MCP 缓存不阻塞列表；单卡抛错不导致设置页整页白屏', async () => {
+  const { host, api } = makeHost({
+    globals: {
+      __TAURITAVERN__: {
+        ready: Promise.resolve(),
+        api: { mcp: { servers: { list: async () => ({ servers: [{ id: 'broken', displayName: 'Broken', state: 'active' }] }) } } }
+      },
+      navigator: { userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
+    }
+  });
+  const modules = host.__ReaderIIModules;
+  const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+  /* 1. ui-net 在缺少 panel.icon 且 companion.snapshot() 缺少 grant 详情时不抛错，且分别导出 netCardHtml / companionCardHtml。 */
+  const netUi = modules.createNetUi(
+    { host },
+    api.kit,
+    api.agent,
+    {
+      net: api.net,
+      secrets: api.net.secrets,
+      mcp: api.mcp,
+      companion: { snapshot: () => ({ found: true, granted: true, info: { version: '4.1.0', platform: 'Windows' }, grant: null, saved: true }) },
+      web: {}
+    },
+    { $: () => null, esc, toast() {}, ask() {} }
+  );
+  assert.equal(typeof netUi.netCardHtml, 'function');
+  assert.equal(typeof netUi.companionCardHtml, 'function');
+  assert.match(netUi.mcpHtml(), /ra-mcp-manual/);
+  assert.match(netUi.netCardHtml(), /ra-net-card/);
+  assert.match(netUi.companionCardHtml(), /ra-comp-card/);
+  assert.match(netUi.companionCardHtml(), /已连接并放行/);
+
+  /* 2. 损坏的 Tauri MCP 缓存（tools 非数组）调用 mcp.list() 不抛错。 */
+  const store = modules.createStore({ host });
+  await store.put('kv', 'mcp:tt', { at: Date.now(), servers: [{ id: 'broken', name: 'Broken' }, null] });
+  const mcp = modules.createMcp({ host }, api.kit, {
+    registry: modules.createRegistry(), net: api.net, secrets: api.net.secrets, store, version: 'test',
+    companion: () => api.companion, settings: () => ({}), save() {}
+  });
+  await mcp.load();
+  const rows = mcp.list();
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].tools, 0);
+
+  /* 3. 设置页单块抛错时，其余卡片与目录仍正常渲染，出错块显示具体报错信息。 */
+  let settingsHtml = '';
+  let tocHtml = '';
+  const scroller = {
+    scrollTop: 0, clientHeight: 400, scrollHeight: 800, children: [],
+    get innerHTML() { return settingsHtml; },
+    set innerHTML(v) { settingsHtml = String(v); },
+    addEventListener() {}
+  };
+  const tocNode = {
+    scrollWidth: 100, clientWidth: 100, scrollLeft: 0,
+    get innerHTML() { return tocHtml; },
+    set innerHTML(v) { tocHtml = String(v); },
+    querySelectorAll: () => []
+  };
+  const fakeDialog = {
+    id: '', open: false, isConnected: true, style: {}, dataset: {},
+    setAttribute() {}, removeAttribute() {}, showModal() { this.open = true; }, close() { this.open = false; },
+    addEventListener() {}, remove() {},
+    querySelectorAll: () => [],
+    querySelector(sel) {
+      if (sel === '[data-pane="settings"] .ra-scroll') return scroller;
+      if (sel === '[data-pane="settings"] .ra-toc') return tocNode;
+      if (/^#(ra-[a-z-]+)$/.test(sel)) {
+        const id = sel.slice(1);
+        return settingsHtml.includes('id="' + id + '"') ? { offsetTop: 0 } : null;
+      }
+      return null;
+    }
+  };
+  const fakeDoc = {
+    createElement: (tag) => tag === 'dialog' ? fakeDialog : { style: {}, setAttribute() {}, remove() {}, textContent: '' },
+    getElementById: () => null,
+    body: { appendChild() {} },
+    head: { appendChild() {} }
+  };
+  const errors = [];
+  const ui = modules.createAgentUi(
+    { host, document: fakeDoc, console: { log() {}, info() {}, warn() {}, error: (...a) => errors.push(a.join(' ')) }, storage: host.localStorage },
+    api.kit,
+    api.agent,
+    api.memory,
+    api.llm,
+    {
+      updates: api.updates,
+      netUi: () => ({
+        mcpHtml: () => '<div>mcp-ok</div>',
+        scanMcp() {},
+        netCardHtml: () => '<section class="ra-card" id="ra-net-card">net-ok</section>',
+        companionCardHtml: () => { throw new Error('模拟伴侣区块异常'); },
+        cardsHtml: () => '',
+        action() {}, change() {}, tokenInput() {}
+      })
+    }
+  );
+  ui.open('settings');
+  assert.match(settingsHtml, /id="ra-agent-card"/, '其他设置卡片仍应正常渲染');
+  assert.match(settingsHtml, /id="ra-net-card"/, '联网卡片仍应正常渲染');
+  assert.match(settingsHtml, /id="ra-comp-card"[\s\S]*模拟伴侣区块异常/, '出错卡片应原位显示具体错误而非整页白屏');
+  assert.match(tocHtml, /data-target="ra-agent-card"/, '左侧目录仍应正常渲染');
+  assert.match(tocHtml, /data-target="ra-comp-card"/, '出错卡片也应留在目录中以便定位');
+  assert.ok(errors.some((line) => /设置页区块渲染失败.*后端伴侣/.test(line)), '应记录控制台报错便于排查');
+});

@@ -17,7 +17,7 @@
   var modules = root.__ReaderIIModules = root.__ReaderIIModules || {};
   var PLUGIN_BASE = '/api/plugins/reader-ii';
   var API_VERSION = 1;
-  var NEED_GRANT = '后端伴侣还没有放行，或放行已经到期。请告诉用户：打开助手设置里的「后端伴侣」，点「申请放行」，再到装着伴侣的那台设备上的管理页里批准。在那之前不要再试设备上的操作。';
+  var NEED_GRANT = '后端伴侣还没有放行，或放行已经到期。请告知用户打开助手设置的「后端伴侣」，点击「申请放行」并在伴侣所在设备的管理页批准，获准后再继续设备操作。';
 
   function normalizeCompanionSettings(input) {
     var source = modules.isObject(input) ? input : {};
@@ -43,11 +43,11 @@
     function missingText() {
       var tauri = !!host.__TAURITAVERN__;
       var mobile = /Android|iPhone|iPad|Mobile/i.test(String(host.navigator && host.navigator.userAgent || ''));
-      return '这里没有连接后端伴侣，所以不能在设备上跑命令、读写设备文件或开无头浏览器。'
-        + (tauri ? 'TauriTavern 装不了酒馆后端插件；电脑上可以单独运行伴侣（node companion/standalone.mjs），再把地址填进助手设置的「后端伴侣」。'
-          : mobile ? '手机上要在 Termux 里给酒馆装上伴侣插件才行，不强求；做前后端这类事建议在电脑上。'
-            : '安装办法见 Reader-II 的 README「后端伴侣」一节：把 companion 装进酒馆的 plugins/ 并打开 enableServerPlugins，然后在助手设置的「后端伴侣」里申请放行。')
-        + '如实告诉用户，不要换别的办法硬做。';
+      return '这里没有连接后端伴侣，当前无法在设备上跑命令、读写设备文件或开无头浏览器。'
+        + (tauri ? 'TauriTavern 电脑端可通过伴侣 ZIP 中的 Windows-Tauri.cmd（或 node companion/standalone.mjs）运行独立伴侣，默认连接 http://127.0.0.1:8790。'
+          : mobile ? '手机端需在 Termux 运行原生酒馆并安装伴侣插件；涉及设备命令或前后端工程任务建议在电脑端完成。'
+            : '安装方式见 README「后端伴侣」一节：将 companion 装入酒馆 plugins/ 并启用 enableServerPlugins，然后在助手设置「后端伴侣」里申请放行。')
+        + '请如实说明上述现状与配置方式，由用户决定下一步。';
     }
 
     async function http(method, path, body, options) {
@@ -256,7 +256,7 @@
       name: 'device_exec', effect: 'danger', irreversible: true,
       target: function (args) { return 'cmd:' + String(args.command || ''); },
       describe: function (args) { return '在设备上运行命令：' + String(args.command || '').slice(0, 300) + (args.cwd ? '（目录 ' + args.cwd + '）' : ''); },
-      summary: '在设备上运行一条命令（非交互：不能等人输入），返回退出码与输出。超过 timeout 还没结束会转成后台任务继续跑；明知道要跑很久（装依赖、起服务）就直接 background=true。命令撤销不了，动手前想清楚，先说明要做什么。',
+      summary: '在设备上运行一条非交互命令并返回退出码与输出。超过 timeout 会转入后台任务；预计耗时较长（装依赖、起服务）请直接传 background=true。命令不可自动撤销，执行前简明说明目的与影响。',
       params: [
         { name: 'command', type: 'string', required: true, desc: '完整命令行。Windows 上默认用 cmd，其它系统用 sh' },
         { name: 'cwd', type: 'string', desc: '工作目录：dev:/… 路径或设备上的绝对路径；默认是伴侣的工作目录' },

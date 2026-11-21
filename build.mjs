@@ -46,7 +46,7 @@ export const AGENT_MODULES = [
   'src/agent/store.js', 'src/agent/protocol.js', 'src/agent/permissions.js', 'src/agent/vfs.js', 'src/agent/providers.js', 'src/agent/tools.js',
   'src/agent/net.js', 'src/agent/web.js', 'src/agent/device.js', 'src/agent/mcp.js', 'src/agent/connectors.js', 'src/agent/skills.js',
   'src/agent/legacy-tools.js', 'src/agent/personas.js', 'src/agent/agent.js', 'src/agent/updates.js',
-  'src/agent/ui-theme.js', 'src/agent/ui-net.js', 'src/agent/ui-connectors.js', 'src/agent/ui-models.js', 'src/agent/ui.js', 'src/agent/boot.js',
+  'src/agent/ui-theme.js', 'src/agent/ui-net.js', 'src/agent/ui-connectors.js', 'src/agent/ui-models.js', 'src/agent/ui-guide.js', 'src/agent/ui.js', 'src/agent/boot.js',
 ];
 export const EXT_MODULES = [...CORE_MODULES, ...AGENT_MODULES];
 

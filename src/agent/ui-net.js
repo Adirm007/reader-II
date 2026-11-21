@@ -16,6 +16,7 @@
   function createNetUi(env, kit, agent, deps, panel) {
     var net = deps.net, secrets = deps.secrets, mcp = deps.mcp, companion = deps.companion, web = deps.web;
     var $ = panel.$, esc = panel.esc;
+    var chevron = function () { return typeof panel.icon === 'function' ? panel.icon('chevron') : ''; };
     var notes = { net: null, mcp: null, comp: null };
     var tokenAttempt = 0;
     var pairing = null, pairAbort = null;
@@ -49,17 +50,16 @@
 
     function tauriDirectoryHtml(rows) {
       var tt = rows.filter(function (row) { return row.source === 'tt'; });
-      var status = mcpScanError || (mcpScanJob || !mcpScanAt ? '正在读取酒馆的工具服务列表…' : '在酒馆「扩展 → MCP」里登记并启用服务后，可以在这里选择。');
-      return '<h4 class="ra-sub">从 TauriTavern 接入</h4><p class="ra-note">' + esc(status) + '</p>'
+      var status = mcpScanError || (mcpScanJob || !mcpScanAt ? '正在读取酒馆 MCP 列表…' : '');
+      return '<h4 class="ra-sub">从 TauriTavern 接入</h4>' + (status ? '<p class="ra-note">' + esc(status) + '</p>' : '')
         + tt.map(function (row) {
-          var state = !row.available ? '已在酒馆停用或删除' : !row.enabled ? '可接入' : row.tools ? '已接入 · ' + row.tools + ' 个工具' : '已接入 · 请在酒馆 MCP 管理器中允许需要的工具';
+          var state = !row.available ? '已在酒馆停用或删除' : !row.enabled ? '可接入' : row.tools ? '已接入 · ' + row.tools + ' 个工具' : '已接入 · 需在酒馆中允许工具';
           return '<div class="ra-item" data-mcp="' + esc(row.id) + '"><div class="ra-item-main"><b>' + esc(row.name) + '</b><p class="ra-note">' + esc(state) + '</p>'
             + (row.toolNames.length ? '<p class="ra-note">' + esc(row.toolNames.slice(0, 8).join('、')) + '</p>' : '') + '</div><span class="ra-row">'
             + (row.available ? '<button type="button" class="ra-btn is-small" data-act="mcp-tt-connect">' + (row.enabled ? '刷新工具' : '接入') + '</button>' : '')
             + (row.enabled ? '<button type="button" class="ra-btn is-small" data-act="mcp-tt-remove">在助手中停用</button>' : '') + '</span></div>';
         }).join('')
-        + '<div class="ra-row"><button type="button" class="ra-btn is-small" data-act="mcp-tt-scan">重查酒馆列表</button></div>'
-        + '<p class="ra-note">点「接入」读取这项服务允许使用的工具。助手要实际调用时会显示工具和参数，点「允许」才会发送。</p>';
+        + '<div class="ra-row ra-mt"><button type="button" class="ra-btn is-small" data-act="mcp-tt-scan">重查酒馆列表</button></div>';
     }
 
     function mcpHtml() {
@@ -76,12 +76,11 @@
           + '<button type="button" class="ra-btn is-small" data-act="mcp-toggle">' + (row.enabled ? '停用' : '启用') + '</button>'
           + '<button type="button" class="ra-btn is-small is-bad" data-act="mcp-del">删除</button></span></div>';
       }).join('');
-      return '<p class="ra-note">有些服务能让夜梦查资料或操作其他软件，这类服务叫 MCP。平时聊天、抽卡都可以跳过这里。</p>'
-        + (mcp.hasTauri() ? '<div id="ra-mcp-tt">' + tauriDirectoryHtml(rows) + '</div>' : '') + body
-        + '<details id="ra-mcp-manual"><summary>用服务方给的配置手动接入</summary>'
-        + '<p class="ra-note">从服务的使用说明里复制 MCP 配置（JSON），粘贴后点「添加服务」。其中 url 是工具的网址，command 是需要后端伴侣在本机启动的程序。服务需要的密钥只粘贴在这里。</p>'
-        + '<label for="ra-mcp-json">服务配置</label><textarea id="ra-mcp-json" class="is-code" spellcheck="false" placeholder="{&quot;mcpServers&quot;: {&quot;服务名&quot;: {&quot;url&quot;: &quot;https://…/mcp&quot;}}}"></textarea>'
-        + '<div class="ra-row"><button type="button" class="ra-btn is-small" data-act="mcp-add">添加服务 / 更新同名配置</button></div></details>' + noteHtml('mcp');
+      return (mcp.hasTauri() ? '<div id="ra-mcp-tt">' + tauriDirectoryHtml(rows) + '</div>' : '') + body
+        + '<details class="ra-fold" id="ra-mcp-manual"><summary>' + chevron() + '用服务方给的配置手动接入</summary><div class="ra-fold-body">'
+        + '<div class="ra-field-stack"><label for="ra-mcp-json">服务配置（JSON）</label>'
+        + '<textarea id="ra-mcp-json" class="is-code" spellcheck="false" placeholder="{&quot;mcpServers&quot;: {&quot;服务名&quot;: {&quot;url&quot;: &quot;https://…/mcp&quot;}}}"></textarea></div>'
+        + '<div class="ra-row ra-mt"><button type="button" class="ra-btn is-small" data-act="mcp-add">添加服务 / 更新同名配置</button></div></div></details>' + noteHtml('mcp');
     }
 
     function renderMcp() {
@@ -125,82 +124,76 @@
     function netCardHtml() {
       var settings = net.settings();
       return '<section class="ra-card" id="ra-net-card"><h3>联网<span class="ra-live">单独保存</span></h3>'
-        + '<p>想读一篇网页或 GitHub 上的公开项目？把链接发给夜梦，说「帮我总结一下」，就可以开始。</p>'
-        + '<h4 class="ra-sub">让夜梦访问你的 GitHub 仓库</h4>'
-        + '<p class="ra-note">仓库就是存放项目文件的地方。想读私有仓库、搜索代码或提交修改时，选下面一种用途。令牌决定夜梦可以访问哪些仓库，只粘贴在下方的令牌框里。</p>'
-        + '<div class="ra-row">' + githubTokenLink('只读：看文件、搜代码', 'read') + githubTokenLink('可推送：提交文件', 'write') + '</div>'
-        + '<ol class="ra-list"><li>按钮会打开 GitHub 并预填权限。如果出现登录页，先登录。要用自己的私有仓库或提交文件，在 <b>Repository access</b> 下选 <b>Only select repositories</b>，勾选要用的仓库。组织的仓库先在 <b>Resource owner</b> 选择该组织。</li>'
-        + '<li>点页面底部的 <b>Generate token</b>，确认后复制生成的令牌，回到这里粘贴。</li></ol>'
-        + tokenFieldsHtml()
-        + (['readonly', 'card'].indexOf(agent.getSettings().mode) >= 0 ? '<p class="ra-note">想让夜梦提交文件时，还需要在<button type="button" class="ra-btn is-small" data-act="toc" data-target="ra-agent-card">助手权限</button>选择「酒馆全权」并保存。只读文件可以沿用当前档位。</p>' : '')
-        + '<details class="ra-fold"><summary>' + panel.icon('chevron') + '更多联网设置（免问网站、阅读代理）</summary><div class="ra-form">'
-        + '<label for="ra-net-hosts">访问时免问的网站</label><textarea id="ra-net-hosts" class="is-code" spellcheck="false" placeholder="每行一个，例如 docs.example.com">' + esc(settings.allowHosts.join('\n')) + '</textarea>'
-        + '<p class="ra-note">填你信任的网站域名，每行一个。你在对话里主动发的链接也能直接读取。其他网站由夜梦在访问前询问你。</p>'
-        + '<label for="ra-net-proxy">阅读代理（可留空）</label><input type="text" id="ra-net-proxy" value="' + esc(settings.proxy) + '" placeholder="https://r.jina.ai/{url}" maxlength="300" spellcheck="false">'
-        + '<p class="ra-note">有些网站会拦住网页读取。夜梦会先尝试浏览器和酒馆已有的连接方式。如果你有可信的代读服务，可填它提供的地址，服务会收到要读的网址。用 <code>{url}</code> 表示原网址，<code>{enc}</code> 表示编码后的网址。</p></div>'
-        + '<div class="ra-row" style="margin-top:8px"><button type="button" class="ra-btn is-small" data-act="net-save">保存网站和代理设置</button>' + noteHtml('net') + '</div></details></section>';
+        + '<div class="ra-row">' + githubTokenLink('生成只读 GitHub 令牌', 'read') + githubTokenLink('生成可推送 GitHub 令牌', 'write') + '</div>'
+        + '<div class="ra-mt">' + tokenFieldsHtml() + '</div>'
+        + (['readonly', 'card'].indexOf(agent.getSettings().mode) >= 0 ? '<div class="ra-callout"><span>向 GitHub 推送文件需要「酒馆全权」权限</span><button type="button" class="ra-btn is-small" data-act="toc" data-target="ra-agent-card">前往权限设置</button></div>' : '')
+        + '<details class="ra-fold"><summary>' + chevron() + '更多联网设置（免问网站、阅读代理）</summary><div class="ra-fold-body">'
+        + '<div class="ra-stack">'
+        + '<div class="ra-field-stack"><label for="ra-net-hosts">访问时免问的网站（每行一个域名）</label>'
+        + '<textarea id="ra-net-hosts" class="is-code" spellcheck="false" placeholder="docs.example.com">' + esc(settings.allowHosts.join('\n')) + '</textarea></div>'
+        + '<div class="ra-field-stack"><label for="ra-net-proxy">阅读代理（可留空，支持 {url} / {enc}）</label>'
+        + '<input type="text" id="ra-net-proxy" value="' + esc(settings.proxy) + '" placeholder="https://r.jina.ai/{url}" maxlength="300" spellcheck="false"></div>'
+        + '</div>'
+        + '<div class="ra-row ra-mt"><button type="button" class="ra-btn is-small" data-act="net-save">保存网站和代理设置</button>' + noteHtml('net') + '</div></div></details></section>';
     }
 
     /* ---------- 后端伴侣 ---------- */
     function companionGuide(autoExpand) {
-      var tauri = !!env.host.__TAURITAVERN__;
-      var ua = String(env.host.navigator && env.host.navigator.userAgent || '');
+      var host = env && env.host || {};
+      var tauri = !!host.__TAURITAVERN__;
+      var ua = String(host.navigator && host.navigator.userAgent || '');
       var windows = /Windows/i.test(ua), mobile = /Android|iPhone|iPad|Mobile/i.test(ua);
       var archive = 'https://github.com/Adirm007/reader-II/archive/refs/heads/main.zip';
-      var download = env.host.__ReaderIIBase
-        ? '<a class="ra-btn is-small" download="reader-ii-companion.zip" href="' + esc(env.host.__ReaderIIBase + 'dist/reader-ii-companion.zip') + '">下载当前版本的伴侣 ZIP</a> ' : '';
-      var links = '<div class="ra-row">' + download + '<a href="' + archive + '" target="_blank" rel="noopener noreferrer">备用下载（完整仓库，打开 companion 文件夹）</a></div>';
-      var docs = '<a href="https://github.com/Adirm007/reader-II/blob/main/companion/README.md" target="_blank" rel="noopener noreferrer">查看各平台的安装说明</a>';
-      if (tauri && mobile) return '<p class="ra-note">手机上的 TauriTavern 没有本机 Node 后端。可继续使用普通聊天、网页和已接入的网络工具。需要操作设备文件时，请在能运行伴侣的电脑或 Termux 酒馆上安装。</p>' + docs;
-      var node = '<a href="https://nodejs.org/en/download" target="_blank" rel="noopener noreferrer">安装 Node.js LTS</a>';
+      var download = host.__ReaderIIBase
+        ? '<a class="ra-btn is-small" download="reader-ii-companion.zip" href="' + esc(host.__ReaderIIBase + 'dist/reader-ii-companion.zip') + '">下载当前版本的伴侣 ZIP</a> ' : '';
+      var links = '<div class="ra-row">' + download + '<a href="' + archive + '" target="_blank" rel="noopener noreferrer">完整仓库（companion 目录）</a><a href="https://github.com/Adirm007/reader-II/blob/main/companion/README.md" target="_blank" rel="noopener noreferrer">平台说明</a></div>';
+      if (tauri && mobile) return '<p class="ra-note">手机端 TauriTavern 不含本机 Node 后端。</p>' + links;
+      var node = '<a href="https://nodejs.org/en/download" target="_blank" rel="noopener noreferrer">Node.js LTS</a>';
       var steps;
       if (tauri && windows) {
-        steps = '<ol><li>先把 ZIP 全部解压到一个会保留的位置。</li><li>在解压文件夹里双击 <code>Windows-Tauri.cmd</code>，按回车。它会找到正在运行的酒馆，必要时请你选择 <code>TauriTavern.exe</code>。提示找不到 Node 时先' + node + '。</li><li>以后双击桌面的「TauriTavern + Reader-II」就能同时打开两者。在托盘里退出酒馆，伴侣也会停止。回到这里点「检测伴侣」。</li></ol>'
-          + '<p class="ra-note">卸载时再打开 Windows-Tauri.cmd，输入 2。它会移除专用快捷方式，原酒馆图标照常使用。</p>';
+        steps = '<ol class="ra-list"><li>解压 ZIP 到固定目录（需要 ' + node + '）。</li><li>双击 <code>Windows-Tauri.cmd</code> 完成安装，之后从桌面「TauriTavern + Reader-II」启动。</li><li>卸载：再次运行 <code>Windows-Tauri.cmd</code> 并输入 2。</li></ol>';
       } else if (tauri) {
-        var launcher = /Macintosh|Mac OS X/i.test(ua) ? '桌面上的「TauriTavern + Reader-II.command」' : '应用菜单里的「TauriTavern + Reader-II」';
-        steps = '<ol><li>把 ZIP 解压到会长期保留的位置。如果电脑还没有 Node.js，先' + node + '。</li><li>在解压后的伴侣文件夹里打开终端，运行一次 <code>node setup-desktop.mjs install</code>，按提示选择酒馆。</li><li>先退出已经打开的酒馆。以后从' + launcher + '启动，伴侣会跟着酒馆启停。回到这里点「检测伴侣」。</li></ol>'
-          + '<p class="ra-note">卸载时在同一目录运行 <code>node setup-desktop.mjs uninstall</code> 即可移除启动入口。</p>';
+        steps = '<ol class="ra-list"><li>解压 ZIP 到固定目录（需要 ' + node + '）。</li><li>在伴侣目录运行 <code>node setup-desktop.mjs install</code>，重启后从「TauriTavern + Reader-II」启动。</li><li>卸载：运行 <code>node setup-desktop.mjs uninstall</code>。</li></ol>';
       } else if (windows) {
-        steps = '<ol><li>把 ZIP 解压到运行酒馆的电脑，双击 <code>Windows-SillyTavern.cmd</code>，按回车。</li><li>在弹出的窗口选择酒馆文件夹里的 <code>config.yaml</code>。安装器会打开服务器插件开关。重启酒馆一次，回到这里点「检测伴侣」。</li><li>以后它随酒馆启动和退出。卸载时再双击同一个文件，输入 2，选择同一份 config.yaml，随后重启酒馆。</li></ol><p class="ra-note">用终端也可以运行 <code>node setup.mjs install</code> 或 <code>node setup.mjs uninstall</code>。</p>';
+        steps = '<ol class="ra-list"><li>解压 ZIP 后双击 <code>Windows-SillyTavern.cmd</code> 并选择酒馆的 <code>config.yaml</code>，重启酒馆。</li><li>命令行方式：<code>node setup.mjs install</code> / <code>node setup.mjs uninstall</code>。</li></ol>';
       } else {
-        steps = '<ol><li>把 ZIP 解压到<b>运行酒馆的设备</b>。用手机访问别人的酒馆时，请让服主安装。</li><li>在解压后的伴侣文件夹打开终端，运行 <code>node setup.mjs install</code>。按提示粘贴酒馆根目录（里面有 config.yaml）。安装器会打开酒馆的服务器插件开关。</li><li>重启酒馆一次，再点「检测伴侣」。以后启动和退出酒馆时，伴侣会一起启停。Termux 中运行的原生酒馆也用这条命令。</li></ol>'
-          + '<p class="ra-note">卸载时在同一目录运行 <code>node setup.mjs uninstall</code> 后重启酒馆。</p>';
+        steps = '<ol class="ra-list"><li>在酒馆所在设备解压 ZIP，进入目录运行 <code>node setup.mjs install</code> 并重启酒馆（Termux 同理）。</li><li>卸载：运行 <code>node setup.mjs uninstall</code> 后重启酒馆。</li></ol>';
       }
-      var cleanup = '<details><summary>彻底卸载，也清除配对和工作文件</summary><p class="ra-note">先在本页点「断开」，退出酒馆并按上面的卸载步骤移除伴侣。下载的 ZIP 和专门解压的文件夹都可删除。</p>'
-        + '<p class="ra-note">数据另存在运行伴侣的设备上。先把 <code>workspace</code> 里要留的文件移出来，再删除整个 <code>'
-        + (windows ? '%USERPROFILE%\\.reader-ii-companion' : '~/.reader-ii-companion') + '</code> 目录，就会一起清除授权和操作记录。设置过 <code>READER_II_COMPANION_HOME</code> 时，数据在你指定的位置。</p></details>';
-      return '<details class="ra-fold"' + (autoExpand ? ' open' : '') + '><summary>' + panel.icon('chevron') + '安装或卸载伴侣</summary>' + links + steps + cleanup + docs + '</details>';
+      var cleanup = '<details class="ra-fold"><summary>' + chevron() + '彻底卸载并清除配对与数据</summary><div class="ra-fold-body">'
+        + '<p class="ra-note">先点击「断开」并按上方步骤卸载，再清理 <code>'
+        + (windows ? '%USERPROFILE%\\.reader-ii-companion' : '~/.reader-ii-companion') + '</code>（自定义位置见 <code>READER_II_COMPANION_HOME</code>）。</p></div></details>';
+      return '<details class="ra-fold"' + (autoExpand ? ' open' : '') + '><summary>' + chevron() + '安装或卸载伴侣</summary><div class="ra-fold-body">' + links + steps + cleanup + '</div></details>';
     }
 
     function companionCardHtml() {
-      var snap = companion.snapshot();
+      var snap = companion.snapshot() || {};
       var current = agent.getSettings();
       var info = snap.info || {};
+      var grant = snap.grant || {};
       var line;
       if (snap.granted) {
-        var until = snap.grant.expiresAt ? '到 ' + clock(snap.grant.expiresAt) : snap.grant.persistent ? '长期有效' : '到伴侣重启为止';
+        var until = grant.expiresAt ? '到 ' + clock(grant.expiresAt) : grant.persistent ? '长期有效' : '到伴侣重启为止';
         line = '已连接并放行（' + until + '）· ' + String(info.platform || '') + ' · 伴侣 ' + String(info.version || '');
       } else if (snap.found) line = '已检测到伴侣 ' + String(info.version || '') + '（' + (info.mode === 'plugin' ? '酒馆后端插件' : '独立运行') + '），还没放行';
-      else line = snap.error || '还没检测';
+      else line = snap.error || '未检测';
       var wait = '';
       if (pairing) {
-        var link = /^https?:\/\//i.test(String(pairing.adminUrl || '')) ? '<a href="' + esc(pairing.adminUrl) + '" target="_blank" rel="noopener noreferrer">' + esc(pairing.adminUrl) + '</a>' : '伴侣的管理页';
+        var link = /^https?:\/\//i.test(String(pairing.adminUrl || '')) ? '<a href="' + esc(pairing.adminUrl) + '" target="_blank" rel="noopener noreferrer">' + esc(pairing.adminUrl) + '</a>' : '伴侣管理页';
         wait = '<div class="ra-confirm" style="margin:10px 0"><h4>等待放行：配对码 <span id="ra-comp-code" style="letter-spacing:.2em">' + esc(pairing.code || '…') + '</span></h4>'
-          + '<div>在<b>装伴侣的设备</b>上打开管理页 ' + link + '。首次使用要从伴侣或酒馆的终端打开带 #key 的完整地址。核对四位码和来源，选放行期限。点「拒绝」就会结束本次申请。</div>'
-          + '<div class="ra-row" style="margin-top:8px"><button type="button" class="ra-btn is-small" data-act="comp-cancel">取消</button><span class="ra-note">放行之前，设备上什么都做不了。</span></div></div>';
+          + '<div>在运行伴侣的设备上打开 ' + link + '，核对配对码并选择放行期限。</div>'
+          + '<div class="ra-row ra-mt"><button type="button" class="ra-btn is-small" data-act="comp-cancel">取消</button></div></div>';
       }
       return '<section class="ra-card" id="ra-comp-card"><h3>后端伴侣<span class="ra-live">立即生效</span></h3>'
-        + '<p class="ra-note">想让夜梦整理电脑文件、运行命令或启动本地工具时才需要安装。只想聊天、玩卡或看网页，可以跳过。</p>'
         + companionGuide(!snap.found && !!snap.error)
         + '<p class="ra-tip" id="ra-comp-state"><b>状态</b>：' + esc(line) + '</p>'
-        + (current.mode !== 'device' ? '<p class="ra-note">准备好要让夜梦操作设备时，在<button type="button" class="ra-btn is-small" data-act="toc" data-target="ra-agent-card">助手权限</button>选择「设备全权」并保存。</p>' : '')
+        + (current.mode !== 'device' ? '<div class="ra-callout"><span>使用本机文件与命令需要「设备全权」权限</span><button type="button" class="ra-btn is-small" data-act="toc" data-target="ra-agent-card">前往权限设置</button></div>' : '')
         + wait
-        + '<details><summary>更改连接地址</summary><div class="ra-form"><label for="ra-comp-url">自定义地址</label><input type="url" id="ra-comp-url" value="' + esc(current.companion && current.companion.url || '') + '" placeholder="留空使用此平台的默认地址" maxlength="200" spellcheck="false"></div><p class="ra-note">端口有改动时，填启动窗口显示的地址，然后点「检测伴侣」。这里的地址不含管理密钥 #key。</p></details>'
-        + '<div class="ra-row" style="margin-top:8px"><button type="button" class="ra-btn is-small" data-act="comp-check">检测伴侣</button>'
+        + '<details class="ra-fold"><summary>' + chevron() + '更改连接地址</summary><div class="ra-fold-body">'
+        + '<div class="ra-form"><label for="ra-comp-url">自定义地址</label><input type="url" id="ra-comp-url" value="' + esc(current.companion && current.companion.url || '') + '" placeholder="留空使用默认地址（如 http://127.0.0.1:8790）" maxlength="200" spellcheck="false"></div></div></details>'
+        + '<div class="ra-row ra-mt"><button type="button" class="ra-btn is-small" data-act="comp-check">检测伴侣</button>'
         + (snap.found && !pairing ? '<button type="button" class="ra-btn is-small is-main" data-act="comp-pair">' + (snap.granted ? '重新申请放行' : '申请放行') + '</button>' : '')
         + (snap.saved ? '<button type="button" class="ra-btn is-small is-bad" data-act="comp-release">断开</button>' : '')
-        + (snap.granted ? '<button type="button" class="ra-btn is-small" data-act="comp-env">让她看看设备环境</button><span class="ra-note">要收回这台浏览器的放行，点「断开」；也能在管理页随时撤销。</span>' : '')
+        + (snap.granted ? '<button type="button" class="ra-btn is-small" data-act="comp-env">查看设备环境</button>' : '')
         + noteHtml('comp') + '</div></section>';
     }
 
@@ -358,7 +351,7 @@
       return true;
     }
 
-    return { mcpHtml: mcpHtml, scanMcp: scanMcp, cardsHtml: function () { return netCardHtml() + companionCardHtml(); }, action: action, change: change, tokenInput: tokenInput };
+    return { mcpHtml: mcpHtml, scanMcp: scanMcp, netCardHtml: netCardHtml, companionCardHtml: companionCardHtml, cardsHtml: function () { return netCardHtml() + companionCardHtml(); }, action: action, change: change, tokenInput: tokenInput };
   }
 
   modules.createNetUi = createNetUi;

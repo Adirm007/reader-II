@@ -1,28 +1,32 @@
 ---
 name: card-workflow
-description: 制卡工作流：从设定到角色卡、世界书、开场白，再在当前酒馆里试跑；也说明怎么自定义工作流
+description: 制卡工作流：从设定到角色卡、世界书、开场白、变量系统，再在当前酒馆里试跑验证
 ---
 # 制卡工作流
 
-用 `todo` 列出下面的步骤，逐步推进；每一步做完向用户确认再往下。
+用 `todo` 列出下面的步骤逐步推进，每完成一个阶段先和用户确认再进入下一步：
 
-1. **问清需求**：题材与基调、主要角色、用户扮演谁、要不要变量系统（MVU / 小白X / 不要）、要不要美化界面。草稿记在 `ws:/drafts/<卡名>/brief.md`。
-2. **设定稿**：角色（外貌、性格、语言风格、能力）、世界观、关键地点与势力。先写进 `ws:/drafts/<卡名>/`，用户点头后再落到卡里。
-3. **落到角色卡**：`card:/description.md`（角色本体）、`scenario.md`、`first_mes.md` 与 `greetings/`。只写常驻必要的内容，细节放世界书。
-4. **世界书**：人物、地点、规则各一条，`write wb:/<卡的世界书>/<条目>`，再改 `.meta.json` 设触发词；总是需要的设为 `constant`。需要随状态变化的条目用 EJS（先 `skill ejs-prompt-template`）。
-5. **变量与界面（可选）**：变量规则与初始值条目（`skill mvu` 或 `skill lwb-variables`）；状态栏之类的美化写成正则（`regex:/card/<名>/`），HTML 可以先在 `run_js target=sandbox` 里验证脚本逻辑。
-6. **试跑**：请用户发一条消息或重新生成；然后 `read chat:/latest`、`read var:/mvu.json`、`read page:/errors` 检查输出格式、变量更新、有没有报错，按结果回到对应步骤修改。
-7. **收尾**：列出做了什么、每个文件在哪、还有哪些没验证。
+1. **明确需求**：确定题材与基调、主要角色、玩家身份、是否需要变量系统（MVU / 小白X 2.0 / 小白X 3.0 / 纯文字）以及是否需要前端美化。把需求草稿写入 `ws:/drafts/<卡名>/brief.md`。
+2. **撰写设定稿**：整理角色（外貌、性格、说话方式、能力）、世界观、关键地点与势力。先落盘到 `ws:/drafts/<卡名>/`，待用户确认后再写入角色卡。
+3. **写入角色卡主体**：将常驻核心信息写入 `card:/description.md`、`scenario.md`、`first_mes.md` 与 `greetings/`，扩展设定拆分到世界书。
+4. **构建世界书**：按人物、地点、规则拆分条目，用 `write wb:/<书名>/<条目>` 创建并在 `.meta.json` 配置触发词与位置（常驻设为 `constant`）。需要随状态动态展开的条目先读 `skill ejs-prompt-template`，写完后用 `ejs_check_syntax` 检查语法。
+5. **变量与界面（按需）**：
+   - MVU / MVUzod：读 `skill mvu`，配齐 `[InitVar]`、Zod 4 Schema 脚本、`[mvu_update]`、变量列表与隐藏正则，并用 `mvu_test_update` 试跑更新命令。
+   - 小白X 2.0 / 3.0：读 `skill lwb-variables`，3.0 规则包草案用 `lwb_v3_check_draft` 校验并试算开局与关键动作。
+   - 状态栏等前端美化：写入 `regex:/card/<名>/`，纯逻辑先在 `run_js target=sandbox` 中验证。
+6. **试跑与回归**：请用户发一条消息或重新生成，然后查看 `chat:/latest`、`var:/mvu.json`（或 `lwb_v3_inspect`）、`page:/errors`，按结果定位修复。
+7. **交付清单**：列出改动摘要、文件路径与仍需玩家实测的项目。
 
 ## 自定义工作流
 
-用户可以把自己的流程写成一份知识：`ws:/skills/<名字>/SKILL.md`，开头加
+可将常用流程保存为工作区知识 `ws:/skills/<名字>/SKILL.md`：
 
-```
+```markdown
 ---
 name: my-workflow
-description: 一句话说明什么时候用
+description: 一句话说明适用场景
 ---
+正文写具体步骤。
 ```
 
-正文写步骤。下次启动后它会出现在【知识】目录里，用 `skill <名字>` 读取并照做。用户口述流程时，你可以替他写好这份文件。
+保存后下次启动会自动出现在【知识】目录中，用 `skill <名字>` 按需读取。

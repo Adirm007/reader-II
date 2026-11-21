@@ -29,32 +29,29 @@
     function rowsHtml() {
       var listed = catalog.filter(function (row) { return row.present || row.origin !== 'builtin'; });
       var missing = catalog.filter(function (row) { return !row.present && row.origin === 'builtin'; });
-      return (listed.length ? listed.map(rowHtml).join('') : '<p class="ra-note">当前酒馆还没有检测到可用的插件接口。安装想用的插件并启用后，可以重新扫描。</p>')
-        + (missing.length ? '<details class="ra-fold"><summary>' + view.icon('chevron') + '支持但尚未检测到的插件（' + missing.length + '）</summary>' + missing.map(rowHtml).join('') + '</details>' : '');
+      return (listed.length ? listed.map(rowHtml).join('') : '<p class="ra-note">当前未检测到已安装的插件接口。</p>')
+        + (missing.length ? '<details class="ra-fold"><summary>' + view.icon('chevron') + '支持但未检测到的插件（' + missing.length + '）</summary><div class="ra-fold-body">' + missing.map(rowHtml).join('') + '</div></details>' : '');
     }
     function problemsHtml() {
       if (!scanProblems.length) return '';
-      return '<details class="ra-fold"><summary>' + view.icon('chevron') + '有 ' + scanProblems.length + ' 项插件资料未能读取，查看原因</summary><ul class="ra-list">'
-        + scanProblems.map(function (problem) { return '<li>' + esc(problem) + '</li>'; }).join('') + '</ul></details>';
+      return '<details class="ra-fold"><summary>' + view.icon('chevron') + '有 ' + scanProblems.length + ' 项插件资料未能读取</summary><div class="ra-fold-body"><ul class="ra-list">'
+        + scanProblems.map(function (problem) { return '<li>' + esc(problem) + '</li>'; }).join('') + '</ul></div></details>';
     }
     function cardHtml() {
       return view.card('ra-conn-card', '插件对接',
-        '<p>让夜梦使用酒馆里其他插件的功能，例如读取数据库里的剧情大纲。进入设置时会扫描，显示「已接入」的插件可以直接用。</p>'
-        + '<div class="ra-row"><button type="button" class="ra-btn is-small" data-act="conn-scan">重新扫描</button></div>'
+        '<div class="ra-row"><button type="button" class="ra-btn is-small" data-act="conn-scan">重新扫描</button></div>'
         + '<div id="ra-conn-problems">' + problemsHtml() + '</div>'
-        + '<div id="ra-conn-list">' + rowsHtml() + '</div>'
-        + '<details class="ra-fold" id="ra-conn-import"><summary>' + view.icon('chevron') + '导入插件作者提供的对接文件</summary>'
-        + '<p class="ra-note">作者提供了 connector.json？选中该文件会立即导入。如果拿到的是一段 JSON 文字，可以粘贴到下面。导入后请看列表里的连接状态。</p>'
+        + '<div id="ra-conn-list" class="ra-mt">' + rowsHtml() + '</div>'
+        + '<details class="ra-fold" id="ra-conn-import"><summary>' + view.icon('chevron') + '导入插件对接配置（connector.json）</summary><div class="ra-fold-body">'
         + '<div class="ra-row"><button type="button" class="ra-btn is-small" data-act="conn-file">选择 JSON 文件</button><input type="file" id="ra-conn-file" accept=".json,application/json" hidden></div>'
-        + '<label for="ra-conn-json">对接内容</label><textarea id="ra-conn-json" class="is-code" spellcheck="false" placeholder="粘贴作者给你的完整 JSON"></textarea>'
-        + '<button type="button" class="ra-btn is-small" data-act="conn-save">导入或更新对接</button></details>'
-        + '<details class="ra-fold" id="ra-conn-source"><summary>' + view.icon('chevron') + '添加其他插件的剧情记忆来源</summary>'
-        + '<p class="ra-note">不知道函数名时，可以直接对夜梦说「帮我看看 ×× 插件有没有剧情摘要接口，有的话帮我接上」。她可以查插件说明并准备对接，需要你确认时会在对话里提示。</p>'
-        + '<p class="ra-note">如果作者给了一个读取当前剧情摘要的函数名，填在这里。插件需要先安装在酒馆里，并且这个函数能直接调用，无需额外参数。</p>'
+        + '<div class="ra-field-stack ra-mt"><label for="ra-conn-json">对接 JSON</label>'
+        + '<textarea id="ra-conn-json" class="is-code" spellcheck="false" placeholder="粘贴完整的 connector.json 内容"></textarea></div>'
+        + '<div class="ra-row ra-mt"><button type="button" class="ra-btn is-small" data-act="conn-save">导入或更新对接</button></div></div></details>'
+        + '<details class="ra-fold" id="ra-conn-source"><summary>' + view.icon('chevron') + '添加其他插件的剧情记忆来源</summary><div class="ra-fold-body">'
         + '<div class="ra-form"><label for="ra-source-name">显示名称</label><input id="ra-source-name" type="text" placeholder="例如：我的剧情笔记">'
-        + '<label for="ra-source-method">作者提供的函数名</label><input id="ra-source-method" type="text" spellcheck="false" placeholder="例如：window.MyNotes.getSummary"></div>'
-        + '<div class="ra-row"><button type="button" class="ra-btn is-small" data-act="conn-source-add">添加来源</button>'
-        + '<button type="button" class="ra-btn is-small" data-act="conn-goto-plot">回到剧情记忆来源</button></div></details>'
+        + '<label for="ra-source-method">摘要读取函数</label><input id="ra-source-method" type="text" spellcheck="false" placeholder="例如：window.MyNotes.getSummary"></div>'
+        + '<div class="ra-row ra-mt"><button type="button" class="ra-btn is-small" data-act="conn-source-add">添加来源</button>'
+        + '<button type="button" class="ra-btn is-small" data-act="conn-goto-plot">回到剧情记忆来源</button></div></div></details>'
         + '<p class="ra-status" role="status" id="ra-conn-note"></p>', '立即生效');
     }
 
@@ -80,12 +77,12 @@
     }
     function plotHtml(selected) {
       var automatic = selected === 'auto';
-      return '<div class="ra-form"><label for="ra-plot-mode">剧情记忆来源</label><select id="ra-plot-mode">'
-        + '<option value="auto"' + (automatic ? ' selected' : '') + '>自动使用第一份有内容的记忆</option>'
-        + '<option value="manual"' + (automatic ? '' : ' selected') + '>自己选择，可以多选</option></select></div>'
-        + '<div id="ra-plot-options"' + (automatic ? ' hidden' : '') + '><p class="ra-note">勾选的来源会一同提供剧情。不选时，夜梦跳过剧情记忆。</p>'
+      return '<div class="ra-form ra-mt"><label for="ra-plot-mode">剧情记忆来源</label><select id="ra-plot-mode">'
+        + '<option value="auto"' + (automatic ? ' selected' : '') + '>自动选用首份可用摘要</option>'
+        + '<option value="manual"' + (automatic ? '' : ' selected') + '>手动多选来源</option></select></div>'
+        + '<div id="ra-plot-options" class="ra-mt"' + (automatic ? ' hidden' : '') + '>'
         + '<div id="ra-plot-choices">' + sourceChoices(automatic ? [] : selected) + '</div></div>'
-        + '<button type="button" class="ra-btn is-small" data-act="conn-goto-source">添加剧情记忆来源</button>';
+        + '<div class="ra-row ra-mt"><button type="button" class="ra-btn is-small" data-act="conn-goto-source">添加剧情记忆来源</button></div>';
     }
     function refresh(deletedId) {
       var ids = checkedIds().filter(function (id) { return id !== deletedId; });

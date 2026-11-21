@@ -1,77 +1,72 @@
 ---
 name: device
-description: 在设备上做事（要后端伴侣）：dev:/ 文件、跑命令与后台任务、装依赖、无头浏览器、给酒馆写扩展的流程
+description: 通过后端伴侣在本地设备工作：dev:/ 文件、命令与后台任务、无头浏览器与酒馆扩展开发
 ---
 # 在设备上做事
 
-## 前提
+## 就绪条件
 
-三件事都满足才行，缺哪件工具会直接告诉你，照实转告用户即可，不要换办法硬做：
+满足以下三项后即可使用设备能力（【当前环境】中出现「后端伴侣：已连接并放行」即已连通；缺任一项时按工具报错如实告知用户）：
 
-1. 装了后端伴侣（酒馆后端插件，或独立运行）。TauriTavern 装不了插件，只能独立运行；手机上不强求。
-2. 用户在「设置 → 后端伴侣」里申请了放行，并在设备本机的管理页上批准（有期限，会过期）。
-3. 权限档位是「设备全权」。
+1. 已部署后端伴侣（酒馆后端插件，或独立运行进程；TauriTavern 需独立运行）。
+2. 用户在「设置 → 后端伴侣」中完成配对并在本机管理页批准放行（放行有时效）。
+3. 助手权限档位已设为「设备全权」。
 
-【当前环境】里有一行「后端伴侣：已连接并放行」才算就绪。
+## 设备文件：`dev:/`
 
-## 设备上的文件：`dev:/`
+可直接使用核心文件工具 `ls` / `grep` / `read` / `edit` / `write`：
 
-核心工具直接可用，和别的挂载点一样：`ls` 看目录、`grep` 定位、`read` 分段读、`edit` 精确替换、`write` 新建。
+- 常用起点：`dev:/~/…`（用户主目录）、`dev:/@ws/…`（伴侣工作目录，适合存放草稿与克隆仓库）。
+- 绝对路径：Windows 写作 `dev:/C:/Users/…`，Linux/macOS/Termux 写作 `dev:/home/…`、`dev:/data/data/com.termux/files/home/…`；`ls dev:/` 可列出可用根目录与盘符。
+- `grep` 在设备端执行，自动跳过 `.git`、`node_modules`；范围过大时按提示缩小目录。
+- 文件读取统一使用 `\n`，写回原 CRLF 文件时自动恢复原换行格式；文件改动自动记入本轮撤销记录。
+- `rm` 仅删除单个文件或空目录；删除非空目录或处理二进制文件需经 `device_exec` 执行命令并先向用户说明影响。
 
-- `dev:/~/…` 用户目录；`dev:/@ws/…` 伴侣的工作目录（草稿、克隆下来的仓库放这里）。
-- 绝对路径：Windows 写 `dev:/C:/Users/…`，其他系统写 `dev:/home/…`、`dev:/data/data/com.termux/files/home/…`。`ls dev:/` 能看到有哪些盘与根目录。
-- 检索是在设备上做的，自动跳过 `.git`、`node_modules` 这类目录；范围太大时会提示你缩小。
-- 读到的换行统一是 `\n`；原文件是 Windows 换行（CRLF）时，写回去会自动还原，你不用管。
-- 文件的改动有记录，用户可以按轮撤销。删除只能删文件与空目录；删整个目录要用命令，先跟用户确认。
-- 二进制文件读不了，会得到一句说明；需要处理就用命令。
+## 执行命令：`device_exec`
 
-## 命令：`device_exec`
+打开 `device` 工具箱后，先调用 `device_env` 确认 `platform`、可用工具与包管理器：
 
-打开 `device` 工具箱。动手之前先 `device_env` 看一眼系统与工具。
+- 命令以**非交互模式**运行：需要确认的命令附带 `-y` 等参数；涉及 `sudo` 或需手工输密码的命令请用户自己在终端运行。
+- Windows 默认使用 `cmd`（可传 `shell=powershell` 切换），类 Unix 系统使用 `sh`。
+- `cwd` 可传 `dev:/…` 路径，省略时默认在伴侣工作目录执行。
+- 超出 `timeout`（默认 60 秒）会自动转为后台任务并返回任务号；预计耗时较长的操作（安装依赖、启动开发服务器）直接传 `background=true`，随后用 `device_job` 查看日志（`action=log`）、状态（`action=status`）或停止（`action=kill`）。
+- 命令不可自动撤销且每次需用户确认；涉及删除、覆盖或系统配置变更前，简明说明操作目的与影响范围，严格聚焦用户交代的目标。
 
-- 命令是**非交互**的：不能等人输入。带确认的命令加 `-y` 之类的参数；要密码的（`sudo`）你做不了，请用户自己在终端里跑。
-- Windows 上默认是 cmd（`shell=powershell` 可换），其他系统是 sh。写命令前先看 `device_env` 里的 `platform`，不要想当然。
-- `cwd` 可以是 `dev:/…` 路径；不写就是伴侣的工作目录。
-- 超过 `timeout`（默认 60 秒）还没结束会转成后台任务并返回任务号。明知道要跑很久（装依赖、起开发服务器）就直接 `background=true`，然后用 `device_job action=log id=…` 看输出、`action=status` 看是否结束、`action=kill` 停掉。
-- 命令**撤销不了**。每条命令都会请用户确认；删除、覆盖、改系统设置这类命令，先用一句话说清要做什么、会影响什么。
-- 只在用户交代的范围里活动。不要顺手清理、升级、改别的东西。
+## 安装依赖
 
-## 装依赖
+从 `device_env` 读取 `tools`（已装版本）、`missing`（缺失工具与推荐安装命令）和 `packageManager`：
 
-`device_env` 的结果里：`tools` 是已有的工具与版本，`missing` 是缺的（各自的用途与安装命令），`packageManager` 是这台设备的包管理器。
+1. 向用户列出缺少的工具、用途及对应命令，确认后再安装。
+2. 使用 `background=true` 执行安装，完成后调 `device_env refresh=true` 复查。
+3. 需要 `sudo` 或 Windows 缺少 `winget` 时，把明确步骤交给用户自行安装；安装失败时把关键报错行转告用户。
 
-1. 先把缺什么、各自做什么用告诉用户，问清要不要装、装哪些。
-2. 用 `missing` 里给的命令装，`background=true`；装完 `device_env refresh=true` 复查。
-3. 带 `sudo` 的命令请用户自己跑；Windows 上没有 winget 时请用户去官网下载。
-4. 装不上就如实说明卡在哪一步，把输出里的关键几行给用户看。
+## Git 协作
 
-## git
-
-设备上有 git 时用它（克隆到 `dev:/@ws/`、提交、推送）。推送要用户在设备上配好凭据；没配的话，改用 `web` 工具箱的 `github_push`（只要令牌，见知识 web-github）。
+设备装有 `git` 时可直接克隆到 `dev:/@ws/` 并执行提交与推送；若设备未配置 Git 凭据，改用 `web` 工具箱的 `github_push`（详见 `skill web-github`）。
 
 ## 无头浏览器：`device_browser`
 
-用来试你做的页面，或看要跑脚本才出内容的网页。它用的是设备上的 Chrome / Chromium / Edge，独立的临时资料目录，不碰用户自己的浏览器。
+用于验证前端页面或抓取依赖脚本渲染的网页（使用设备上的 Chrome / Chromium / Edge 与独立临时配置目录）：
 
-```
+```text
 device_browser action=open url=http://127.0.0.1:5173
-device_browser action=text                  （取整页文字；selector=… 只取一部分）
-device_browser action=console               （看报错）
+device_browser action=text                  （整页文本，可传 selector）
+device_browser action=console               （查看控制台报错）
 device_browser action=eval code=return document.querySelectorAll('.card').length
 device_browser action=click selector=#save
 device_browser action=type selector=#name text=夜梦
-device_browser action=screenshot            （存进 dev:/@ws/screenshots/，你看不到图，是给用户看的）
+device_browser action=screenshot            （保存至 dev:/@ws/screenshots/ 供用户查看）
 device_browser action=close
 ```
 
-改完前端之后的检查顺序：`open` → `console` 没有报错 → `text` / `eval` 确认内容对 → 必要时 `click` / `type` 走一遍操作。没有找到浏览器时如实说明。
+前端修改后的标准验证顺序：`open` → `console` 确认无报错 → `text` / `eval` 校验渲染结果 → 必要时 `click` / `type` 走通交互。
 
-## 给酒馆写一个扩展
+## 开发酒馆扩展
 
-1. 读知识 tavern-anatomy；参考别人的写法就用 `gh:/` 读几个现成的扩展（见知识 web-github）。
-2. 在工作区或 `dev:/@ws/<名字>/` 里写：`manifest.json`（`display_name`、`js`、`css`、`version`、`author`）与入口脚本。
-3. 试装：酒馆的第三方扩展目录是 `<酒馆>/data/<用户>/extensions/<名字>/`（旧版在 `<酒馆>/public/scripts/extensions/third-party/`）。把文件写进去，请用户刷新酒馆页面。
-4. 看现场：`page:/errors` 有没有新的报错；`run_js target=page` 检查扩展挂出来的对象。
-5. 没问题后推到 GitHub（`github_push` 或 git），用户就能用链接安装、以后也能更新。
+1. 参考 `skill tavern-anatomy`，需要案例时通过 `gh:/` 阅读现成扩展源码。
+2. 在工作区或 `dev:/@ws/<扩展名>/` 编写 `manifest.json`（含 `display_name`、`js`、`css`、`version`、`author`）和入口脚本。
+3. 安装到酒馆第三方扩展目录：`<酒馆>/data/<用户>/extensions/<扩展名>/`（旧版在 `<酒馆>/public/scripts/extensions/third-party/`），请用户刷新页面。
+4. 通过 `page:/errors` 和 `run_js target=page` 检查运行状态。
+5. 验证通过后推送到 GitHub 便于安装和更新。
 
-不要直接改 Reader-II 自己的扩展目录：更新时会被冲掉。要扩展夜梦助手，另写一个扩展，用 `window.ReaderII.agent.registerTool` 等接口（开发者指南在 `gh:/Adirm007/reader-II/docs/开发者指南.md`）。
+扩展夜梦助手能力时，新建独立扩展并调用 `window.ReaderII.agent.registerTool` 等公开接口（详见 `gh:/Adirm007/reader-II/docs/开发者指南.md`），保留 Reader-II 扩展目录本身干净以便正常升级。

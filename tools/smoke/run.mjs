@@ -102,7 +102,7 @@ async function captureShots(cdp, sessionId, evaluate) {
         ['desktop', 1280, 800, 1, false], ['mobile', 375, 812, 2, true],
       ]) {
         await cdp.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor, mobile }, sessionId);
-        for (const page of ['lobby', 'chat', 'memory', 'settings', 'panel']) {
+        for (const page of ['lobby', 'chat', 'memory', 'settings', 'guide', 'panel']) {
           await evaluate(`window.__smokeView(${JSON.stringify(theme)}, ${JSON.stringify(page)})`);
           const { data } = await cdp.send('Page.captureScreenshot', { format: 'png', fromSurface: true, captureBeyondViewport: false }, sessionId);
           await writeFile(join(SHOTS, `${theme}-${viewport}-${page}.png`), Buffer.from(data, 'base64'));

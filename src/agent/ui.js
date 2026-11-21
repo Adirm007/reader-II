@@ -180,8 +180,8 @@
       var turns = agent.getHistory();
       var checkpoint = threads.checkpoint();
       if (checkpoint) {
-        var handoff = checkpoint.task ? '<p>任务：' + esc(checkpoint.task) + '</p>' : '';
-        append('<details><summary>上下文摘要</summary>' + handoff + '<div>' + rich(checkpoint.text) + '</div></details>', 'ra-checkpoint');
+        var handoff = checkpoint.task ? '<p class="ra-note">任务：' + esc(checkpoint.task) + '</p>' : '';
+        append('<details class="ra-fold"><summary>' + icon('chevron') + '上下文摘要</summary><div class="ra-fold-body">' + handoff + '<div>' + rich(checkpoint.text) + '</div></div></details>', 'ra-checkpoint');
       }
       var rows = threads.list(), currentId = threads.currentId();
       var active = rows.find(function (row) { return row.id === currentId; });
@@ -725,10 +725,10 @@
       try { hasChat = !!(core && core.hasChat()); enabled = hasChat && !!lobby.isEnabled(); } catch (error) { hasChat = false; }
       var name = '';
       try { name = kit.names().char || ''; } catch (error) { name = ''; }
-      var body = !core ? '<p class="ra-note">读者界面还没有就绪，稍等一下再打开这一页。</p>'
-        : !hasChat ? '<p class="ra-note">先打开一个聊天，才能决定要不要在那张卡上启用。夜梦助手自己不受影响，在哪里都能用。</p>'
+      var body = !core ? '<p class="ra-note">读者界面尚未就绪。</p>'
+        : !hasChat ? '<p class="ra-note">打开一个聊天后可切换当前角色卡的启停状态。</p>'
         : '<div class="ra-switch-row"><div><b>在「' + esc(name || '这张卡') + '」上启用 Reader-II</b>'
-          + '<p class="ra-note">启用后，九十九夜梦会读这个故事、偶尔来信，读者大厅（定调、命运抽卡等）在这张卡上可用；她的设定会随每次生成一起发给模型。关掉后这张卡上不再注入、不再记账，已有的记录都留着。</p></div>'
+          + ' <span class="ra-badge">' + (enabled ? '已启用' : '已停用') + '</span></div>'
           + '<button type="button" class="ra-switch-btn" role="switch" aria-checked="' + (enabled ? 'true' : 'false') + '" aria-label="在这张卡上启用 Reader-II" data-act="card-toggle"><span class="ra-switch" aria-hidden="true"></span></button></div>';
       return card('ra-reader-card', '这张卡', body, '立即生效');
     }
@@ -764,7 +764,7 @@
         var prefix = 'p.' + section.key + '.';
         var positionOptions = placement.positions.map(function (entry) { return option(entry[0], entry[1], v.position); }).join('');
         var chatOnly = ' data-placement-position="4"' + (v.position === 4 ? '' : ' hidden');
-        return '<section data-placement-section="' + section.key + '" aria-label="' + section.label + '">'
+        return '<section class="ra-subcard" data-placement-section="' + section.key + '" aria-label="' + section.label + '">'
           + switchField(prefix + 'enabled', v.enabled, section.label)
           + '<div data-placement-fields' + (v.enabled ? '' : ' hidden') + '><div class="ra-nums">'
           + '<label class="ra-num">注入位置<select data-s="' + prefix + 'position">' + positionOptions + '</select></label>'
@@ -772,12 +772,10 @@
           + '<label class="ra-num"' + chatOnly + '>聊天深度<input type="number" min="0" max="9999" required data-s="' + prefix + 'depth" value="' + v.depth + '"></label>'
           + '<label class="ra-num"' + chatOnly + '>消息角色<select data-s="' + prefix + 'role">'
           + option(0, '系统', v.role) + option(1, '用户', v.role) + option(2, '助手', v.role) + '</select></label>'
-          + '<label class="ra-num" data-placement-position="7"' + (v.position === 7 ? '' : ' hidden') + '>出口名称<input data-s="' + prefix + 'outletName" value="' + esc(v.outletName) + '"></label>'
-          + '</div><p class="ra-note" data-placement-position="7"' + (v.position === 7 ? '' : ' hidden')
-          + '>在目标位置填写 <code>{{outlet::出口名称}}</code>，酒馆会在展开该宏时放入这一段。</p></div></section>';
+          + '<label class="ra-num" data-placement-position="7"' + (v.position === 7 ? '' : ' hidden') + '>出口名称（{{outlet::名称}}）<input data-s="' + prefix + 'outletName" placeholder="出口名称" value="' + esc(v.outletName) + '"></label>'
+          + '</div></div></section>';
       }).join('');
-      return card('ra-placement-card', '正文提示词位置',
-        '<p class="ra-note">用于所有已启用 Reader-II 的角色卡，从下一次正文生成或重掷生效。位置和插入顺序沿用酒馆世界书规则，聊天深度 0 表示末尾。</p>' + body);
+      return card('ra-placement-card', '正文提示词位置', body);
     }
 
     function updatePlacementFields(section) {
@@ -791,30 +789,27 @@
       var persona = agent.personaContext();
       return card('ra-agent-card', '助手', group('权限')
         + '<div class="ra-form">'
-        + '<label>权限档位</label><select data-s="a.mode">' + option('readonly', '只读：查看酒馆，草稿可写入工作区', a.mode) + option('card', '单卡：只改当前聊天和这张卡（推荐）', a.mode) + option('tavern', '酒馆全权：酒馆里的一切', a.mode) + option('device', '设备全权：再加上设备上的文件与命令（需后端伴侣）', a.mode) + '</select>'
-        + '<label>确认方式</label><select data-s="a.approval">' + option('ask', '每次写入前询问（推荐）', a.approval) + option('auto', '档位内直接执行，危险操作仍询问', a.approval) + option('yolo', '全部直接执行', a.approval) + '</select>'
+        + '<label>权限档位</label><select data-s="a.mode">' + option('readonly', '只读：查看酒馆与写入工作区', a.mode) + option('card', '单卡：当前聊天与角色卡（推荐）', a.mode) + option('tavern', '酒馆全权：酒馆内全部资源', a.mode) + option('device', '设备全权：含本机文件与命令（需伴侣）', a.mode) + '</select>'
+        + '<label>确认方式</label><select data-s="a.approval">' + option('ask', '每次写入前询问（推荐）', a.approval) + option('auto', '档位内自动执行，危险操作仍询问', a.approval) + option('yolo', '全部自动执行', a.approval) + '</select>'
         + '</div>'
         + group('对话')
-        + '<div class="ra-form"><label for="ra-persona-prompt">夜梦人格提示词 · ' + esc(persona.name) + '</label>'
-        + '<textarea id="ra-persona-prompt" data-s="personaPrompt" data-persona-key="' + esc(persona.key) + '" rows="7">' + esc(persona.override || persona.defaultPrompt) + '</textarea>'
-        + '<p class="ra-note">修改后用于该人格的助手对话和正文人设。清空后保存可恢复人格原文。</p>'
-        + '<label for="ra-appearance-prompt">夜梦当前外貌提示词</label>'
-        + '<textarea id="ra-appearance-prompt" data-s="appearancePrompt" data-prompt-key="' + esc(persona.appearance.key) + '" rows="4">' + esc(persona.appearance.prompt) + '</textarea>'
-        + '<p class="ra-note">' + (persona.id === 'custom' ? '这份外貌随当前自定义人格保存。' : '这份外貌随大厅当前的主题和装扮保存，换装后会切换。')
-        + '可用自己的话写发型、衣服等特征。保存后用于助手聊天、自拍和正文；清空后保存可恢复原貌。</p>'
-        + '<label for="ra-assistant-system-prompt">助手专用系统提示词</label>'
-        + '<textarea id="ra-assistant-system-prompt" data-s="a.assistantSystemPrompt" rows="4">' + esc(a.assistantSystemPrompt) + '</textarea>'
-        + '<p class="ra-note">所有人格共用，只随助手对话发送。可在这里设定助手的角色、措辞和回答方式。</p></div>'
-        + switchField('a.plotContext', a.plotContext, '让助手了解当前剧情', '仅在助手对话时读取所选插件已有的剧情记忆。关闭或不选来源时跳过。')
+        + '<div class="ra-stack">'
+        + '<div class="ra-field-stack"><label for="ra-persona-prompt">夜梦人格提示词 · ' + esc(persona.name) + '</label>'
+        + '<textarea id="ra-persona-prompt" data-s="personaPrompt" data-persona-key="' + esc(persona.key) + '" rows="6" placeholder="清空保存可恢复默认人格原文">' + esc(persona.override || persona.defaultPrompt) + '</textarea></div>'
+        + '<div class="ra-field-stack"><label for="ra-appearance-prompt">夜梦当前外貌提示词</label>'
+        + '<textarea id="ra-appearance-prompt" data-s="appearancePrompt" data-prompt-key="' + esc(persona.appearance.key) + '" rows="3" placeholder="清空保存可恢复当前装扮默认外貌">' + esc(persona.appearance.prompt) + '</textarea></div>'
+        + '<div class="ra-field-stack"><label for="ra-assistant-system-prompt">助手专用系统提示词</label>'
+        + '<textarea id="ra-assistant-system-prompt" data-s="a.assistantSystemPrompt" rows="3" placeholder="所有人格共用，仅随助手对话发送">' + esc(a.assistantSystemPrompt) + '</textarea></div>'
+        + '</div>'
+        + switchField('a.plotContext', a.plotContext, '让助手了解当前剧情')
         + connectorUi.plotHtml(a.plotSources)
-        + switchField('a.lite', a.lite, '轻聊', '不带任何工具，只聊天')
+        + switchField('a.lite', a.lite, '轻聊模式（无工具）')
         + switchField('a.recall', a.recall, '回答前自动带入相关记忆')
         + group('生成参数')
-        + '<div class="ra-form"><label for="ra-context-strategy">接近上下文上限时</label><select id="ra-context-strategy" data-s="a.contextStrategy">'
-        + option('compact', '在本对话中压缩', a.contextStrategy) + option('handoff', '写摘要并交接到新对话', a.contextStrategy) + '</select></div>'
+        + '<div class="ra-form"><label for="ra-context-strategy">上下文接近上限</label><select id="ra-context-strategy" data-s="a.contextStrategy">'
+        + option('compact', '在当前对话中压缩', a.contextStrategy) + option('handoff', '生成摘要并交接到新对话', a.contextStrategy) + '</select></div>'
         + '<div class="ra-nums">' + numberField('a.historyTurns', '历史轮数（−1 自动，0 关闭）', a.historyTurns, -1, 1000)
-        + numberField('a.temperature', '温度', a.temperature, 0, 2, 0.05) + numberField('a.maxTokens', '输出上限', a.maxTokens, 256, 64000) + numberField('a.timeoutSec', '单次超时（秒）', a.timeoutSec, 20, 900) + '</div>'
-        + '<p class="ra-note">输出上限与温度只对独立 API 生效；走酒馆连接时沿用当前预设。</p>');
+        + numberField('a.temperature', '温度（独立 API）', a.temperature, 0, 2, 0.05) + numberField('a.maxTokens', '输出上限（独立 API）', a.maxTokens, 256, 64000) + numberField('a.timeoutSec', '单次超时（秒）', a.timeoutSec, 20, 900) + '</div>');
     }
 
     function toolLineHtml() {
@@ -837,12 +832,11 @@
 
     function toolsCardHtml(a) {
       return card('ra-tools-card', '工具调用',
-        '<div class="ra-nums">' + numberField('a.maxSteps', '每项任务的工具轮数', a.maxSteps, 1, modules.AGENT_MAX_STEP_BUDGET) + '</div>'
-        + '<p class="ra-note">可填 1 至 ' + modules.AGENT_MAX_STEP_BUDGET + '。模型同一批发出的调用合计一轮。保存后用于新任务。对话中用完可追加轮数，保留当前计划和工具结果。</p>'
-        + '<p class="ra-note">助手靠「工具调用」来读写卡里的东西。多数模型认原生的函数调用；不认的，改让它按约定的文本格式写出来。拿不准就留在「自动」，助手只说不做的时候来这里测一下。</p>'
-        + '<div class="ra-form"><label>调用方式</label><select data-s="a.toolProtocol">' + option('auto', '自动：能用原生就用，不行退回文本协议（推荐）', a.toolProtocol) + option('native', '只用原生函数调用', a.toolProtocol) + option('text', '只用文本协议', a.toolProtocol) + '</select></div>'
+        '<div class="ra-form">'
+        + '<label for="ra-max-steps">每项任务的工具轮数</label><input id="ra-max-steps" type="number" inputmode="decimal" data-s="a.maxSteps" value="' + esc(a.maxSteps) + '" min="1" max="' + modules.AGENT_MAX_STEP_BUDGET + '">'
+        + '<label>调用方式</label><select data-s="a.toolProtocol">' + option('auto', '自动（优先原生，回退文本）', a.toolProtocol) + option('native', '仅原生函数调用', a.toolProtocol) + option('text', '仅文本协议', a.toolProtocol) + '</select></div>'
         + toolLineHtml()
-        + '<div class="ra-row"><button type="button" class="ra-btn" data-act="probe-tools">测试工具调用</button><span class="ra-note">会向模型发两次很短的请求，不改任何东西。</span></div>'
+        + '<div class="ra-row ra-mt"><button type="button" class="ra-btn" data-act="probe-tools">测试工具调用</button></div>'
         + '<div id="ra-probe-out" aria-live="polite">' + probeView + '</div>');
     }
 
@@ -876,9 +870,8 @@
 
     function rulesCardHtml(rules) {
       return card('ra-rules-card', '权限规则',
-        '<p class="ra-note">按路径或工具名匹配：<code>*</code> 不跨“/”，<code>**</code> 跨层级。禁止优先，其余取第一条匹配的。例：<code>wb:/日记/**</code> 禁止读写这本世界书；<code>var:/chat.json*</code> 写聊天变量免问；<code>slash_run</code> 斜杠命令总是先问。档位不够的写入照样不执行。</p>'
-        + '<div id="ra-rules">' + (rules || []).map(ruleRowHtml).join('') + '</div>'
-        + '<div class="ra-row"><button type="button" class="ra-btn is-small" data-act="rule-add">添加规则</button></div>');
+        '<div id="ra-rules">' + (rules || []).map(ruleRowHtml).join('') + '</div>'
+        + '<div class="ra-row ra-mt"><button type="button" class="ra-btn is-small" data-act="rule-add">添加规则</button></div>');
     }
 
     function readRules() {
@@ -890,17 +883,17 @@
 
     function memoryCardHtml(m) {
       return card('ra-memory-card', '助手记忆', switchField('m.enabled', m.enabled, '启用助手记忆')
-        + switchField('m.agentExtract', m.agentExtract, '自动整理助手对话', '整理真实用户与夜梦聊过的偏好、约定、情感与做法。')
+        + switchField('m.agentExtract', m.agentExtract, '自动整理助手对话')
         + '<div class="ra-nums">' + numberField('m.agentEveryTurns', '每多少条助手回复整理一次', m.agentEveryTurns, 1, 40) + '</div>'
-        + '<div class="ra-form"><label>新记忆写到</label><select data-s="m.store">' + option('chat', '当前聊天（随存档）', m.store) + option('ocean', '《夜之洋》世界书（跨存档）', m.store) + '</select>'
+        + '<div class="ra-form ra-mt"><label>新记忆写到</label><select data-s="m.store">' + option('chat', '当前聊天（随存档）', m.store) + option('ocean', '《夜之洋》世界书（跨存档）', m.store) + '</select>'
         + '<label>跨存档世界书名</label><input type="text" data-s="m.oceanBook" value="' + esc(m.oceanBook) + '" maxlength="60"></div>'
         + group('正文共享')
-        + switchField('m.unify', m.unify, '助手夜梦 = 正文夜梦', '正文夜梦可以想起与真实用户的交流，并保持角色视角。')
+        + switchField('m.unify', m.unify, '助手夜梦 = 正文夜梦')
         + '<div class="ra-nums">' + numberField('m.injectDepth', '注入深度', m.injectDepth, 0, 40) + numberField('m.injectMax', '最多带几条', m.injectMax, 1, 30) + numberField('m.injectBudget', '字数预算', m.injectBudget, 200, 20000) + '</div>');
     }
 
     var modelUi = modules.createModelUi(llm, agent, {
-      $: $, esc: esc, card: card, dirty: setDirty, toast: toast,
+      $: $, esc: esc, icon: icon, card: card, dirty: setDirty, toast: toast,
       profileChanged: function () {
         var fields = $('#ra-model-fields');
         if (!fields || fields.dataset.profileKey !== agent.getModelSettings().key || fields.dataset.edited !== '1') {
@@ -923,18 +916,20 @@
       var caps = llm.getModelCapabilities('agent', profile);
       var origin = { override: '手动指定', metadata: '模型接口', catalog: '已知模型规格', host: '酒馆设置', fallback: '估算值' };
       var lobby = lobbyApi();
-      var lobbyButtons = lobby && lobby.isEnabled() ? '<div class="ra-row"><button type="button" class="ra-btn" data-act="open-api">打开大厅独立 API 设置</button><button type="button" class="ra-btn" data-act="open-panel">打开语义适配</button></div>' : '';
+      var lobbyEnabled = false;
+      try { lobbyEnabled = !!(lobby && lobby.isEnabled()); } catch (error) { lobbyEnabled = false; }
+      var lobbyButtons = lobbyEnabled ? '<div class="ra-row"><button type="button" class="ra-btn is-small" data-act="open-api">打开大厅独立 API 设置</button><button type="button" class="ra-btn is-small" data-act="open-panel">打开语义适配</button></div>' : '';
       return card('ra-model-card', '主模型', '<dl class="ra-kv">' + route('agent', '助手对话') + route('memory', '记忆整理') + route('adapt', '语义适配') + '</dl>'
-        + '<p class="ra-note">三项各自对应「独立 API」里的调用类型；没有单独设置时用默认方案，默认方案也没有时走酒馆当前连接。</p>'
         + lobbyButtons
         + group('助手模型参数 · ' + esc(profile.model || caps.model || '当前连接'))
         + '<div class="ra-form" id="ra-model-fields" data-profile-key="' + esc(profile.key) + '">'
-        + '<p class="ra-note wide">当前窗口为 ' + esc(Number(caps.contextWindow).toLocaleString()) + ' tokens（' + esc(origin[caps.origin] || caps.origin) + '）。下列设置按模型与连接保存。</p>'
-        + '<label for="ra-window">上下文窗口（tokens，0 自动识别）</label><input type="number" id="ra-window" data-s="model.contextWindow" min="0" max="100000000" step="1" value="' + esc(profile.contextWindow || 0) + '">'
+        + '<p class="ra-note wide">当前窗口 · <b>' + esc(Number(caps.contextWindow).toLocaleString()) + '</b> tokens（' + esc(origin[caps.origin] || caps.origin) + '）</p>'
+        + '<label for="ra-window">上下文窗口（0 自动）</label><input type="number" id="ra-window" data-s="model.contextWindow" min="0" max="100000000" step="1" value="' + esc(profile.contextWindow || 0) + '">'
         + '<label for="ra-effort">思考档位</label><select id="ra-effort" data-s="model.reasoningEffort">' + modelUi.effortOptions(profile.reasoningEffort) + '</select>'
         + '<label for="ra-image-mode">图片接口</label><select id="ra-image-mode" data-s="model.imageMode">' + option('auto', '自动识别', profile.imageMode) + option('chat', '多模态对话', profile.imageMode) + option('generation', '独立 API 图像生成接口', profile.imageMode) + '</select>'
-        + '<details class="wide ra-fold"><summary>反代专用参数</summary><div class="ra-form">'
-        + '<label for="ra-model-json">额外请求参数（JSON 对象）</label><textarea id="ra-model-json" data-s="model.modelParameters" rows="3" spellcheck="false" placeholder="{}">' + esc(JSON.stringify(profile.modelParameters || {}, null, 2)) + '</textarea>'
+        + '<details class="wide ra-fold"><summary>' + icon('chevron') + '反代专用参数</summary><div class="ra-fold-body">'
+        + '<div class="ra-field-stack"><label for="ra-model-json">额外请求参数（JSON 对象）</label>'
+        + '<textarea id="ra-model-json" class="is-code" data-s="model.modelParameters" rows="3" spellcheck="false" placeholder="{}">' + esc(JSON.stringify(profile.modelParameters || {}, null, 2)) + '</textarea></div>'
         + '</div></details></div>');
     }
 
@@ -976,8 +971,10 @@
       return card('ra-upd-card', '版本更新', '<p>当前版本 <b>v' + esc(runningVersion()) + '</b></p><p class="ra-note">' + esc(checked) + '</p>'
         + '<div class="ra-row"><button type="button" class="ra-btn" data-act="upd-check">检查更新</button></div>'
         + '<div id="ra-upd-out" aria-live="polite">' + updatesView + '</div>'
-        + '<details class="ra-fold"><summary>' + icon('chevron') + '更新源（每行一个地址，按顺序尝试）</summary><textarea id="ra-upd-remotes" class="is-code" spellcheck="false">' + esc(s.remotes.join('\n')) + '</textarea>'
-        + '<div class="ra-row"><button type="button" class="ra-btn is-small" data-act="upd-remotes">保存更新源</button><button type="button" class="ra-btn is-small" data-act="upd-reset">恢复默认</button></div></details>');
+        + '<details class="ra-fold"><summary>' + icon('chevron') + '更新源设置</summary><div class="ra-fold-body">'
+        + '<div class="ra-field-stack"><label for="ra-upd-remotes">更新源地址（每行一个，按顺序尝试）</label>'
+        + '<textarea id="ra-upd-remotes" class="is-code" spellcheck="false">' + esc(s.remotes.join('\n')) + '</textarea></div>'
+        + '<div class="ra-row ra-mt"><button type="button" class="ra-btn is-small" data-act="upd-remotes">保存更新源</button><button type="button" class="ra-btn is-small" data-act="upd-reset">恢复默认</button></div></div></details>');
     }
 
     function checkHtml(result) {
@@ -1050,6 +1047,55 @@
       }).catch(function (error) { toast(message(error), true); renderRuns(); });
     }
 
+    /* ---------- 功能说明子页面 ---------- */
+    var guideUi = typeof modules.createGuideUi === 'function' ? modules.createGuideUi({ card: card }) : null;
+    var guideSpyHold = 0;
+    function guideScroll() { return $('[data-pane="guide"] .ra-scroll'); }
+    function markGuideToc(id) {
+      var toc = $('[data-pane="guide"] .ra-toc');
+      if (!toc) return;
+      Array.prototype.forEach.call(toc.querySelectorAll('button'), function (button) {
+        var on = button.getAttribute('data-target') === id;
+        if (on) button.setAttribute('aria-current', 'true'); else button.removeAttribute('aria-current');
+        if (on && toc.scrollWidth > toc.clientWidth) {
+          var left = button.offsetLeft - toc.offsetLeft;
+          if (left < toc.scrollLeft || left + button.offsetWidth > toc.scrollLeft + toc.clientWidth) toc.scrollLeft = Math.max(0, left - 24);
+        }
+      });
+    }
+    function spyGuide(force) {
+      if (!guideUi) return;
+      var scroll = guideScroll();
+      if (!scroll || (!force && Date.now() < guideSpyHold)) return;
+      var line = scroll.scrollTop + 48, current = '', last = '';
+      guideUi.sections.forEach(function (item) {
+        var node = $('#' + item[0]);
+        if (!node) return;
+        last = item[0];
+        if (!current || node.offsetTop <= line) current = item[0];
+      });
+      if (scroll.scrollTop > 0 && scroll.scrollTop + scroll.clientHeight >= scroll.scrollHeight - 2) current = last;
+      if (current) markGuideToc(current);
+    }
+    function gotoGuideSection(id, smooth) {
+      var scroll = guideScroll(), node = $('#' + id);
+      if (!scroll || !node) return;
+      var top = Math.max(0, node.offsetTop - 14);
+      guideSpyHold = Date.now() + 800;
+      markGuideToc(id);
+      if (smooth && !calmMotion() && typeof scroll.scrollTo === 'function') scroll.scrollTo({ top: top, behavior: 'smooth' });
+      else scroll.scrollTop = top;
+    }
+    function renderGuide() {
+      var toc = $('[data-pane="guide"] .ra-toc'), pane = guideScroll();
+      if (!guideUi || !toc || !pane) return;
+      if (!pane.children.length) {
+        toc.innerHTML = guideUi.tocHtml();
+        pane.innerHTML = guideUi.contentHtml();
+      }
+      spyGuide(true);
+    }
+
     /* ---------- 设置页：整页、目录、保存 ---------- */
     function settingsScroll() { return $('[data-pane="settings"] .ra-scroll'); }
 
@@ -1060,7 +1106,7 @@
     }
 
     function markToc(id) {
-      var toc = $('.ra-toc');
+      var toc = $('[data-pane="settings"] .ra-toc');
       if (!toc) return;
       Array.prototype.forEach.call(toc.querySelectorAll('button'), function (button) {
         var on = button.getAttribute('data-target') === id;
@@ -1074,7 +1120,7 @@
     }
 
     function renderToc() {
-      var toc = $('.ra-toc');
+      var toc = $('[data-pane="settings"] .ra-toc');
       if (!toc) return;
       toc.innerHTML = SECTIONS.filter(function (item) { return $('#' + item[0]); }).map(function (item) {
         return '<button type="button" data-act="toc" data-target="' + item[0] + '">' + item[1] + '</button>';
@@ -1108,36 +1154,49 @@
       else scroll.scrollTop = top;
     }
 
+    function safeSettingsSection(id, title, render) {
+      try {
+        return render();
+      } catch (error) {
+        if (env.console && typeof env.console.error === 'function') env.console.error('[ReaderII] 设置页区块渲染失败：' + title, error);
+        return card(id, title, '<p class="ra-tip is-bad">该区块渲染失败：' + esc(message(error)) + '</p>');
+      }
+    }
+
     function renderSettings() {
       var pane = settingsScroll();
       if (!pane) return;
       var a = agent.getSettings();
       var m = memory.getSettings();
       var scroll = pane.scrollTop;
-      connectorUi.scan();
-      pane.innerHTML = readerCardHtml()
-        + placementCardHtml()
-        + agentCardHtml(a)
-        + toolsCardHtml(a)
-        + rulesCardHtml(a.rules)
-        + memoryCardHtml(m)
-        + modelUi.connectionsHtml()
-        + modelCardHtml()
-        + modelUi.delegationHtml()
-        + modelUi.mediaHtml()
-        + connectorUi.cardHtml()
-        + (netUi ? card('ra-mcp-card', 'MCP 工具服务', '<div id="ra-mcp">' + netUi.mcpHtml() + '</div>', '立即生效') : '')
-        + (netUi ? netUi.cardsHtml() : '')
-        + updatesCardHtml()
-        + card('ra-runs-card', '改动记录', '<p class="ra-note">助手每一轮改过的东西都留有改动前的样子，可以按轮撤销。之后又被别处改过的不会被强行覆盖。</p><div id="ra-runs"></div>');
+      try { connectorUi.scan(); } catch (error) {
+        if (env.console && typeof env.console.error === 'function') env.console.error('[ReaderII] 插件对接扫描失败', error);
+      }
+      pane.innerHTML = safeSettingsSection('ra-reader-card', '这张卡', readerCardHtml)
+        + safeSettingsSection('ra-placement-card', '正文提示词位置', placementCardHtml)
+        + safeSettingsSection('ra-agent-card', '助手', function () { return agentCardHtml(a); })
+        + safeSettingsSection('ra-tools-card', '工具调用', function () { return toolsCardHtml(a); })
+        + safeSettingsSection('ra-rules-card', '权限规则', function () { return rulesCardHtml(a.rules); })
+        + safeSettingsSection('ra-memory-card', '助手记忆', function () { return memoryCardHtml(m); })
+        + safeSettingsSection('ra-connections-card', '模型连接', modelUi.connectionsHtml)
+        + safeSettingsSection('ra-model-card', '主模型', modelCardHtml)
+        + safeSettingsSection('ra-delegation-card', '子代理', modelUi.delegationHtml)
+        + safeSettingsSection('ra-media-card', '媒体工具', modelUi.mediaHtml)
+        + safeSettingsSection('ra-conn-card', '插件对接', connectorUi.cardHtml)
+        + (netUi ? safeSettingsSection('ra-mcp-card', 'MCP 工具服务', function () { return card('ra-mcp-card', 'MCP 工具服务', '<div id="ra-mcp">' + netUi.mcpHtml() + '</div>', '立即生效'); }) : '')
+        + (netUi ? (typeof netUi.netCardHtml === 'function' && typeof netUi.companionCardHtml === 'function'
+          ? safeSettingsSection('ra-net-card', '联网', netUi.netCardHtml) + safeSettingsSection('ra-comp-card', '后端伴侣', netUi.companionCardHtml)
+          : safeSettingsSection('ra-comp-card', '联网与后端伴侣', netUi.cardsHtml)) : '')
+        + safeSettingsSection('ra-upd-card', '版本更新', updatesCardHtml)
+        + card('ra-runs-card', '改动记录', '<div id="ra-runs"></div>');
       pane.scrollTop = scroll;
       setDirty(false);
-      modelUi.syncMode();
+      try { modelUi.syncMode(); } catch (error) { /* 子代理区块失败时不阻塞目录 */ }
       renderToc();
       renderRuns();
       connectorUi.discover(false);
       resolveDisplayedModel();
-      if (netUi) netUi.scanMcp();
+      if (netUi) { try { netUi.scanMcp(); } catch (error) { /* ignore */ } }
     }
 
     function resolveDisplayedModel() {
@@ -1220,11 +1279,12 @@
 
     /* ---------- 面板 ---------- */
     function showTab(next) {
-      tab = next === 'memory' || next === 'settings' ? next : 'chat';
+      tab = next === 'memory' || next === 'settings' || next === 'guide' ? next : 'chat';
       if (!overlay) return;
       overlay.querySelectorAll('.ra-tab').forEach(function (button) { button.setAttribute('aria-selected', String(button.getAttribute('data-tab') === tab)); });
       overlay.querySelectorAll('.ra-pane').forEach(function (pane) { pane.classList.toggle('is-on', pane.getAttribute('data-pane') === tab); });
       if (tab === 'memory') renderMemory();
+      else if (tab === 'guide') renderGuide();
       else if (tab === 'settings') {
         /* 有没保存的改动时不重画：切去别的页再回来，填到一半的东西还在。只把会自己变的改动记录刷新一下。 */
         var scroller = settingsScroll();
@@ -1270,7 +1330,7 @@
       overlay.innerHTML = '<div class="ra-shell" tabindex="-1" autofocus><header class="ra-head">'
         + '<button type="button" class="ra-back" data-act="back-lobby" title="回到彩蛋服务台" hidden>' + icon('back') + '<span>服务台</span></button>'
         + '<div class="ra-id"><span class="ra-seal" aria-hidden="true"><i>夜</i><i>梦</i></span><div class="ra-name"><b>九十九夜梦</b><i id="ra-persona">READER AGENT</i></div></div>'
-        + '<nav class="ra-tabs" role="tablist"><button type="button" class="ra-tab" role="tab" data-tab="chat">对话</button><button type="button" class="ra-tab" role="tab" data-tab="memory">记忆</button><button type="button" class="ra-tab" role="tab" data-tab="settings">设置</button></nav>'
+        + '<nav class="ra-tabs" role="tablist"><button type="button" class="ra-tab" role="tab" data-tab="chat">对话</button><button type="button" class="ra-tab" role="tab" data-tab="memory">记忆</button><button type="button" class="ra-tab" role="tab" data-tab="settings">设置</button><button type="button" class="ra-tab" role="tab" data-tab="guide">说明</button></nav>'
         + '<button type="button" class="ra-close" data-act="close" aria-label="关闭，回到聊天" title="关闭，回到聊天">' + icon('close') + '</button></header>'
         + '<section class="ra-pane" data-pane="chat"><div class="ra-threads"><label for="ra-thread-select">对话</label><select id="ra-thread-select" aria-label="按所属卡切换对话"></select>'
         + '<button type="button" class="ra-btn is-small" data-act="thread-new">新建</button><button type="button" class="ra-btn is-small" data-act="thread-delete">删除</button></div>'
@@ -1282,7 +1342,8 @@
         + '<section class="ra-pane" data-pane="memory"><div class="ra-scroll"></div></section>'
         + '<section class="ra-pane" data-pane="settings"><div class="ra-set"><nav class="ra-toc" aria-label="设置目录"></nav><div class="ra-scroll"></div></div>'
         + '<div class="ra-savebar"><span class="ra-status" data-ra-status="settings" role="status"></span><span class="ra-dirty" hidden>有改动还没保存</span>'
-        + '<button type="button" class="ra-btn is-main" data-act="save-settings" title="保存助手、工具调用、权限规则、记忆、正文位置、主模型参数与子代理角色设置。连接和媒体工具使用各自的应用按钮。">保存设置</button></div></section></div>';
+        + '<button type="button" class="ra-btn is-main" data-act="save-settings" title="保存设置">保存设置</button></div></section>'
+        + '<section class="ra-pane" data-pane="guide"><div class="ra-set"><nav class="ra-toc" aria-label="功能说明目录"></nav><div class="ra-scroll"></div></div></section></div>';
       overlay.addEventListener('click', function (event) {
         if (event.target === overlay) { close(); return; }
         var tabButton = event.target.closest('.ra-tab');
@@ -1306,6 +1367,13 @@
           Promise.resolve(agent.clearHistory()).then(function () { renderHistory(); threadControls(); }).catch(function (error) { notice('thread', message(error)); });
         }
         else if (action === 'toc') gotoSection(actor.getAttribute('data-target'), true);
+        else if (action === 'guide-toc') gotoGuideSection(actor.getAttribute('data-target'), true);
+        else if (action === 'guide-jump') {
+          var jumpTab = actor.getAttribute('data-tab-target') || 'settings';
+          var jumpSection = actor.getAttribute('data-section');
+          showTab(jumpTab);
+          if (jumpTab === 'settings' && jumpSection) gotoSection(jumpSection, false);
+        }
         else if (action === 'goto-tools') { showTab('settings'); gotoSection('ra-tools-card', false); }
         else if (action === 'save-settings') saveSettingsFromForm();
         else if (action === 'card-toggle') cardToggle(actor);
@@ -1357,9 +1425,11 @@
         event.stopPropagation();
       });
       overlay.addEventListener('cancel', function (event) { event.preventDefault(); close(); });
-      /* scroll 事件不冒泡，直接挂在设置页的滚动容器上。 */
+      /* scroll 事件不冒泡，直接挂在设置页与说明页的滚动容器上。 */
       var scroller = settingsScroll();
       if (scroller) scroller.addEventListener('scroll', function () { spy(false); }, { passive: true });
+      var gScroller = guideScroll();
+      if (gScroller) gScroller.addEventListener('scroll', function () { spyGuide(false); }, { passive: true });
       doc.body.appendChild(overlay);
     }
 

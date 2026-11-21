@@ -3,18 +3,14 @@
 
   /*
    * 小白X（LittleWhiteBox）作为第三种变量宿主（另两种：酒馆助手 + MVU；没有 MVU 的纯文字卡）。
-   *   读：酒馆的聊天局部变量 chat_metadata.variables。小白X 的状态通常在一个根变量里（如「数据」）。
-   *   写：LWB_StateV2.applyText('<state>…</state>')，让小白X 的楼层账本、模板与约束校验保持一致；
-   *       从不直接改 chat_metadata.variables 里它管的变量。
+   *   读：酒馆的聊天局部变量 chat_metadata.variables（按小白X 的存储方式解码 JSON 字符串对象/数组）。
+   *   写：变量 3.0 走 LWB_StateV3.apply(ops)；变量 2.0 优先走 LWB_StateV2.apply({ ops })，
+   *       旧版本或无 apply 接口时回退到 LWB_StateV2.applyText('<state>…</state>')（负数写作 (-n) 避免被当成相对减量）。
    * Reader 自己的 READER 命名空间不放这里，仍在 MVU 楼层变量里（与纯文字卡相同），宿主切换时不用搬家。
-   *
-   * 没在真实的小白X 上验证过的两点（见交接 0.5）：<state> 里给对象赋值是整体替换还是合并；删除怎么写。
-   * 这里的写法：只改叶子时逐条写绝对值；对象里有键被删时整体重写这个对象；顶层变量被删时写 null。
-   * 写完回读核对，没按预期落地就报错，不静默。
    */
   var modules = root.__ReaderIIModules = root.__ReaderIIModules || {};
   /* 聊天变量里属于 Reader 自己（reader_ii_runtime、dream_persona…）或小白X 元数据的键，不算宿主变量。 */
-  var OWN_KEYS = /^(?:READER$|reader_|dream_|LWB_)/i;
+  var OWN_KEYS = /^(?:READER$|reader_|dream_|LWB_|lwb-state3$)/i;
   var RESERVED_KEYS = ['__proto__', 'prototype', 'constructor'];
 
   function isObject(value) {
@@ -23,6 +19,31 @@
 
   function clone(value) {
     return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
+  }
+
+  /* 小白X 2.0/3.0 把对象和数组以 JSON 字符串存在 chat_metadata.variables 里；兼容已解码的对象和普通字符串。 */
+  function decodeStoredVariable(value) {
+    if (typeof value !== 'string') return clone(value);
+    var trimmed = value.trim();
+    if (!trimmed) return value;
+    if (trimmed[0] === '{' || trimmed[0] === '[') {
+      try { return JSON.parse(trimmed); } catch (error) { return value; }
+    }
+    if (trimmed === 'true') return true;
+    if (trimmed === 'false') return false;
+    if (/^-?(?:0|[1-9]\d*)(?:\.\d+)?$/.test(trimmed)) {
+      var num = Number(trimmed);
+      if (Number.isFinite(num)) return num;
+    }
+    return value;
+  }
+
+  function formatV2Path(segments) {
+    return segments.map(function (part, index) {
+      var text = String(part);
+      if (/^[^.[\]"'\\*\s]+$/.test(text) && !/^\d+$/.test(text)) return (index ? '.' : '') + text;
+      return '[' + JSON.stringify(text) + ']';
+    }).join('');
   }
 
   function same(left, right) {
@@ -95,23 +116,47 @@
     });
   }
 
+  function formatStateValue(value) {
+    if (value === undefined || value === null) return 'null';
+    // 小白X <state> 解析器把裸负号数字（-5）当成相对减量，绝对负数必须加括号 (-5)。
+    if (typeof value === 'number' && value < 0) return '(' + JSON.stringify(value) + ')';
+    return JSON.stringify(value);
+  }
+
   function stateText(changes) {
     return '<state>\n' + changes.map(function (change) {
-      return change.path.join('.') + ': ' + JSON.stringify(change.value === undefined ? null : change.value);
+      return change.path.join('.') + ': ' + formatStateValue(change.value);
     }).join('\n') + '\n</state>';
   }
 
   function resultErrors(result) {
     if (result === false) return ['小白X 返回了失败'];
     if (!result || typeof result !== 'object') return [];
-    var list = result.errors !== undefined ? result.errors : result.error;
+    var list = result.errors !== undefined ? result.errors : result.diagnostics !== undefined ? result.diagnostics : result.error;
     var messages = (Array.isArray(list) ? list : list ? [list] : []).map(function (item) {
       if (typeof item === 'string') return item;
       if (item && typeof item.message === 'string') return item.message;
+      if (item && typeof item.code === 'string') return item.code;
       try { return JSON.stringify(item); } catch (error) { return String(item); }
     }).filter(Boolean);
-    if (!messages.length && (result.ok === false || result.success === false)) messages.push('小白X 返回了失败');
+    if (!messages.length && (result.ok === false || result.success === false || result.status === 'failed')) messages.push('小白X 返回了失败');
     return messages;
+  }
+
+  /* 精确叶子差异（支持 del/remove，不把整个父对象重写），用于 V2 JSON apply 与 V3 apply。 */
+  function structuredDiff(before, after) {
+    var out = [];
+    (function walkStructured(left, right, path) {
+      Object.keys(left).forEach(function (key) {
+        if (!has(right, key)) out.push({ path: path.concat(key), value: undefined, removed: true });
+      });
+      Object.keys(right).forEach(function (key) {
+        if (same(left[key], right[key])) return;
+        if (isObject(left[key]) && isObject(right[key])) walkStructured(left[key], right[key], path.concat(key));
+        else out.push({ path: path.concat(key), value: clone(right[key]) });
+      });
+    })(isObject(before) ? clone(before) : {}, isObject(after) ? clone(after) : {}, []);
+    return out;
   }
 
   function createLwbHost(env) {
@@ -122,13 +167,23 @@
 
     function stateApi() {
       var api = find('LWB_StateV2');
-      return api && typeof api.applyText === 'function' ? api : null;
+      return api && (typeof api.apply === 'function' || typeof api.applyText === 'function') ? api : null;
+    }
+
+    function stateV3Api() {
+      var api = find('LWB_StateV3');
+      return api && typeof api.apply === 'function' ? api : null;
     }
 
     function metadata() {
       var ctx = null;
       try { ctx = env && typeof env.context === 'function' ? env.context() : null; } catch (error) { ctx = null; }
       return ctx && isObject(ctx.chatMetadata) ? ctx.chatMetadata : null;
+    }
+
+    function isV3Chat() {
+      var meta = metadata();
+      return !!(meta && meta['lwb-state3'] && stateV3Api());
     }
 
     function rawVariables() {
@@ -143,23 +198,24 @@
       return {};
     }
 
-    /* 宿主变量：聊天局部变量去掉 Reader 自己的键。返回副本。 */
+    /* 宿主变量：聊天局部变量去掉 Reader 自己的键，并解码小白X 存成 JSON 字符串的对象/数组。返回副本。 */
     function readVariables() {
       var raw = rawVariables();
       var output = {};
       Object.keys(raw).forEach(function (key) {
         if (OWN_KEYS.test(key) || RESERVED_KEYS.indexOf(key) >= 0 || raw[key] === undefined) return;
-        output[key] = clone(raw[key]);
+        output[key] = decodeStoredVariable(raw[key]);
       });
       return output;
     }
 
-    /* 这个聊天在用小白X 的变量 2.0：接口在，聊天元数据里有它的规则或快照，并且有宿主变量。 */
+    /* 这个聊天在用小白X 的变量 2.0 或 3.0：接口在，聊天元数据里有它的记录，并且有宿主变量。 */
     function inUse() {
+      if (!Object.keys(readVariables()).length) return false;
+      if (isV3Chat()) return true;
       if (!stateApi()) return false;
       var meta = metadata();
-      var marked = !!meta && Object.keys(meta).some(function (key) { return /^LWB_(?:RULES|SNAP)/.test(key); });
-      return marked && Object.keys(readVariables()).length > 0;
+      return !!meta && Object.keys(meta).some(function (key) { return /^LWB_(?:RULES|SNAP)/.test(key); });
     }
 
     /* 语义层用的楼层数据：楼层变量的副本，但 stat_data 换成小白X 的宿主变量，再放回楼层里的 READER。 */
@@ -200,14 +256,35 @@
       });
     }
 
-    /* 把宿主部分从 before 改成 after：生成 <state> 文本交给小白X，再回读核对。没有改动时什么也不做。 */
+    /* 把宿主部分从 before 改成 after：按当前聊天版本交给小白X 3.0 / 2.0，再回读核对。没有改动时什么也不做。 */
     async function apply(before, after) {
-      var changes = expressible(diff(before, after), clone(isObject(after) ? after : {}));
-      if (!changes.length) return { changes: [], text: '' };
-      var api = stateApi();
-      if (!api) throw new Error('小白X 的变量 2.0 接口不可用：请在小白X 设置里开启「变量管理 2.0 (state)」');
-      var text = stateText(changes);
-      var result = await api.applyText(text);
+      var targetAfter = clone(isObject(after) ? after : {});
+      var changes, text = '', result;
+      if (isV3Chat()) {
+        changes = structuredDiff(before, targetAfter);
+        if (!changes.length) return { changes: [], text: '' };
+        var v3Ops = changes.map(function (change) {
+          return change.removed ? { op: 'remove', path: change.path } : { op: 'set', path: change.path, value: change.value };
+        });
+        result = await stateV3Api().apply(v3Ops);
+      } else {
+        var api = stateApi();
+        if (!api) throw new Error('小白X 的变量接口不可用：请在小白X 设置里开启「变量管理 2.0」或「3.0」');
+        if (typeof api.apply === 'function') {
+          changes = structuredDiff(before, targetAfter);
+          if (!changes.length) return { changes: [], text: '' };
+          var v2Ops = changes.map(function (change) {
+            var p = formatV2Path(change.path);
+            return change.removed ? { op: 'del', path: p } : { op: 'set', path: p, value: change.value };
+          });
+          result = await api.apply({ ops: v2Ops });
+        } else {
+          changes = expressible(diff(before, targetAfter), targetAfter);
+          if (!changes.length) return { changes: [], text: '' };
+          text = stateText(changes);
+          result = await api.applyText(text);
+        }
+      }
       var errors = resultErrors(result);
       if (errors.length) throw new Error('小白X 没有接受这次写入：' + errors.join('；'));
       var wrong = mismatches(changes);
@@ -222,7 +299,7 @@
     }
 
     return {
-      available: function () { return !!stateApi(); },
+      available: function () { return !!(stateV3Api() || stateApi()); },
       inUse: inUse,
       readVariables: readVariables,
       compose: compose,

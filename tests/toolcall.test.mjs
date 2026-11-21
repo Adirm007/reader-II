@@ -584,7 +584,7 @@ test('原生函数调用：tools 随请求声明，调用取自 tool_calls，结
   assert.ok(!/【核心工具】/.test(system) && !/<action name=/.test(system) && !/tool_call/.test(system));
   assert.match(system, /直接发起函数调用/);
   assert.match(system, /【工具箱】/);
-  assert.match(system, /只回一句「我这就去做」/);
+  assert.match(system, /在同一条回复中直接调用工具执行/);
 
   /* 第二轮请求：assistant 的 tool_calls 原样带回（思考型模型的 reasoning_content 也带回），紧跟对应的 tool 消息。 */
   const second = log.backend[1].body.messages;

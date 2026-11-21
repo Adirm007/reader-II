@@ -12,7 +12,7 @@ description: 酒馆里各样东西在哪：角色卡、世界书、正则、酒�
 | 正则 | `regex:/global|card/<名>/find.txt` · `replace.html` · `meta.json` | 美化界面的 HTML 通常在 replace.html 里，很长，先 grep |
 | 酒馆助手脚本 | `script:/global|card|preset/<名>/content.js` | 常被压成一行：grep 会给出列号，再 `read … column=` |
 | 预设提示词 | `preset:/prompts/<名>.md` | 只有正在使用的预设 |
-| 变量 | `var:/chat.json` `message/<楼层>.json` `mvu.json` `global.json` | `#/a/b` 取子树：`var:/mvu.json#/stat_data/主角` |
+| 变量 | `var:/chat.json` `message/<楼层>.json` `mvu.json` `global.json` | `#/a/b` 取子树：`var:/mvu.json#/stat_data/主角`；小白X 2.0/3.0 变量位于 `var:/chat.json` |
 | 别的扩展的源码 | `ext:/<扩展>/manifest.json` → 入口文件 | 只读，目录列不出来，顺着 import 读 |
 | 报错现场 | `page:/errors` `page:/console` `page:/env.json` | 先看这里 |
 

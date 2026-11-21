@@ -1359,3 +1359,106 @@ test('撤销：插件部分写入后抛错仍保留写后镜像，外部后续�
   same(undo.conflicts.map((item) => item.path), [path]);
   assert.equal(await vfs.readText(path), '后续修改');
 });
+
+test('MVU / EJS / 小白X 2.0 & 3.0 工具箱、kb:/ 上游参考与功能说明模块', async () => {
+  let mvuState = { stat_data: { 角色: { 艾琳: { 好感度: 20 } }, 地点: '王都' }, display_data: { 地点: '王都' }, delta_data: {} };
+  const lwbV2Ops = [], lwbV3Ops = [], undoCalls = [];
+  const { host, agent, vfs } = makeHost({
+    globals: {
+      Mvu: {
+        getMvuData: () => clone(mvuState),
+        replaceMvuData: async (next) => { mvuState = clone(next); },
+        parseMessage: async (msg, oldData) => {
+          const next = clone(oldData);
+          if (msg.includes('好感度')) next.stat_data.角色.艾琳.好感度 = 35;
+          return next;
+        },
+        isDuringExtraAnalysis: () => false,
+      },
+      EjsTemplate: {
+        getSyntaxErrorInfo: async (tpl) => tpl.includes('<% if (') ? 'SyntaxError at line 1' : '',
+        allVariables: () => ({ stat_data: mvuState.stat_data, localFlag: true }),
+        getFeatures: () => ({ enabled: true, generate_enabled: true, render_enabled: true, sandbox: false }),
+        prepareContext: async (data, lastId) => ({ ...(data || {}), __lastId: lastId }),
+        evalTemplate: async (tpl, ctx) => `${tpl}|${ctx.tag || ''}|${ctx.__lastId ?? ''}`,
+      },
+      LWB_StateV2: {
+        apply: (payload) => { lwbV2Ops.push(clone(payload)); return { status: 'ok', changes: payload.ops, corrections: [], errors: [], warnings: [] }; },
+        applyText: (text) => ({ atoms: [text], errors: [] }),
+        getInputSchema: () => ({ type: 'object', properties: { ops: { type: 'array' } } }),
+      },
+      LWB_StateV3: {
+        inspect: async () => ({ ok: true, state: { hero: { coins: 50 } }, bundle: { definition: { name: '营地', updates: ['after'], initial: { hero: {} }, actions: [{ id: 'rest', title: '休息' }], views: { main: {} } }, functions: {} } }),
+        preview: async (input, opts) => ({ ok: true, committed: false, input, opts }),
+        apply: async (input, opts) => { lwbV3Ops.push(clone({ input, opts })); return { ok: true, committed: true }; },
+        exportRules: async () => ({ definition: { format: 1, name: '营地' }, functions: {} }),
+        tryDefinition: async (bundle, input, opts) => ({ ok: true, state: bundle.definition.initial, input, opts }),
+        undo: async (opts) => { undoCalls.push(clone(opts)); return { ok: true }; },
+        settings: () => ({ enabled: true }),
+        updateStatus: () => ({ busy: false }),
+        extensionTrust: () => 'unused',
+        lastResult: () => ({ ok: true }),
+      },
+    },
+    replies: [
+      /* 第一批：打开 mvu / ejs / lwb 工具箱 */
+      [call('toolbox', { name: 'mvu' }), call('toolbox', { name: 'ejs' }), call('toolbox', { name: 'lwb' })].join('\n'),
+      /* 第二批：MVU 只读检查 + 试跑（不改状态） + 实际应用 */
+      [call('mvu_inspect', { path: '角色.艾琳.好感度' }), call('mvu_test_update', { message: "_.set('角色.艾琳.好感度', 35);" })].join('\n'),
+      call('mvu_apply_update', { message: "_.set('角色.艾琳.好感度', 35);" }),
+      /* 第三批：EJS 语法检查、变量表、开关与带参渲染 */
+      [
+        call('ejs_check_syntax', { template: '<%- 1 + 1 %>' }),
+        call('ejs_check_syntax', { template: '<% if ( %>' }),
+        call('ejs_variables', { path: 'stat_data.角色.艾琳.好感度' }),
+        call('ejs_features', {}),
+        call('ejs_render', { template: 'ok', data: JSON.stringify({ tag: 'v' }), last_message_id: 2 }),
+      ].join('\n'),
+      /* 第四批：小白X V2 JSON + V3 完整工具链 */
+      [
+        call('lwb_state_apply_json', { ops: JSON.stringify([{ op: 'set', path: '数据.金币', value: -5 }]) }),
+        call('lwb_v3_inspect', {}),
+        call('lwb_v3_preview', { input: JSON.stringify([{ action: 'rest', params: {} }]), stage: 'after' }),
+        call('lwb_v3_apply', { input: JSON.stringify([{ action: 'rest', params: {} }]), stage: 'after' }),
+        call('lwb_v3_export_rules', {}),
+        call('lwb_v3_check_draft', { bundle: JSON.stringify({ definition: { initial: { hp: 10 } }, functions: {} }), opening: 0 }),
+        call('lwb_v3_undo', { index: 3, all: false }),
+      ].join('\n'),
+      '全部检查完毕。',
+    ],
+  });
+  agent.saveSettings({ mode: 'card', approval: 'yolo' });
+  const outcome = await agent.run('依次验证 MVU、EJS 和小白X 2.0/3.0 工具');
+  assert.equal(outcome.answer, '全部检查完毕。');
+  const byName = (name) => outcome.steps.filter((s) => s.name === name);
+  assert.ok(byName('mvu_inspect')[0].ok && byName('mvu_inspect')[0].summary.includes('20'));
+  assert.ok(byName('mvu_test_update')[0].ok && byName('mvu_test_update')[0].summary.includes('"changed": true'));
+  assert.ok(byName('mvu_apply_update')[0].ok && mvuState.stat_data.角色.艾琳.好感度 === 35);
+  assert.ok(byName('ejs_check_syntax')[0].ok && byName('ejs_check_syntax')[1].ok === false);
+  assert.ok(byName('ejs_variables')[0].ok && byName('ejs_variables')[0].summary.includes('35'));
+  assert.ok(byName('ejs_features')[0].ok && byName('ejs_features')[0].summary.includes('"generate_enabled": true'));
+  assert.ok(byName('ejs_render')[0].ok && byName('ejs_render')[0].summary.includes('ok|v|2'));
+  assert.ok(byName('lwb_state_apply_json')[0].ok);
+  same(lwbV2Ops, [{ ops: [{ op: 'set', path: '数据.金币', value: -5 }] }]);
+  assert.ok(byName('lwb_v3_inspect')[0].ok && byName('lwb_v3_inspect')[0].summary.includes('营地'));
+  assert.ok(byName('lwb_v3_preview')[0].ok && byName('lwb_v3_apply')[0].ok);
+  assert.equal(lwbV3Ops.length, 1);
+  assert.ok(byName('lwb_v3_export_rules')[0].ok && byName('lwb_v3_check_draft')[0].ok);
+  assert.ok(byName('lwb_v3_undo')[0].ok);
+  same(undoCalls, [{ index: 3, all: false }]);
+
+  /* kb:/ 上游参考文件登记完备 */
+  const mvuKb = (await vfs.list('kb:/mvu')).items.map((item) => item.name);
+  const ejsKb = (await vfs.list('kb:/ejs-prompt-template')).items.map((item) => item.name);
+  const lwbKb = (await vfs.list('kb:/lwb-variables')).items.map((item) => item.name);
+  assert.ok(mvuKb.includes('stat_var.md') && mvuKb.includes('supplementary-tutorial.md'));
+  assert.ok(ejsKb.includes('reference.md') && ejsKb.includes('features.md') && ejsKb.includes('features_en.md'));
+  assert.ok(lwbKb.includes('variables.md') && lwbKb.includes('variables-v2.md') && lwbKb.includes('variables-v3.md') && lwbKb.includes('variables-v3-external.md'));
+
+  /* 功能说明子页面模块完整 */
+  const guideUi = host.__ReaderIIModules.createGuideUi({ card: (id, title, body) => `<section id="${id}"><h3>${title}</h3>${body}</section>` });
+  const guideHtml = guideUi.contentHtml();
+  assert.match(guideHtml, /前端设置调整/);
+  assert.match(guideHtml, /卡内使用功能/);
+  assert.match(guideHtml, /Agent 功能/);
+});

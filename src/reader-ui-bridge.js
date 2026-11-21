@@ -175,7 +175,7 @@
           + '<div class="reader-ui-tree" data-reader-tree="' + definition.key + '">' + (treeMarkup || '<p class="ra-note">没有可用的宿主节点</p>') + '</div>'
           + '<input type="hidden" data-reader-root="' + definition.key + '" value="' + escapeHtml(route.rootRef || '') + '">'
           + '<div class="rp-selected" data-reader-selected-path="' + definition.key + '">' + (selectedDescriptor ? '已选：' + escapeHtml(selectedDescriptor.path) : '尚未选择路径') + '</div>'
-          + (adaptationRequest ? '<details class="rp-request"><summary>' + (adaptationRequest.error ? '分析请求尚不可用' : '查看本次发给 LLM 的内置知识与结构') + '</summary><pre>'
+          + (adaptationRequest ? '<details class="rp-request"><summary>' + icon('chevron') + (adaptationRequest.error ? '分析请求尚不可用' : '查看发给 LLM 的结构与提示') + '</summary><pre>'
             + escapeHtml(adaptationRequest.error || adaptationRequest.prompt) + '</pre></details>' : '')
           + (preview ? '<pre class="rp-pre">' + escapeHtml(JSON.stringify(preview, null, 2)) + '</pre>' : '')
           + '<div class="rp-status" data-reader-action-status="' + definition.key + '" role="status"></div>'
@@ -211,12 +211,11 @@
         + '<button type="button" class="ra-close" data-reader-close aria-label="关闭面板" title="关闭">' + icon('close') + '</button></header>'
         + '<div class="rp-body">'
         + '<aside class="rp-rail">'
-        + '<div class="rp-stat"><span class="rp-label">命运点数</span><div class="rp-balance"><b data-reader-balance>' + escapeHtml(balance) + '</b><span>FP</span></div><p class="ra-note">当前生效的货币后端</p></div>'
+        + '<div class="rp-stat"><span class="rp-label">命运点数</span><div class="rp-balance"><b data-reader-balance>' + escapeHtml(balance) + '</b><span>FP</span></div></div>'
         + '<div class="rp-stat"><span class="rp-label">宿主变量</span><p class="rp-health"><span class="rp-dot" aria-hidden="true"></span><span>' + escapeHtml(summary.status) + '</span></p><p class="ra-note">' + escapeHtml(summary.roots) + ' 个顶层节点 · ' + escapeHtml(summary.nodes) + ' 个可选节点</p></div>'
-        + '<p class="ra-note">每个槽位把读者的一项能力接到这张卡自己的变量上。没绑定的槽位用 Reader 的后备变量，照样能用。</p>'
         + '</aside>'
         + '<main class="rp-main">' + llmConsole
-        + '<div class="rp-head"><div><h3>语义路由</h3><p class="ra-note">展开一个槽位，选好路径、核对预览后启用。拿不准就先点「一键适配」。</p></div>'
+        + '<div class="rp-head"><div><h3>语义路由</h3></div>'
         + '<div class="rp-tools"><button type="button" class="ra-btn is-main" data-reader-auto-adapt title="自动寻找各槽位对应的宿主变量并绑定；已启用的槽位保持不变">一键适配</button>'
         + '<button type="button" class="ra-btn" data-reader-analyze-all' + (batchReady ? '' : ' disabled') + '>批量分析已锁定容器' + (containerDraftCount ? '（' + containerDraftCount + '）' : '') + '</button>'
         + '<span class="ra-tag">待分析容器 ' + containerDraftCount + ' / 5</span></div>'

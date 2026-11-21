@@ -150,10 +150,10 @@
         : ctx.chatCompletionSettings || hostChatModule && hostChatModule.oai_settings || {};
       var source = String(api ? api.source : text ? settings.type || ctx.mainApi : settings.chat_completion_source || ctx.mainApi || 'main');
       var model = String(api ? api.model : settings[(source === 'makersuite' ? 'google' : source) + '_model'] || '');
-      if (!api && text && hostTextModule && hostTextModule.getTextGenModel) model = String(hostTextModule.getTextGenModel(settings) || '');
-      if (!api && !text && hostChatModule && hostChatModule.getChatCompletionModel) model = String(hostChatModule.getChatCompletionModel(settings) || '');
+      if (!api && text && hostTextModule && hostTextModule.getTextGenModel) { try { model = String(hostTextModule.getTextGenModel(settings) || ''); } catch (error) { /* 使用上方配置字段兜底 */ } }
+      if (!api && !text && hostChatModule && hostChatModule.getChatCompletionModel) { try { model = String(hostChatModule.getChatCompletionModel(settings) || ''); } catch (error) { /* 使用上方配置字段兜底 */ } }
       var endpoint = String(api ? api.apiurl : settings.custom_url && source === 'custom' ? settings.custom_url : settings.reverse_proxy || '');
-      if (text && hostTextModule && hostTextModule.getTextGenServer && settings.type) endpoint = String(hostTextModule.getTextGenServer(settings.type) || '');
+      if (text && hostTextModule && hostTextModule.getTextGenServer && settings.type) { try { endpoint = String(hostTextModule.getTextGenServer(settings.type) || ''); } catch (error) { /* 使用上方配置字段兜底 */ } }
       var connection = (api ? api.presetId || 'legacy' : 'main') + '|' + endpoint;
       var key = tokenProfileKey(route, (api ? 'preset/' : 'main/') + source, connection, model);
       var cached = modelCache.get(key);
