@@ -196,6 +196,8 @@
     var clients = {};
     var registered = [];
     var tauri = { at: 0, servers: [] };
+    var tauriDirectory = null, tauriCache, tauriScan;
+    var tauriQueue = Promise.resolve();
 
     function settings() { return normalizeMcpSettings(typeof deps.settings === 'function' ? deps.settings() : null); }
     function servers() { return settings().servers; }
@@ -388,34 +390,113 @@
       return tt && tt.api && tt.api.mcp ? tt.api.mcp : null;
     }
 
-    async function syncTauri() {
+    async function readyTauri() {
       var tt = host.__TAURITAVERN__;
       if (!tt) throw new Error('这不是 TauriTavern');
       await (tt.ready || host.__TAURITAVERN_MAIN_READY__);
       var api = tauriApi();
       if (!api) throw new Error('这个版本的 TauriTavern 没有提供 MCP 接口');
-      var listed = await api.servers.list();
-      var output = [];
-      var list = (listed && listed.servers || []).filter(function (item) { return item && item.state === 'active'; });
-      for (var index = 0; index < list.length; index += 1) {
-        var item = list[index];
-        var row = { id: String(item.id), name: String(item.displayName || item.id).slice(0, 60), tools: [], error: '' };
-        try {
-          var found = await api.servers.discover(item.id);
-          row.tools = (found && found.tools || []).filter(function (tool) { return tool && tool.permission !== 'off' && typeof tool.nativeName === 'string'; })
-            .map(function (tool) { return compactTool({ name: tool.nativeName, title: tool.title, description: tool.description, inputSchema: tool.inputSchema, annotations: tool.annotations, permission: tool.permission }); });
-        } catch (error) { row.error = String(error && error.message || error).slice(0, 300); }
-        output.push(row);
-      }
-      tauri = { at: Date.now(), servers: output };
-      try { await store.put('kv', 'mcp:tt', tauri); } catch (error) { /* 存不下就只留在内存里 */ }
+      return api;
+    }
+
+    function loadTauriCache() {
+      if (!tauriCache) tauriCache = store.get('kv', 'mcp:tt').then(function (saved) {
+        if (saved && Array.isArray(saved.servers)) tauri = saved;
+      }).catch(function () { /* 本机没有目录缓存 */ });
+      return tauriCache;
+    }
+
+    // 列表、接入、停用共用顺序，较慢的发现或缓存写入不能覆盖后来点的停用。
+    function queueTauri(action) {
+      var next = tauriQueue.then(loadTauriCache).then(action);
+      tauriQueue = next.catch(function () {});
+      return next;
+    }
+
+    async function readTauriDirectory() {
+      var api = await readyTauri();
+      var result = await api.servers.list();
+      if (!result || !Array.isArray(result.servers)) throw new Error('读取 TauriTavern 的 MCP 列表失败');
+      tauriDirectory = new Map();
+      result.servers.forEach(function (item) {
+        if (item && item.id && item.state === 'active') tauriDirectory.set(item.id, {
+          id: item.id, name: String(item.displayName || item.id).slice(0, 60), permissions: item.toolPermissions || {}
+        });
+      });
       sync();
-      return tauri;
+      return tauriDirectory;
+    }
+
+    function scanTauri() {
+      if (!tauriScan) tauriScan = queueTauri(readTauriDirectory).then(list).finally(function () { tauriScan = null; });
+      return tauriScan;
+    }
+
+    async function saveTauri() {
+      tauri.at = Date.now();
+      sync();
+      try { await store.put('kv', 'mcp:tt', tauri); } catch (error) { /* 存不下就只留在内存里 */ }
+    }
+
+    async function discoverTauri(id) {
+      var item = tauriDirectory.get(id);
+      if (!item) throw new Error('这项服务已经停用或删除，请在酒馆「扩展 → MCP」中查看');
+      var found = await tauriApi().servers.discover(id);
+      var tools = found.tools.filter(function (tool) {
+        return tool && (tool.permission === 'allow' || tool.permission === 'ask') && typeof tool.nativeName === 'string';
+      }).map(function (tool) {
+        return compactTool(Object.assign({}, tool, { name: tool.nativeName }));
+      });
+      var row = { id: id, name: item.name, tools: tools, at: Date.now() };
+      tauri.servers = tauri.servers.filter(function (server) { return server.id !== id; }).concat(row);
+      return row;
+    }
+
+    function connectTauri(id) {
+      return queueTauri(async function () {
+        await readTauriDirectory();
+        var row = await discoverTauri(id);
+        await saveTauri();
+        return row;
+      });
+    }
+
+    function disconnectTauri(id) {
+      return queueTauri(async function () {
+        tauri.servers = tauri.servers.filter(function (server) { return server.id !== id; });
+        await saveTauri();
+      });
+    }
+
+    // 显式批量同步的 API；设置页只逐项接入。
+    function syncTauri() {
+      return queueTauri(async function () {
+        var directory = await readTauriDirectory();
+        for (var id of directory.keys()) await discoverTauri(id);
+        tauri.servers = tauri.servers.filter(function (server) { return directory.has(server.id); });
+        await saveTauri();
+        return tauri;
+      });
+    }
+
+    function tauriTools(server) {
+      if (!tauriDirectory) return server.tools;
+      var item = tauriDirectory.get(server.id);
+      if (!item) return [];
+      return server.tools.filter(function (tool) {
+        return ['ask', 'allow'].includes(item.permissions[tool.name]);
+      }).map(function (tool) {
+        return Object.assign({}, tool, { permission: item.permissions[tool.name] });
+      });
     }
 
     async function tauriCall(registrationId, nativeName, args, signal) {
+      // testCall 是宿主提供给用户主动操作的入口：确认卡放行后再核对宿主的即时权限。
+      await queueTauri(readTauriDirectory);
+      var selected = tauri.servers.find(function (server) { return server.id === registrationId; });
+      if (!selected || !tauriTools(selected).some(function (tool) { return tool.name === nativeName; }))
+        throw new Error('这个工具在酒馆或 Reader-II 中已停用，请检查当前接入状态');
       var api = tauriApi();
-      if (!api) throw new Error('TauriTavern 的 MCP 接口不可用');
       var outcome = await api.tools.testCall({ registrationId: registrationId, nativeName: nativeName, argumentsJson: JSON.stringify(args || {}) }, { signal: signal });
       if (outcome && outcome.outcome === 'known_response') {
         var response = outcome.response || {};
@@ -446,7 +527,7 @@
       return tools.length + ' 个工具' + (names ? '（' + names + (tools.length > 6 ? '…' : '') + '）' : '');
     }
 
-    function registerTools(set, prefix, label, tools, effectOf, invoke) {
+    function registerTools(set, prefix, label, tools, effectOf, invoke, confirmEach) {
       var taken = {};
       tools.forEach(function (tool) {
         var params = schemaParams(tool.inputSchema);
@@ -457,6 +538,7 @@
           params: whole ? [{ name: 'arguments', type: 'json', desc: '参数对象（JSON）；这个工具没有声明参数，通常不用填' }] : params,
           effect: function () { return effectOf(tool); },
           scope: 'external',
+          confirmEach: confirmEach === true,
           irreversible: function () { return effectOf(tool) !== 'read'; },
           describe: function () { return '调用 MCP 工具：' + label + ' · ' + (tool.title || tool.name); },
           run: async function (args, ctx) {
@@ -505,13 +587,14 @@
         });
       });
       tauri.servers.forEach(function (server) {
-        if (!server.tools || !server.tools.length) return;
-        var short = 'tt_' + String(server.id).replace(/[^a-z0-9]/gi, '').toLowerCase().slice(0, 6);
+        var tools = tauriTools(server);
+        if (!tools.length) return;
+        var short = 'tt_' + modules.hashText(server.id);
         var set = 'mcp/' + short;
-        registry.registerToolset({ name: set, source: 'mcp', summary: 'TauriTavern 里登记的 MCP 服务器「' + server.name + '」：' + summarize(server.tools) });
+        registry.registerToolset({ name: set, source: 'mcp', summary: 'TauriTavern 里登记的 MCP 服务器「' + server.name + '」：' + summarize(tools) });
         registered.push(set);
-        registerTools(set, 'mcp_' + short, server.name, server.tools, function (tool) { return tool.permission === 'allow' ? 'read' : 'net'; },
-          function (tool, payload, signal) { return tauriCall(server.id, tool.name, payload, signal); });
+        registerTools(set, 'mcp_' + short, server.name, tools, function (tool) { return tool.permission === 'allow' ? 'read' : 'net'; },
+          function (tool, payload, signal) { return tauriCall(server.id, tool.name, payload, signal); }, true);
       });
     }
 
@@ -546,10 +629,7 @@
         } catch (error) { /* 没有缓存 */ }
       }
       if (host.__TAURITAVERN__) {
-        try {
-          var saved = await store.get('kv', 'mcp:tt');
-          if (saved && Array.isArray(saved.servers)) tauri = saved;
-        } catch (error) { /* ignore */ }
+        await loadTauriCache();
       }
       sync();
     }
@@ -605,7 +685,14 @@
         };
       });
       tauri.servers.forEach(function (server) {
-        rows.push({ id: server.id, name: server.name, source: 'tt', transport: 'tt', target: 'TauriTavern', enabled: true, tools: server.tools.length, toolNames: server.tools.map(function (tool) { return tool.name; }), at: tauri.at, error: server.error || '' });
+        var tools = tauriTools(server);
+        var active = !tauriDirectory || tauriDirectory.has(server.id);
+        rows.push({ id: server.id, name: tauriDirectory && active ? tauriDirectory.get(server.id).name : server.name,
+          source: 'tt', enabled: true, available: active, tools: tools.length, toolNames: tools.map(function (tool) { return tool.name; }), at: server.at || tauri.at });
+      });
+      if (tauriDirectory) tauriDirectory.forEach(function (item) {
+        if (!tauri.servers.some(function (server) { return server.id === item.id; }))
+          rows.push({ id: item.id, name: item.name, source: 'tt', enabled: false, available: true, tools: 0, toolNames: [] });
       });
       return rows;
     }
@@ -618,7 +705,8 @@
 
     return {
       list: list, add: add, remove: remove, update: update, refresh: discover, load: load, sync: sync, brief: brief,
-      parse: parseServers, syncTauri: syncTauri, hasTauri: function () { return !!host.__TAURITAVERN__; }
+      parse: parseServers, scanTauri: scanTauri, connectTauri: connectTauri, disconnectTauri: disconnectTauri,
+      syncTauri: syncTauri, hasTauri: function () { return !!host.__TAURITAVERN__; }
     };
   }
 

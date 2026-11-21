@@ -4,22 +4,137 @@
  * 覆盖：放行流程与它的几道门（管理密钥、Host、来源、只收 JSON、令牌只交付一次、撤销、期限落盘只存哈希）；
  *       命令与后台任务；文件读写（CRLF、二进制、越界与符号链接、目录限制）与检索；HTTP 代发（含 SSE 提前返回）；
  *       stdio MCP 转发；无头浏览器（本机有 Chrome 才跑）；酒馆插件入口与独立运行入口。
- * 没覆盖：Windows 与 Termux 上的行为（命令外壳、盘符、taskkill）；真实酒馆里作为插件加载；局域网访问。
+ * 安装和卸载使用临时目录与模拟酒馆；真实酒馆插件加载、各桌面环境的菜单点击、Termux 与局域网访问需另行实测。
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createCompanion } from '../companion/core.mjs';
+import { desktopFile, launcherText, setLauncher } from '../companion/setup-desktop.mjs';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ORIGIN = 'http://tavern.test:8000';
 const POSIX = process.platform !== 'win32';
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+test('原生安装与卸载保留其他插件、配置注释、换行及原有开关', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'reader-companion-setup-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(root, 'server.js'), '');
+  const dest = path.join(root, 'plugins', 'reader-ii-companion');
+  const config = path.join(root, 'config.yaml');
+  const run = (action, source = path.join(ROOT, 'companion')) => spawnSync(process.execPath, [path.join(source, 'setup.mjs'), action, root], { encoding: 'utf8' });
+  for (const [original, enabled] of [
+    ['\ufeffenableServerPlugins: false  # all plugins\r\nfoo: 1\r\n', '\ufeffenableServerPlugins: true  # all plugins\r\nfoo: 1\r\n'],
+    ['enableServerPlugins: true\n', 'enableServerPlugins: true\n'],
+    ['foo: yes', 'foo: yes\nenableServerPlugins: true\n'],
+  ]) {
+    fs.writeFileSync(config, original);
+    const installed = run('install');
+    assert.equal(installed.status, 0, installed.stderr);
+    assert.equal(fs.readFileSync(config, 'utf8'), enabled);
+    assert.equal(run('uninstall', dest).status, 0);
+    assert.equal(fs.readFileSync(config, 'utf8'), original);
+    assert.ok(!fs.existsSync(dest));
+  }
+  fs.writeFileSync(config, '\ufefffoo: yes\r\n');
+  assert.equal(run('install').status, 0);
+  fs.appendFileSync(config, 'newSetting: yes\r\n');
+  assert.equal(run('uninstall').status, 0);
+  assert.equal(fs.readFileSync(config, 'utf8'), '\ufefffoo: yes\r\nnewSetting: yes\r\n');
+  fs.writeFileSync(config, 'enableServerPlugins: false\n');
+  fs.mkdirSync(path.join(root, 'plugins', 'other'));
+  assert.equal(run('install').status, 0);
+  fs.writeFileSync(path.join(dest, 'notes.txt'), 'keep');
+  assert.equal(run('uninstall').status, 0);
+  assert.equal(fs.readFileSync(config, 'utf8'), 'enableServerPlugins: true\n');
+  assert.equal(fs.readFileSync(path.join(dest, 'notes.txt'), 'utf8'), 'keep');
+  assert.notEqual(run('install').status, 0, '不能覆盖无归属的同名目录');
+});
+
+test('macOS / Linux 桌面入口保留完整参数、使用用户目录，只移除本次安装的文件', t => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'reader-desktop-'));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const data = path.join(home, '自选 data');
+  const launcher = desktopFile('linux', home, data);
+  assert.equal(launcher, path.join(data, 'applications', 'reader-ii-tauritavern.desktop'));
+  assert.equal(desktopFile('linux', home, 'relative'), path.join(home, '.local', 'share', 'applications', 'reader-ii-tauritavern.desktop'));
+  assert.equal(desktopFile('darwin', home), path.join(home, 'Desktop', 'TauriTavern + Reader-II.command'));
+  const argv = ['/opt/Node JS/node', '/资料/伴侣/standalone.mjs', "/Games 100%/O'Brien.AppImage"];
+  const mac = launcherText('darwin', ...argv);
+  assert.equal(mac.split('\n')[2], "exec '/opt/Node JS/node' '/资料/伴侣/standalone.mjs' '--host' '127.0.0.1' '--port' '8790' '--tavern' '/Games 100%/O'\\''Brien.AppImage'");
+  const linux = launcherText('linux', ...argv);
+  assert.equal(linux.split('\n').find(line => line.startsWith('Exec=')), 'Exec="/opt/Node JS/node" "/资料/伴侣/standalone.mjs" "--host" "127.0.0.1" "--port" "8790" "--tavern" "/Games 100%%/O\'Brien.AppImage"');
+  assert.throws(() => launcherText('linux', ...argv.slice(0, 2), 'bad\nname'), /控制字符/);
+  setLauncher(launcher, linux);
+  setLauncher(launcher, linux);
+  assert.equal(fs.readFileSync(launcher, 'utf8'), linux);
+  assert.throws(() => setLauncher(launcher, launcherText('linux', ...argv.slice(0, 2), '/other')), /先运行卸载/);
+  setLauncher(launcher, null);
+  setLauncher(launcher, null);
+  assert.equal(fs.existsSync(launcher), false);
+  const foreign = linux.replace(/^# Reader-II companion installer .+$/m, '# Reader-II companion installer file:///other/setup-desktop.mjs');
+  fs.writeFileSync(launcher, foreign);
+  assert.throws(() => setLauncher(launcher, null), /不属于/);
+  assert.throws(() => setLauncher(launcher, linux), /不属于/);
+  assert.equal(fs.readFileSync(launcher, 'utf8'), foreign);
+});
+
+test('当前 POSIX 平台的桌面安装命令能识别 .app 或 PATH 中的程序，在临时用户目录创建及卸载入口', { skip: !['linux', 'darwin'].includes(process.platform) }, t => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'reader-cli-'));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const data = path.join(home, '独立数据');
+  const apps = path.join(home, 'Games with spaces');
+  const bundle = path.join(apps, 'TauriTavern.app');
+  const mac = process.platform === 'darwin';
+  const exe = mac ? path.join(bundle, 'Contents', 'MacOS', 'Tauri Tavern') : path.join(apps, 'tauritavern');
+  fs.mkdirSync(path.dirname(exe), { recursive: true });
+  fs.writeFileSync(exe, '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+  if (mac) fs.writeFileSync(path.join(bundle, 'Contents', 'Info.plist'), '<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleExecutable</key><string>Tauri Tavern</string></dict></plist>');
+  const installer = path.join(ROOT, 'companion', 'setup-desktop.mjs');
+  const run = (...args) => spawnSync(process.execPath, [installer, ...args], {
+    env: { ...process.env, HOME: home, XDG_DATA_HOME: data, PATH: apps }, encoding: 'utf8', timeout: 5000,
+  });
+  const result = mac ? run('install', bundle) : run('install');
+  assert.equal(result.status, 0, result.stderr);
+  const launcher = desktopFile(process.platform, home, data);
+  assert.equal(fs.readFileSync(launcher, 'utf8'), launcherText(process.platform, process.execPath, path.join(ROOT, 'companion', 'standalone.mjs'), exe));
+  assert.ok(fs.statSync(launcher).mode & 0o100);
+  assert.equal(run('uninstall').status, 0);
+  assert.equal(fs.existsSync(launcher), false);
+  assert.ok(fs.existsSync(exe));
+});
+
+test('桌面入口调用的独立伴侣随模拟酒馆启动，酒馆退出后释放临时端口', async t => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'reader-lifecycle-'));
+  t.after(() => fs.rmSync(temp, { recursive: true, force: true }));
+  // 用 Node 自身扮演酒馆：无脚本参数的子进程读取临时伴侣状态，写完即退出。
+  const probe = path.join(temp, 'probe.cjs');
+  fs.writeFileSync(probe, [
+    'if (process.argv.length === 1) {',
+    "  const fs = require('node:fs'), path = require('node:path');",
+    "  const dir = process.env.READER_TEST_HOME;",
+    "  const url = new URL('/status', fs.readFileSync(path.join(dir, 'admin-url.txt'), 'utf8').trim());",
+    "  require('node:http').get(url, response => {",
+    "    let body = ''; response.on('data', chunk => { body += chunk; });",
+    "    response.on('end', () => fs.writeFileSync(path.join(dir, 'status.json'), body));",
+    '  });',
+    '}',
+  ].join('\n'));
+  const started = spawnSync(process.execPath, [path.join(ROOT, 'companion', 'standalone.mjs'), '--host', '127.0.0.1', '--home', temp, '--port', '0', '--tavern', process.execPath], {
+    env: { ...process.env, READER_TEST_HOME: temp, NODE_OPTIONS: '--require=' + JSON.stringify(probe) },
+    encoding: 'utf8', timeout: 10000,
+  });
+  assert.equal(started.status, 0, started.error?.message || started.stderr);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(temp, 'status.json'), 'utf8')).mode, 'standalone');
+  const base = new URL(fs.readFileSync(path.join(temp, 'admin-url.txt'), 'utf8').trim()).origin;
+  await assert.rejects(request(base, 'GET', '/status'), { code: 'ECONNREFUSED' });
+});
 
 function request(base, method, target, { body, headers = {} } = {}) {
   return new Promise((resolve, reject) => {
@@ -40,6 +155,52 @@ function request(base, method, target, { body, headers = {} } = {}) {
     req.end();
   });
 }
+
+test('Windows Tauri 专用快捷方式在临时目录可安装卸载，伴侣随指定酒馆进程退出', { skip: POSIX }, async t => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'reader-ii-桌面 '));
+  t.after(() => fs.rmSync(temp, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
+  const exe = path.join(temp, 'TauriTavern.exe');
+  // 临时测试进程，绝不启动、控制或结束用户已打开的酒馆。
+  fs.copyFileSync(process.execPath, exe);
+  const helper = path.join(ROOT, 'companion', 'tauri-windows.mjs');
+  const ln = path.join(temp, 'TauriTavern + Reader-II.lnk');
+  const launch = (...args) => spawnSync(process.execPath, [helper, ...args], { encoding: 'utf8', timeout: 10000 });
+  assert.equal(launch('install', exe, temp).status, 0);
+  assert.ok(fs.existsSync(ln));
+  const shortcut = spawnSync('powershell.exe', ['-NoProfile', '-Command',
+    "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); $s=(New-Object -ComObject WScript.Shell).CreateShortcut($env:READER_TEST_LINK); Write-Output $s.Arguments"
+  ], { env: { ...process.env, READER_TEST_LINK: ln }, encoding: 'utf8' });
+  assert.equal(shortcut.stdout.trim(), '"' + helper + '" start "' + exe + '"');
+  assert.equal(launch('uninstall', '-', temp).status, 0);
+  assert.ok(!fs.existsSync(ln));
+
+  // 使用桌面启动器的固定端口。用户已有服务占用时仅跳过此段，绝不操作既有服务。
+  const probe = http.createServer();
+  const available = await new Promise(resolve => {
+    probe.once('error', () => resolve(false));
+    probe.listen(8790, '127.0.0.1', () => probe.close(() => resolve(true)));
+  });
+  if (!available) { t.diagnostic('本机端口正在使用，本次只验证了快捷方式'); return; }
+  const app = spawn(exe, ['-e', 'setInterval(()=>{},10000)'], { stdio: 'ignore', windowsHide: true });
+  t.after(() => app.kill());
+  const launcher = spawn(process.execPath, [helper, 'start', exe], { env: { ...process.env, READER_II_COMPANION_HOME: path.join(temp, 'data') }, stdio: 'ignore', windowsHide: true });
+  t.after(() => launcher.kill());
+  const stopped = new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(Error('伴侣没有随酒馆进程退出')), 12000);
+    launcher.once('close', code => { clearTimeout(timeout); resolve(code); });
+  });
+  let status;
+  for (let attempt = 0; attempt < 50 && !status; attempt++) {
+    await sleep(80);
+    status = await request('http://127.0.0.1:8790', 'GET', '/status').catch(() => null);
+  }
+  assert.equal(status?.data?.name, 'reader-ii-companion');
+  // 给 PowerShell 留出查找并开始等待这个进程的时间。
+  await sleep(1500);
+  app.kill();
+  assert.equal(await stopped, 0);
+  await assert.rejects(request('http://127.0.0.1:8790', 'GET', '/status'));
+});
 
 async function boot(t, options = {}) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'reader-ii-companion-test-'));

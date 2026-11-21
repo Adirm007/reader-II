@@ -30,7 +30,11 @@
     var host = env.host, net = deps.net, secrets = deps.secrets;
     var state = { info: null, grant: null, checkedAt: 0, error: '', checking: null, base: '' };
 
-    function base() { return normalizeCompanionSettings(typeof deps.settings === 'function' ? deps.settings() : null).url || PLUGIN_BASE; }
+    function base() {
+      var custom = normalizeCompanionSettings(typeof deps.settings === 'function' ? deps.settings() : null).url;
+      var desktopTauri = host.__TAURITAVERN__ && !/Android|iPhone|iPad|Mobile/i.test(String(host.navigator && host.navigator.userAgent || ''));
+      return custom || (desktopTauri ? 'http://127.0.0.1:8790' : PLUGIN_BASE);
+    }
     function saved() {
       var value = secrets.get('companion');
       return modules.isObject(value) && value.base === base() && value.token ? value : null;

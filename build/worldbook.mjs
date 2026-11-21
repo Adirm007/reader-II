@@ -282,7 +282,7 @@ export function upstreamCore(source = read(WORLDBOOK_SOURCE)) {
 }
 
 export function transformCore(source, { version = 'dev', upstreamVersion = '?' } = {}) {
-  source = replaceRegex(source, /^<%_ \/\* DREAM_WORLDBOOK reader-core v[^\n]*\n/, `<%_ /* READER_II_WORLDBOOK core v${version} · 上游 reader-core v${upstreamVersion} */ _%>\n`, '版本标记');
+  source = replaceRegex(source, /^<%_ \/\* DREAM_WORLDBOOK reader-core v[^\n]*\n/, `<%_ /* READER_II_WORLDBOOK core v${version} · 上游 reader-core v${upstreamVersion} */_%>\n`, '版本标记');
 
   /* 头部宏：原版给宿主卡的其他条目用（{{getvar::fp定义}} 之类），通用版没有那些条目。 */
   source = replaceRegex(source, /^\s*setLocalVar\('系统核心名',[^\n]*\);\n/gm, '', '移除系统核心名局部变量', 2);

@@ -46,13 +46,13 @@
     /* ---------- GitHub API ---------- */
     async function gh(path, options) {
       var opts = options || {};
-      var auth = token();
+      var auth = opts.token || token();
       var headers = { Accept: opts.accept || 'application/vnd.github+json' };
       if (auth) headers.Authorization = 'Bearer ' + auth;
       if (opts.body !== undefined) headers['Content-Type'] = 'application/json';
       var out = await net.request(/^https:\/\//.test(path) ? path : API + path, {
         method: opts.method || 'GET', headers: headers, body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
-        signal: opts.signal, timeoutMs: opts.timeoutMs || 30000, routes: ['direct', 'companion']
+        signal: opts.signal, timeoutMs: opts.timeoutMs || 30000, routes: opts.token ? ['direct'] : ['direct', 'companion']
       });
       var data = null;
       if (!opts.text) { try { data = out.text ? JSON.parse(out.text) : null; } catch (error) { data = null; } }
@@ -425,7 +425,12 @@
     return {
       github: gh,
       hasToken: function () { return !!token(); },
-      brief: function () { return token() ? '联网：已绑定 GitHub 令牌（可读私有仓库、可推送）' : ''; }
+      verifyToken: async function (candidate) {
+        var out = await gh('/user', { token: candidate });
+        if (!out.data || typeof out.data.login !== 'string' || !out.data.login) throw new Error('GitHub 没有返回账号信息，请稍后再试。');
+        return out.data.login;
+      },
+      brief: function () { return token() ? '联网：已绑定 GitHub 令牌，可用仓库与读写权限由该令牌决定。' : ''; }
     };
   }
 

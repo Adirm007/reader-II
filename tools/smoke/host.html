@@ -201,12 +201,18 @@
   const realFetch = window.fetch.bind(window);
   window.fetch = async (input, init) => {
     const url = typeof input === 'string' ? input : input.url;
+    if (url === 'https://api.github.com/user') {
+      const accepted = headerOf(init, 'authorization') === 'Bearer smoke-valid-token';
+      return accepted ? jsonReply({ login: 'smoke-reader' }) : jsonReply({ message: 'Bad credentials' }, 401);
+    }
     if (url.startsWith('https://docs.smoke.test/')) { state.web.hits.push(url); return new Response(DOC_PAGE, { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } }); }
     if (url === 'https://mcp.smoke.test/mcp') return mcpFetch(init || {});
+    if (url === '/scripts/extensions/third-party/reader-II/manifest.json') return realFetch('/manifest.json', init);
+    if (url === '/scripts/extensions/third-party/broken-notes/manifest.json') return jsonReply({ reader_ii_connector: { id: 'bad id' } });
     if (url.startsWith('/api/plugins/reader-ii/')) return companionFetch(url.slice('/api/plugins/reader-ii'.length), init || {});
     if (url.startsWith('/api/')) {
       state.posts.push({ url, body: init && init.body ? JSON.parse(init.body) : null });
-      const body = url === '/api/extensions/discover' ? [{ type: 'global', name: 'third-party/reader-II' }] : {};
+      const body = url === '/api/extensions/discover' ? ['third-party/reader-II', 'third-party/broken-notes'].map((name) => ({ type: 'global', name })) : {};
       return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
     }
     return realFetch(input, init);

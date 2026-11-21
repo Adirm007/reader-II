@@ -83,16 +83,23 @@ async function main() {
     await window.__smokeView('cafe', 'settings');
     const mode = $('select[data-s="a.toolProtocol"]');
     assert(mode && ['auto', 'native', 'text'].every((value) => [...mode.options].some((o) => o.value === value)), '缺少工具调用方式');
-    assert($('[data-s="a.plotContext"]').checked && $('[data-s="a.plotSource"]').value === 'auto', '新安装应默认自动读取剧情来源');
+    assert($('[data-s="a.plotContext"]').checked && $('#ra-plot-mode').value === 'auto', '新安装应默认自动读取剧情来源');
     assert(!$('[data-s="a.useAssistantPreset"]'), '仍有旧预设开关');
     const persona = $('textarea[data-s="personaPrompt"]');
+    const appearance = $('#ra-appearance-prompt');
     const system = $('textarea[data-s="a.assistantSystemPrompt"]');
-    assert(persona && system, '缺少人格或助手独立的文本编辑框');
+    const originalLook = window.ReaderII.agent.personaContext().appearance.defaultPrompt;
+    assert(persona && system && originalLook && appearance?.value === originalLook, '设置里没有显示当前人格和装扮');
     persona.value = '冒烟当前人格：说话前先放下手中的书。';
+    appearance.value = '细银边圆眼镜，衣领别着一朵蓝花。';
     system.value = '冒烟助手专用：办完任务后发一份清单。';
     mode.value = 'text'; $('[data-act="save-settings"]').click();
     await until(() => window.ReaderII.agent.getSettings().toolProtocol === 'text' && $('[data-ra-status="settings"]')?.textContent.includes('设置已保存'), '设置保存');
     assert(window.ReaderII.agent.getSettings().assistantSystemPrompt === system.value, '助手专用文本未保存');
+    assert(window.ReaderII.agent.personaContext().appearance.prompt === appearance.value && $('#ra-appearance-prompt').value === appearance.value, '助手没有取得保存后的外貌');
+    $('#ra-appearance-prompt').value = '';
+    $('[data-act="save-settings"]').click();
+    assert(window.ReaderII.agent.personaContext().appearance.prompt === originalLook && $('#ra-appearance-prompt').value === originalLook, '清空外貌后没有恢复大厅装扮');
     const toggle = () => $('#ra-reader-card [data-act="card-toggle"]');
     assert(toggle()?.getAttribute('aria-checked') === 'true', '卡开关应开启'); toggle().click();
     await until(() => !window.ReaderII.lobby.isEnabled() && toggle()?.getAttribute('aria-checked') === 'false', '卡停用');
@@ -270,6 +277,44 @@ async function main() {
     (await until(() => $('[data-dlb="gacha"]'), '抽卡入口')).click();
     await until(() => { const node = $('.bs-gacha, [data-dream-overlay="gacha"]'); return node && !node.hidden; }, '抽卡面板');
     $('#reader-ii-controller').contentWindow.ReaderGacha.close();
+  });
+  await step('换卡、同卡换聊天、切回原卡后服务台都能直接打开助手', async () => {
+    const { ctx } = mock;
+    const { agent } = window.ReaderII;
+    const firstChat = ctx.chatId, firstName = ctx.name2;
+    const firstCard = ctx.characterId, messages = [...ctx.chat];
+    const secondCard = ctx.characters.push({ name: '第二张卡', avatar: 'second.png', data: { extensions: {} } }) - 1;
+    async function enter(card, chatId) {
+      ctx.characterId = card;
+      ctx.name2 = ctx.characters[card].name;
+      await mock.switchChat(chatId, card === firstCard ? messages : [{ name: ctx.name2, mes: '你好。' }]);
+    }
+    async function openFromDesk(action, tab) {
+      assert(await window.ReaderII.lobby.open('eggs'), '服务台没打开');
+      $('[data-dlb="' + action + '"]').click();
+      await until(() => $('#reader-agent-overlay')?.open && $('.ra-pane[data-pane="' + tab + '"].is-on'), '服务台打开' + tab);
+      await agent.threads.ready();
+      const row = agent.threads.list().find(item => item.id === agent.threads.currentId());
+      assert(row?.owner.label === ctx.name2 + ' / ' + ctx.chatId, '助手仍在上一段聊天');
+      agent.close();
+    }
+    try {
+      await openFromDesk('eggagent', 'chat');
+      // 旧卡脚本曾向父窗口写入 ReaderAgent 占位。卸载时酒馆助手会还原它写入前的属性。
+      delete window.ReaderAgent;
+      await enter(secondCard, '第二张卡的第一段聊天');
+      await openFromDesk('eggagent', 'chat');
+      await enter(secondCard, '第二张卡的另一段聊天');
+      await openFromDesk('eggagentset', 'settings');
+      await enter(firstCard, firstChat);
+      await openFromDesk('eggmemory', 'memory');
+    } finally {
+      window.ReaderAgent = agent;
+      agent.close();
+      if (ctx.characterId !== firstCard || ctx.chatId !== firstChat) await enter(firstCard, firstChat);
+      ctx.name2 = firstName;
+      ctx.characters.pop();
+    }
   });
   const failed = results.filter((x) => !x.ok);
   document.title = failed.length ? `SMOKE FAIL ${failed.length}/${results.length}` : `SMOKE PASS ${results.length}/${results.length}`;

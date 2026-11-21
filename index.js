@@ -14,11 +14,21 @@ function context() {
   try { return window.SillyTavern?.getContext?.() ?? null; } catch { return null; }
 }
 
-function openReader() {
-  const lobby = window.ReaderII?.lobby;
-  if (lobby) return lobby.open();
-  window.toastr?.info('Reader-II 还在加载，请稍等一下再点', 'Reader-II');
-  return Promise.resolve(false);
+async function getReader() {
+  if (!window.ReaderII?.ready && !window.ReaderCore?.loadReaderII) await loadBundle();
+  if (window.ReaderII?.ready && window.ReaderII.lobby) return window.ReaderII;
+  if (window.ReaderCore?.loadReaderII) return window.ReaderCore.loadReaderII();
+  throw new Error('主包缺少启动模块，请重新安装 Reader-II。');
+}
+
+async function openReader() {
+  try {
+    const reader = await getReader();
+    return await reader.lobby.open();
+  } catch (error) {
+    window.toastr?.warning(error.message || String(error), 'Reader-II');
+    return false;
+  }
 }
 
 function addEntries() {
@@ -33,16 +43,6 @@ function addEntries() {
     menu.appendChild(item);
   }
 
-  const settings = document.getElementById('extensions_settings2') || document.getElementById('extensions_settings');
-  if (settings && !document.getElementById('reader-ii-settings-entry')) {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.id = 'reader-ii-settings-entry';
-    button.className = 'menu_button menu_button_icon interactable';
-    button.innerHTML = '<i class="fa-solid fa-book-open" aria-hidden="true"></i><span>Reader-II</span>';
-    button.addEventListener('click', openReader);
-    settings.appendChild(button);
-  }
   try {
     const ctx = context();
     if (ctx?.SlashCommandParser && ctx?.SlashCommand && !window.__ReaderIISlash) {
@@ -54,7 +54,8 @@ function addEntries() {
         callback: async (_args, text) => {
           const input = String(text ?? '').trim();
           if (!input) { await openReader(); return ''; }
-          const result = await window.ReaderII.agent.run(input, {});
+          const reader = await getReader();
+          const result = await reader.agent.run(input, {});
           return result.answer;
         },
       }));
@@ -64,23 +65,40 @@ function addEntries() {
   }
 }
 
-function load() {
-  if (window.ReaderII?.ready) { addEntries(); return; }
-  if (document.querySelector('script[data-reader-ii]')) return;
-  const script = document.createElement('script');
+let loading;
+function loadBundle() {
+  if (loading) return loading;
   const bundle = new URL('dist/reader-ii.ext.js', base);
   const version = entry.searchParams.get('v');
   if (version) bundle.searchParams.set('v', version);
-  script.src = bundle.href;
-  script.dataset.readerIi = '1';
-  script.onload = addEntries;
-  script.onerror = () => console.error('[ReaderII] 主包加载失败：', script.src);
-  document.head.appendChild(script);
+  loading = new Promise((resolve, reject) => {
+    const existing = document.querySelector('script[data-reader-ii]');
+    const script = existing || document.createElement('script');
+    function failed(message) {
+      script.remove();
+      reject(new Error(message));
+    }
+    script.addEventListener('load', () => {
+      if (window.ReaderII?.ready || window.ReaderCore?.loadReaderII) resolve();
+      else failed('主包没有初始化成功，请检查 Reader-II 扩展文件后重试。');
+    }, { once: true });
+    script.addEventListener('error', () => failed('未能加载 Reader-II 主包，请检查酒馆连接，再点一次重试。'), { once: true });
+    if (!existing) {
+      script.src = bundle.href;
+      script.dataset.readerIi = '1';
+      document.head.appendChild(script);
+    }
+  }).catch(error => {
+    loading = undefined;
+    throw error;
+  });
+  return loading;
 }
 
 function start() {
+  addEntries();
   const idle = window.requestIdleCallback ?? ((task) => setTimeout(task, 600));
-  idle(load, { timeout: 4000 });
+  idle(() => getReader().catch(error => console.warn('[ReaderII]', error.message)), { timeout: 4000 });
 }
 
 const ctx = context();

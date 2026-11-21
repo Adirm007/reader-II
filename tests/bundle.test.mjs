@@ -3,8 +3,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
+import { createHash } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 import { gunzipSync } from 'node:zlib';
 import { EXT_MODULES, CORE_MODULES, AGENT_MODULES, ASSETS_MODULE, PROMPTS_MODULE, generatedModules, extBundle, releaseManifest, textHash } from '../build.mjs';
+import { companionZip } from '../build/companion-zip.mjs';
 import { renderEjs } from '../build/worldbook.mjs';
 
 const read = (file) => fs.readFileSync(new URL('../' + file, import.meta.url), 'utf8');
@@ -16,7 +19,45 @@ function modules(files = []) {
   return { ctx, m: ctx.__ReaderIIModules };
 }
 
-test('扩展包按依赖顺序包含全部模块和两个生成模块，发布清单只有扩展包', () => {
+test('魔法棒与空闲预加载共用请求，主包下载失败后能从原入口重试', async () => {
+  const scripts = [], warnings = [];
+  let shortcut, idle, opens = 0;
+  const window = {
+    requestIdleCallback: task => { idle = task; },
+    toastr: { warning: message => warnings.push(message) },
+  };
+  const menu = { appendChild: node => { shortcut = node.click; } };
+  const document = {
+    getElementById: id => id === 'extensionsMenu' ? menu : null,
+    querySelector: () => scripts.find(node => !node.removed),
+    head: { appendChild: node => scripts.push(node) },
+    createElement: () => ({
+      dataset: {}, setAttribute() {}, remove() { this.removed = true; },
+      addEventListener(name, listener) { this[name] = listener; },
+    }),
+  };
+  const code = read('index.js').replace('import.meta.url', JSON.stringify('https://example.test/reader-II/index.js?v=test'));
+  vm.runInNewContext(code, { document, window, URL, console: { warn() {} } });
+  idle();
+  const firstClick = shortcut();
+  assert.equal(scripts.length, 1);
+  scripts[0].error();
+  assert.equal(await firstClick, false);
+  assert.match(warnings[0], /主包.*重试/);
+  assert.ok(scripts[0].removed);
+  const secondClick = shortcut();
+  assert.equal(scripts.length, 2);
+  assert.equal(scripts[1].src, 'https://example.test/reader-II/dist/reader-ii.ext.js?v=test');
+  const api = { ready: true, lobby: { open: () => { opens++; return true; } } };
+  window.ReaderCore = { loadReaderII: () => api };
+  scripts[1].load();
+  assert.equal(await secondClick, true);
+  assert.equal(await shortcut(), true);
+  assert.equal(opens, 2);
+  assert.equal(scripts.length, 2);
+});
+
+test('扩展按依赖顺序打包，发布清单分别校验扩展文本与伴侣 ZIP 原始字节', () => {
   assert.deepEqual(EXT_MODULES, [...CORE_MODULES, ...AGENT_MODULES]);
   assert.equal(new Set(EXT_MODULES).size, EXT_MODULES.length);
   for (const name of ['src/reader-native-host.js', 'src/reader-shell.js', 'src/reader-prompt.js', 'src/reader-core.js', 'src/reader-memory.js', 'src/agent/agent.js', 'src/agent/updates.js', 'src/agent/ui-theme.js', 'src/agent/boot.js', ASSETS_MODULE, PROMPTS_MODULE]) assert.ok(EXT_MODULES.includes(name), name);
@@ -35,10 +76,12 @@ test('扩展包按依赖顺序包含全部模块和两个生成模块，发布�
   assert.equal(assets.version, '4.1.0-alpha.1');
   assert.ok(assets.controller && assets.letterScript && assets.body);
   assert.deepEqual(Object.keys(m.READER_PROMPT_TEMPLATES).sort(), ['core', 'list', 'rules']);
-  const manifest = releaseManifest({ version: assets.version, outputs: [['dist/reader-ii.ext.js', code]] });
+  const zip = companionZip(fileURLToPath(new URL('..', import.meta.url)));
+  const manifest = releaseManifest({ version: assets.version, outputs: [['dist/reader-ii.ext.js', code], ['dist/reader-ii-companion.zip', zip]] });
   assert.equal(manifest.format, 2);
-  assert.deepEqual(Object.keys(manifest.files), ['dist/reader-ii.ext.js']);
+  assert.deepEqual(Object.keys(manifest.files), ['dist/reader-ii.ext.js', 'dist/reader-ii-companion.zip']);
   assert.deepEqual(manifest.files['dist/reader-ii.ext.js'], { sha256: textHash(code), bytes: Buffer.byteLength(code) });
+  assert.deepEqual(manifest.files['dist/reader-ii-companion.zip'], { sha256: createHash('sha256').update(zip).digest('hex'), bytes: zip.length });
 });
 
 function promptHost({ local = {}, stat = {}, formatter = false, kit = {}, resolve = () => null } = {}) {
@@ -92,15 +135,17 @@ for (const persona of ['reader', 'kuromaku']) test(`三份编译模板经真实�
 
 test('正文只替换当前人格段落，保留机制并隔离助手系统提示词', async () => {
   const h = promptHost({ local: { dream_persona: 'reader' } });
-  h.host.ReaderII = { agent: { personaContext: id => ({ override: id === 'reader' ? '我的夜梦人格' : '' }), getSettings: () => ({ assistantSystemPrompt: '助手专用文本' }) } };
+  h.host.ReaderII = { agent: { personaContext: id => id === 'reader' ? { override: '我的夜梦人格', appearance: { prompt: '戴着故居的铜钥匙' } } : {},
+    getSettings: () => ({ assistantSystemPrompt: '助手专用文本' }) } };
   try {
     const actual = await h.runtime.render();
     assert.match(actual.core, /我的夜梦人格/);
+    assert.match(actual.core, /此刻形象: 戴着故居的铜钥匙/);
     assert.doesNotMatch(actual.core, /她自称是书的读者|助手专用文本/);
     assert.match(actual.core, /复活机制/);
     h.ctx.chatMetadata.variables.dream_persona = 'genki';
     const other = await h.runtime.render();
-    assert.doesNotMatch(other.core, /我的夜梦人格|助手专用文本/);
+    assert.doesNotMatch(other.core, /我的夜梦人格|戴着故居的铜钥匙|助手专用文本/);
     assert.match(other.core, /元气活泼/);
     assert.deepEqual(h.errors, []);
   } finally { h.runtime.dispose(); }

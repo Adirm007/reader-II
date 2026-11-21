@@ -26,15 +26,21 @@
     var connectors = new Map();
     var hooks = {};
 
-    function registerToolset(def) {
+    function checkToolset(def) {
       if (!def || !NAME.test(String(def.name).replace(/[\/-]/g, '_'))) throw new Error('工具箱名称无效');
+    }
+    function registerToolset(def) {
+      checkToolset(def);
       toolsets.set(def.name, { name: def.name, summary: String(def.summary || '').slice(0, 160), auto: def.auto === true, source: def.source || 'plugin' });
       return def.name;
     }
 
-    function registerTool(def) {
+    function checkTool(def) {
       if (!def || !NAME.test(def.name)) throw new Error('工具名只能用小写字母、数字、下划线：' + (def && def.name));
       if (typeof def.run !== 'function') throw new Error('工具 ' + def.name + ' 缺少 run');
+    }
+    function registerTool(def) {
+      checkTool(def);
       var toolset = def.toolset || 'core';
       if (toolset !== 'core' && !toolsets.has(toolset)) registerToolset({ name: toolset, summary: def.toolsetSummary || '' });
       var item = Object.assign({ params: [], effect: 'read', scope: 'tavern', source: 'plugin' }, def, { toolset: toolset });
@@ -78,6 +84,8 @@
       registerConnector: function (def) { if (!def || !def.id) throw new Error('插件对接缺少 id'); connectors.set(def.id, def); return def.id; },
       connectors: function () { return Array.from(connectors.values()); },
       find: function (name) { return tools.get(String(name || '').trim()) || null; },
+      findToolset: function (name) { return toolsets.get(name) || null; },
+      checkToolset: checkToolset, checkTool: checkTool,
       tools: function (toolset) { return Array.from(tools.values()).filter(function (item) { return !toolset || item.toolset === toolset; }); },
       toolsets: function () { return Array.from(toolsets.values()).filter(function (set) { return Array.from(tools.values()).some(function (item) { return item.toolset === set.name; }); }); },
       skills: function () { return Array.from(skills.values()); },

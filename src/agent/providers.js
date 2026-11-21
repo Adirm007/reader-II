@@ -674,20 +674,27 @@
     /* ---------- ext:/（已安装扩展的源码，只读） ---------- */
     var extensionNames = null;
 
-    async function discoverExtensions() {
-      if (extensionNames) return extensionNames;
+    function extensionRequest(url, options) {
+      var signal = typeof AbortSignal !== 'undefined' && AbortSignal.timeout ? AbortSignal.timeout(12000) : undefined;
+      return env.host.fetch(url, Object.assign({ signal: signal }, options));
+    }
+
+    async function discoverExtensions(refresh) {
+      if (extensionNames && !refresh) return extensionNames;
       var context = ctx();
       var headers = typeof context.getRequestHeaders === 'function' ? context.getRequestHeaders() : {};
-      var response = await env.host.fetch('/api/extensions/discover', { method: 'GET', headers: headers });
-      var list = response.ok ? await response.json() : [];
-      extensionNames = (Array.isArray(list) ? list : []).map(function (item) { return String(item && item.name || item || ''); })
+      var response = await extensionRequest('/api/extensions/discover', { method: 'GET', headers: headers });
+      if (!response.ok) throw new Error('无法读取酒馆的已安装扩展列表（HTTP ' + response.status + '）');
+      var list = await response.json();
+      if (!Array.isArray(list)) throw new Error('酒馆返回的扩展列表格式无法识别');
+      extensionNames = list.map(function (item) { return String(item && item.name || item || ''); })
         .filter(function (name) { return name.indexOf('third-party/') === 0; }).map(function (name) { return name.slice('third-party/'.length); });
       return extensionNames;
     }
 
     async function fetchExtensionFile(segs) {
       var url = '/scripts/extensions/third-party/' + segs.map(encodeURIComponent).join('/');
-      var response = await env.host.fetch(url, { cache: 'no-cache' });
+      var response = await extensionRequest(url, { cache: 'no-cache' });
       if (!response.ok) return null;
       var type = String(response.headers && response.headers.get && response.headers.get('content-type') || '');
       if (/^(?:image|audio|video|font)\//.test(type)) return '（二进制文件，' + type + '）';
@@ -700,7 +707,7 @@
       readonly: true,
       scope: function () { return 'tavern'; },
       list: async function (segs, options) {
-        if (!segs.length) return page((await discoverExtensions()).map(function (name) { return { name: name, dir: true }; }), options);
+        if (!segs.length) return page((await discoverExtensions(options.refresh)).map(function (name) { return { name: name, dir: true }; }), options);
         if (segs.length > 1) return page([], options);
         var items = [{ name: 'manifest.json' }];
         try {

@@ -5,11 +5,11 @@
  *   node build.mjs            构建扩展包，写进 dist/
  *   node build.mjs --check    只做检查，不写文件
  *
- * 产物只有一个：dist/reader-ii.ext.js（由 index.js 在酒馆就绪后加载）。里面是全部功能：
+ * 浏览器里的功能在 dist/reader-ii.ext.js（由 index.js 在酒馆就绪后加载）：
  *   语义层（七槽路由、经济、事件）、常驻壳与读者控制器资源（大厅、轻信、抽卡；gzip + base64）、
  *   提示词模板（编译成函数）、记忆、夜梦助手（Agent 内核）与面板。
  * 4.1 之前另有「卡内组件」（酒馆助手脚本、世界书、三条正则的 JSON）与 CDN 加载器，现在都并进了扩展（交接 0.9）。
- * 发布清单 dist/reader-ii.manifest.json 记下扩展包的 SHA-256。
+ * dist/reader-ii-companion.zip 单独供用户下载；发布清单记录两个文件的 SHA-256。
  * 版本号只有一个来源：manifest.json 的 version（语义化版本），构建把它写进 modules.BUILD_VERSION。
  */
 import { readFileSync, writeFileSync, mkdirSync, existsSync, rmSync } from 'node:fs';
@@ -20,6 +20,7 @@ import { gzipSync } from 'node:zlib';
 import vm from 'node:vm';
 import { transformUpstream } from './build/controller.mjs';
 import { assertNoMacro } from './build/lib.mjs';
+import { companionZip } from './build/companion-zip.mjs';
 import { promptTemplates, promptsModule, PROMPTS_MODULE } from './build/prompts.mjs';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
@@ -45,7 +46,7 @@ export const AGENT_MODULES = [
   'src/agent/store.js', 'src/agent/protocol.js', 'src/agent/permissions.js', 'src/agent/vfs.js', 'src/agent/providers.js', 'src/agent/tools.js',
   'src/agent/net.js', 'src/agent/web.js', 'src/agent/device.js', 'src/agent/mcp.js', 'src/agent/connectors.js', 'src/agent/skills.js',
   'src/agent/legacy-tools.js', 'src/agent/personas.js', 'src/agent/agent.js', 'src/agent/updates.js',
-  'src/agent/ui-theme.js', 'src/agent/ui-net.js', 'src/agent/ui-models.js', 'src/agent/ui.js', 'src/agent/boot.js',
+  'src/agent/ui-theme.js', 'src/agent/ui-net.js', 'src/agent/ui-connectors.js', 'src/agent/ui-models.js', 'src/agent/ui.js', 'src/agent/boot.js',
 ];
 export const EXT_MODULES = [...CORE_MODULES, ...AGENT_MODULES];
 
@@ -162,8 +163,10 @@ export const textHash = (text) => createHash('sha256').update(String(text).repla
 
 export function releaseManifest({ version, outputs }) {
   const files = {};
-  for (const [file, text] of outputs) files[file] = { sha256: textHash(text), bytes: Buffer.byteLength(text) };
-  return { format: 2, name: 'reader-ii', version, hash: 'SHA-256（UTF-8，换行统一为 LF 后计算）', files };
+  for (const [file, data] of outputs) {
+    files[file] = { sha256: Buffer.isBuffer(data) ? createHash('sha256').update(data).digest('hex') : textHash(data), bytes: Buffer.byteLength(data) };
+  }
+  return { format: 2, name: 'reader-ii', version, hash: 'SHA-256（文本使用 UTF-8 与 LF，ZIP 按原始字节）', files };
 }
 
 /* 4.1 之前的产物：卡内组件已并进扩展，构建时顺手清掉，免得仓库里留着过期的文件。 */
@@ -172,7 +175,7 @@ export const RETIRED_OUTPUTS = [
   'dist/reader-ii.regex.event-prompt.json', 'dist/reader-ii.regex.event-display.json', 'dist/reader-ii.regex.dream-render.json',
 ];
 
-/* 后端伴侣（companion/）不经打包，直接随仓库分发；它与仓库根的 package.json 里的版本号跟着 manifest.json 走。 */
+/* 源码和 ZIP 内的伴侣都使用 manifest.json 指定的版本。 */
 export const PACKAGE_FILES = ['package.json', 'companion/package.json'];
 
 export function syncPackageVersions(version, check = false) {
@@ -190,14 +193,16 @@ export function syncPackageVersions(version, check = false) {
 
 function main() {
   const manifest = JSON.parse(read('manifest.json'));
+  const check = process.argv.includes('--check');
+  for (const file of syncPackageVersions(manifest.version, check)) console.log(`${file}  版本号同步为 ${manifest.version}`);
   const generated = generatedModules(manifest.version);
   const ext = extBundle(manifest.version);
   const outputs = [
     ['dist/reader-ii.ext.js', ext, `${EXT_MODULES.length} 个模块；读者界面资源包 ${kb(generated.packed)}，提示词模板取自上游世界书 v${generated.prompts.upstreamVersion}`],
+    ['dist/reader-ii-companion.zip', companionZip(ROOT), '后端伴侣安装包'],
   ];
   const release = releaseManifest({ version: manifest.version, outputs });
   outputs.push([MANIFEST_FILE, json(release), '发布清单']);
-  const check = process.argv.includes('--check');
   const entry = 'index.js?v=' + manifest.version;
   if (manifest.js !== entry) {
     if (check) throw new Error('manifest.json 的入口与版本不一致，请先运行 node build.mjs');
@@ -214,7 +219,6 @@ function main() {
     }
   }
   for (const [file, text, note] of outputs) console.log(`${file}  ${kb(text)}  (${note})`);
-  for (const file of syncPackageVersions(manifest.version, check)) console.log(`${file}  版本号同步为 ${manifest.version}`);
   console.log(check ? `检查通过（没有写文件），版本 ${manifest.version}` : `版本 ${manifest.version}`);
 }
 

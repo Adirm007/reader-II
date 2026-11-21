@@ -85,6 +85,7 @@
           reason: '当前权限档位是「' + MODE_LABEL[current.mode] + '」，此操作需要「' + MODE_LABEL[required] + '」。档位可在「设置 → 助手 → 权限」中调整。' };
       }
 
+      if (request.confirmEach) return { decision: 'ask' };
       if (effect === 'read') {
         return { decision: rule && rule.effect === 'ask' ? 'ask' : 'allow' };
       }
@@ -106,7 +107,7 @@
 
     return {
       evaluate: evaluate,
-      allowSession: function (request) { if (request.effect !== 'danger') session[sessionKey(request)] = true; },
+      allowSession: function (request) { if (request.effect !== 'danger' && !request.confirmEach) session[sessionKey(request)] = true; },
       resetSession: function () { session = Object.create(null); },
       describe: function () {
         var current = settings();

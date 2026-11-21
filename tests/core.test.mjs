@@ -501,7 +501,7 @@ test('接线：tx、listInventory、notifyChanged（主窗口与脚本窗口都�
   api.dispose();
 });
 
-test('夜梦助手：与语义层在同一个扩展包里（host.ReaderII）；还没就绪时如实提示，不再从 CDN 另拉一份', async () => {
+test('夜梦助手走本地扩展包，启动失败显示原因，下一次打开可以重试', async () => {
   const opened = [];
   const readerII = { ready: true, version: 'test', agent: { open: (tab) => opened.push(tab) }, memory: {} };
 
@@ -518,9 +518,15 @@ test('夜梦助手：与语义层在同一个扩展包里（host.ReaderII）；�
   await world.api.ready();
   assert.equal(world.api.getReaderII(), null);
   assert.equal(await world.api.openAgent('chat'), false);
-  assert.match(world.toasts.join('\n'), /还没有就绪/);
-  await assert.rejects(world.api.loadReaderII(), /还没有就绪/);
+  assert.match(world.toasts.join('\n'), /缺少.*启动模块/);
+  await assert.rejects(world.api.loadReaderII(), /缺少.*启动模块/);
   assert.equal(world.host.ReaderAgent, undefined, '语义层不再往主窗口放占位');
+  world.root.__ReaderIIModules.bootReaderII = () => { throw Error('测试宿主暂时不可用'); };
+  assert.equal(await world.api.openAgent('chat'), false);
+  assert.match(world.toasts.at(-1), /测试宿主暂时不可用/);
+  world.root.__ReaderIIModules.bootReaderII = () => (world.host.ReaderII = readerII);
+  assert.equal(await world.api.openAgent('settings'), true);
+  assert.deepEqual(opened, ['memory', 'settings']);
   world.api.dispose();
 });
 

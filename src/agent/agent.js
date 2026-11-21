@@ -35,10 +35,11 @@
     timeoutSec: 180,
     recall: true,          /* 自动把相关记忆放进助手的提示词 */
     plotContext: true,     /* 让助手了解当前剧情 */
-    plotSource: 'auto',    /* 自动只取一家；空值表示不选择剧情来源 */
+    plotSources: 'auto',   /* 自动采用第一份非空摘要；数组明确列出要合并的来源 */
     plotBudget: 1800,      /* 剧情摘要的字数预算 */
     lite: false,           /* 轻聊：完全不带工具 */
     personaPrompts: {},
+    appearancePrompts: {},
     assistantSystemPrompt: '你是九十九夜梦，一位在故事之外阅读着用户这部作品的读者。此刻你作为住在酒馆（SillyTavern）里的随身助手，与面板前的用户交谈。',
     toolProtocol: 'auto',  /* 工具调用方式：auto 能用原生函数调用就用，不行退回文本协议 | native 只用原生 | text 只用文本协议 */
     connectors: [],        /* 用户导入的插件对接描述 */
@@ -121,6 +122,16 @@
     };
   }
 
+  function normalizePrompts(value, appearance) {
+    var prompts = {};
+    if (modules.isObject(value)) Object.keys(value).forEach(function (key) {
+      var prompt = value[key];
+      var builtin = appearance ? /^outfit:(cafe|summer|ink):[a-z0-9_]+$/.test(key) : Object.prototype.hasOwnProperty.call(PERSONAS, key);
+      if ((builtin || /^custom(?:-name)?:.+/.test(key)) && typeof prompt === 'string' && prompt.trim()) prompts[key] = prompt.trim();
+    });
+    return prompts;
+  }
+
   function normalizeSettings(input) {
     var source = modules.isObject(input) ? input : {};
     var temperature = Number(source.temperature);
@@ -128,13 +139,6 @@
     /* 3.x / 4.0 早期的 writePolicy：readonly → 只读档位；auto → 档位内自动。 */
     if (mode === undefined && source.writePolicy === 'readonly') mode = 'readonly';
     if (approval === undefined && source.writePolicy === 'auto') approval = 'auto';
-    var personaPrompts = {};
-    if (modules.isObject(source.personaPrompts)) Object.keys(source.personaPrompts).forEach(function (key) {
-      var prompt = source.personaPrompts[key];
-      if ((Object.prototype.hasOwnProperty.call(PERSONAS, key) || /^custom(?:-name)?:.+/.test(key)) && typeof prompt === 'string' && prompt.trim()) {
-        personaPrompts[key] = prompt.trim();
-      }
-    });
     return {
       maxSteps: clampInt(source.maxSteps, 1, MAX_STEP_BUDGET, DEFAULTS.maxSteps),
       maxTokens: clampInt(source.maxTokens, 256, 64000, DEFAULTS.maxTokens),
@@ -149,14 +153,16 @@
       resultCap: clampInt(source.resultCap, 1000, 200000, DEFAULTS.resultCap),
       timeoutSec: clampInt(source.timeoutSec, 20, 900, DEFAULTS.timeoutSec),
       recall: source.recall !== false,
-      plotContext: source.plotContext !== false && (source.plotSource === undefined || !!source.plotSource),
-      plotSource: source.plotSource === undefined ? DEFAULTS.plotSource : String(source.plotSource || ''),
+      plotContext: source.plotContext !== false,
+      plotSources: Array.isArray(source.plotSources) ? Array.from(new Set(source.plotSources.filter(function (id) { return typeof id === 'string' && id.trim(); }))) : DEFAULTS.plotSources,
       plotBudget: clampInt(source.plotBudget, 200, 20000, DEFAULTS.plotBudget),
       lite: source.lite === true,
-      personaPrompts: personaPrompts,
+      personaPrompts: normalizePrompts(source.personaPrompts, false),
+      appearancePrompts: normalizePrompts(source.appearancePrompts, true),
       assistantSystemPrompt: typeof source.assistantSystemPrompt === 'string' ? source.assistantSystemPrompt : DEFAULTS.assistantSystemPrompt,
       toolProtocol: ['auto', 'native', 'text'].indexOf(source.toolProtocol) >= 0 ? source.toolProtocol : DEFAULTS.toolProtocol,
       connectors: (Array.isArray(source.connectors) ? source.connectors : []).filter(modules.isObject).slice(0, 40),
+      connectorChoices: Object.fromEntries(Object.entries(source.connectorChoices || {}).filter(function (entry) { return typeof entry[1] === 'boolean'; })),
       web: section('normalizeWebSettings', source.web),
       mcp: section('normalizeMcpSettings', source.mcp),
       companion: section('normalizeCompanionSettings', source.companion)
@@ -215,12 +221,32 @@
 
     function getSettings() { return modules.clone(settings); }
 
+    function validateConnector(manifest) {
+      var connector = connectors.validate(manifest);
+      var detected = false;
+      try { detected = !!connector.detect(); } catch (error) { /* 插件未就绪，也可先保存 */ }
+      return { id: connector.id, title: connector.title, tools: connector.tools.length, detected: detected };
+    }
+
+    function importConnector(manifest) {
+      var checked = validateConnector(manifest);
+      var next = settings.connectors.filter(function (item) { return item.id !== checked.id; });
+      if (next.length >= 40) throw new Error('自定义对接已满 40 个，请先移除不用的对接');
+      saveSettings({ connectors: next.concat([manifest]) });
+      return checked;
+    }
+
+    function addMemorySource(title, methodPath) {
+      return importConnector(connectors.memorySource(title, methodPath));
+    }
+
     function saveSettings(patch) {
       var next = Object.assign({}, settings, modules.isObject(patch) ? patch : {});
       if (patch && modules.isObject(patch.subagents)) next.subagents = Object.assign({}, settings.subagents, patch.subagents);
       settings = normalizeSettings(next);
       if (!settings.subagents.enabled && current && current.delegateController) current.delegateController.abort();
       io.write(modules.clone(settings));
+      if (patch && (patch.connectors || patch.connectorChoices)) connectors.refresh();
       textOnly = Object.create(null);
       emitChange('settings');
       return getSettings();
@@ -314,7 +340,13 @@
       function profile(key, name, brief, custom) {
         var override = settings.personaPrompts[key] || '';
         var defaultPrompt = modules.defaultReaderPersonaPrompt ? modules.defaultReaderPersonaPrompt(id, custom, kit.readChatValue).trim() : brief;
-        return { id: id, name: name, key: key, address: address, card: override || brief, defaultPrompt: defaultPrompt, override: override };
+        var appearance = modules.readerOutfit(kit.readChatValue('dream_visual_theme'), kit.readChatValue('dream_appearance'));
+        if (custom) {
+          appearance.key = key;
+          if (typeof custom.appearance === 'string' && custom.appearance.trim()) appearance.defaultPrompt = custom.appearance.trim();
+        }
+        appearance.prompt = settings.appearancePrompts[appearance.key] || appearance.defaultPrompt;
+        return { id: id, name: name, key: key, address: address, card: override || brief, defaultPrompt: defaultPrompt, override: override, appearance: appearance };
       }
       if (id === 'custom') {
         var custom = kit.readChatValue('dream_custom_persona');
@@ -346,11 +378,13 @@
       return source.length > limit ? source.slice(0, Math.max(0, limit)) + '…' : source;
     }
 
-    /* 只在助手请求中读取所选外部来源；这段参考不写入 Reader 记忆。 */
-    async function plotBrief() {
-      if (!settings.plotSource) return '';
-      var plugin = await connectors.brief({ source: settings.plotSource, budget: settings.plotBudget });
-      return plugin ? '（摘要来自' + plugin.source + '）\n' + plugin.text : '';
+    // 纯生图端点只有一个 prompt，没有助手模型帮忙选择主体。普通作画请求原样送出。
+    function directImagePrompt(input, persona) {
+      var ownPortrait = /(?:你(?:自己)?|夜梦)的(?:自拍|照片|肖像)|\b(?:your selfie|portrait of you|draw yourself)\b/i;
+      var simpleSelfie = /^(?:请)?(?:给我|发我)?(?:发|来|拍)?(?:一?张)?自拍(?:照)?[吧。！？!?\s]*$/;
+      var simpleEnglishSelfie = /^(?:please )?(?:(?:send me|take) a )?selfie[.!?\s]*$/i;
+      if (!ownPortrait.test(input) && !simpleSelfie.test(input.trim()) && !simpleEnglishSelfie.test(input.trim())) return input;
+      return input + '\n\n画面中若出现助手本人，请使用这份外貌设定：' + persona.appearance.prompt;
     }
 
     function environmentBrief() {
@@ -425,9 +459,10 @@
       registry.registerTool({
         name: 'generate_' + kind, toolset: 'core', source: 'builtin', effect: 'read', scope: 'workspace', volatile: true,
         summary: '调用用户配置的' + label + '模型制作' + label + '并附到本次最终回复。返回附件编号以供主助手引用。',
-        params: [{ name: 'prompt', type: 'string', required: true, desc: '独立完整的生成提示，包含题材、风格和构图等用户要求' }],
+        params: [{ name: 'prompt', type: 'string', required: true, desc: '独立完整的生成提示，包含题材、风格和构图等用户要求' },
+          { name: 'include_self', type: 'boolean', desc: '画面包含你本人时填 true，如用户要你发自拍。工具会自动带上你当前的外貌' }],
         describe: function (args) { return '生成' + label + '：' + shorten(args.prompt, 60); },
-        run: function (args, ctx) { return ctx.generateMedia(kind, args.prompt); }
+        run: function (args, ctx) { return ctx.generateMedia(kind, args.prompt, args.include_self); }
       });
     });
 
@@ -500,7 +535,8 @@
       var address = persona.address ? '称呼用户为「' + persona.address + '」。' : '称呼用户为“作家先生”或“作家小姐”（不确定时用“作家先生”），或沿用对话里已有的称呼。';
       var parts = [
         settings.assistantSystemPrompt.trim(),
-        '【你是谁 · ' + persona.name + '】\n' + persona.card + '\n' + address
+        '【你是谁 · ' + persona.name + '】\n' + persona.card + '\n' + address,
+        '【你当前的外貌】\n' + persona.appearance.prompt
       ];
       if (lite) {
         parts.push('【规矩】\n- 始终用上面的人格口吻说话。\n- 现在是轻聊模式：你没有任何工具，只聊天。用户需要你查看或改动酒馆里的东西时，请他在助手设置里关掉「轻聊」。');
@@ -679,6 +715,7 @@
       /* 没有 VFS 路径的工具用 target 给权限规则匹配（网址、cmd:命令）；sessionKey 决定「本次对话都允许」记在什么上。 */
       var target = String(modules.resolveToolField(def.target, args, '') || '');
       var request = { effect: effect, scope: scope, path: canon[0] || target || (args.path ? String(args.path) : ''), tool: def.name };
+      if (def.confirmEach === true) request.confirmEach = true;
       var sessionKey = modules.resolveToolField(def.sessionKey, args, '');
       if (sessionKey) request.key = String(sessionKey);
       return { request: request, paths: canon };
@@ -720,7 +757,7 @@
         var reply = 'deny';
         if (typeof state.opts.confirm === 'function') {
           state.emit({ type: 'confirm', id: id, name: def.name, description: description, tier: effect });
-          try { reply = await state.opts.confirm({ id: id, name: def.name, args: args, tier: effect, scope: scope, path: request.path, description: description, alwaysLabel: alwaysLabel }); }
+          try { reply = await state.opts.confirm({ id: id, name: def.name, args: args, tier: effect, scope: scope, path: request.path, description: description, alwaysLabel: alwaysLabel, confirmEach: request.confirmEach }); }
           catch (error) { reply = 'deny'; }
         } else auth.reason = '这个操作需要用户确认，但当前界面无法询问。请告诉用户到助手面板里操作，或在设置里调整确认方式。';
         assertRunActive(state.chatKey, state.toolCtx.signal);
@@ -1104,7 +1141,8 @@
         job.thread = threadId();
         checkActive();
         if (sessionChat !== JSON.stringify([job.key, job.thread])) resetThreadState();
-        connectors.refresh();
+        await connectors.prepare(signal);
+        checkActive();
         var firstRoute = await modelRoute(signal);
         checkActive();
         var lite = firstRoute.imageOnly || firstRoute.imageChat || opts.lite === true || (opts.lite === undefined && settings.lite);
@@ -1113,7 +1151,8 @@
         if (!unbound() && settings.recall && memory && memory.getSettings().enabled) {
           try { recalled = await memory.search(input, { limit: 5 }); } catch (error) { recalled = []; }
         }
-        var plot = !unbound() && settings.plotContext && opts.plotContext !== false ? await plotBrief() : '';
+        var plot = !unbound() && settings.plotContext && opts.plotContext !== false
+          ? await connectors.brief(settings.plotSources, settings.plotBudget, signal) : '';
         var proto = lite ? { mode: 'text', via: '', key: '', reason: '轻聊' } : pickProtocol();
         var messages = [{ role: 'system', content: '' }];
         var history = readHistory();
@@ -1172,9 +1211,10 @@
         var lastIdleBatch = '';
         var idleRepeats = 0;
         var failedMedia = new Map();
-        state.toolCtx.generateMedia = async function (kind, prompt) {
+        state.toolCtx.generateMedia = async function (kind, prompt, includeSelf) {
           checkActive();
           if (!mediaConfigured(kind)) throw new Error('此媒体工具已关闭或尚未设置');
+          if (includeSelf) prompt += '\n\n助手本人的外貌：' + persona.appearance.prompt;
           var connection = llm.getTaskConnection(kind);
           var signature = JSON.stringify([kind, connection.selected, connection.model, prompt]);
           if (failedMedia.has(signature)) throw new Error('此生成请求已失败，本轮未重复提交：' + failedMedia.get(signature));
@@ -1253,7 +1293,7 @@
             if (remaining < 64) throw new Error('当前输入和系统提示估计需要 ' + used + ' tokens，模型窗口为 ' + route.window + '。请缩短输入或更换更大窗口的模型。');
             reserved = route.options.maxTokens = Math.min(reserved, remaining);
           }
-          emit({ type: 'context', used: route.imageOnly ? tokenEstimate(input) : used, reserved: reserved,
+          emit({ type: 'context', used: route.imageOnly ? tokenEstimate(directImagePrompt(input, persona)) : used, reserved: reserved,
             contextWindow: route.window, source: route.source, model: route.model });
         }
 
@@ -1276,7 +1316,7 @@
             emit({ type: 'thinking', step: rounds, limit: roundLimit });
             if (lite || route.imageOnly || route.imageChat) {
               var response = await richChat(Object.assign({}, route.options, {
-                messages: plainMessages(route.imageOnly ? [userMessage] : messages), generationId: 'reader-agent'
+                messages: route.imageOnly ? [{ role: 'user', content: directImagePrompt(input, persona) }] : plainMessages(messages), generationId: 'reader-agent'
               }));
               checkActive();
               answer = String(response.text || '').trim();
@@ -1516,14 +1556,26 @@
       listTools: function () { return toolsIn().map(function (def) { return { name: def.name, toolset: def.toolset, tier: typeof def.effect === 'function' ? 'dynamic' : def.effect, summary: def.summary }; }); },
       listToolsets: function () { return registry.toolsets(); },
       listSkills: function () { return registry.skills().map(function (skill) { return { name: skill.name, summary: skill.summary, source: skill.source }; }); },
-      validateConnector: function (manifest) {
-        var connector = connectors.validate(manifest);
-        var detected = false;
-        try { detected = !!connector.detect(); } catch (error) { detected = false; }
-        return { id: connector.id, title: connector.title, tools: (connector.tools || []).length, detected: detected };
+      validateConnector: validateConnector,
+      scanConnectors: connectors.list,
+      discoverConnectors: connectors.discover,
+      setConnectorEnabled: function (id, enabled) {
+        var item = connectors.list().find(function (row) { return row.id === id; });
+        if (!item) throw new Error('找不到这个插件对接，请重新扫描');
+        if (enabled && item.problem) throw new Error(item.problem);
+        saveSettings({ connectorChoices: Object.assign({}, settings.connectorChoices, { [id]: !!enabled }) });
+      },
+      importConnector: importConnector,
+      addMemorySource: addMemorySource,
+      removeConnector: function (id) {
+        var choices = Object.assign({}, settings.connectorChoices);
+        delete choices[id];
+        var patch = { connectors: settings.connectors.filter(function (item) { return item.id !== id; }), connectorChoices: choices };
+        if (Array.isArray(settings.plotSources)) patch.plotSources = settings.plotSources.filter(function (source) { return source !== id; });
+        saveSettings(patch);
       },
       listConnectors: function () { connectors.refresh(); return connectors.active().map(function (item) { return { id: item.id, title: item.title, summary: item.summary, custom: item.custom === true }; }); },
-      listPlotSources: connectors.plotSources,
+      listPlotSources: function () { return connectors.list().filter(function (item) { return item.hasBrief; }); },
       listRuns: function (limit) { return journal ? journal.list(limit, kit.chatKey()) : Promise.resolve([]); },
       listChanges: function (runId) { return journal ? journal.changes(runId) : Promise.resolve([]); },
       undo: undo,

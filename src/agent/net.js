@@ -61,7 +61,7 @@
         var all = Object.assign({}, readAll());
         if (value === undefined || value === null || value === '') delete all[name];
         else all[name] = value;
-        writeAll(all);
+        return writeAll(all);
       },
       /* 给界面看的：只露头尾。 */
       mask: function (text) {

@@ -186,11 +186,23 @@
       var templates = modules.READER_PROMPT_TEMPLATES;
       if (!enabled() || !templates) return output;
       var bridge = locals(generationType);
-      // 只向正文模板开放当前人格的改写，助手专用系统提示词留在助手的请求内。
+      // 同一代正文中的人格与外貌取自同一份档案。
+      var profiles = new Map();
+      function profile(id) {
+        if (!profiles.has(id)) {
+          var agent = host.ReaderII && host.ReaderII.agent;
+          profiles.set(id, agent && agent.personaContext(id));
+        }
+        return profiles.get(id);
+      }
       bridge.getPersonaPrompt = function (id) {
-        var agent = host.ReaderII && host.ReaderII.agent;
-        var value = agent && agent.personaContext(id).override;
+        var current = profile(id);
+        var value = current && current.override;
         return value ? '\n' + value + '\n' : '';
+      };
+      bridge.getAppearancePrompt = function (id) {
+        var current = profile(id);
+        return current && current.appearance && current.appearance.prompt;
       };
       var ctx = context();
       /* 顺序同原世界书：核心在前（它会写「系统名」等聊天变量），再是更新规则与变量列表。 */

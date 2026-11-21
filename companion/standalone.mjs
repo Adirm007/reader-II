@@ -11,12 +11,15 @@
  * 只用 Node 标准库（Node 18+），不需要 npm install。安全模型见 core.mjs 开头。
  */
 import { createCompanion } from './core.mjs';
+import { spawn } from 'node:child_process';
+import path from 'node:path';
 
 function parse(argv) {
   const options = {};
   for (let index = 0; index < argv.length; index += 1) {
     const name = argv[index];
     if (name === '--help' || name === '-h') options.help = true;
+    else if (name === '--tavern') options.tavern = String(argv[++index] || '');
     else if (name === '--port') options.port = Number(argv[++index]);
     else if (name === '--host') options.host = String(argv[++index] || '');
     else if (name === '--home') options.home = String(argv[++index] || '');
@@ -27,7 +30,7 @@ function parse(argv) {
 
 const options = parse(process.argv.slice(2));
 if (options.help) {
-  console.log('用法：node companion/standalone.mjs [--port 8790] [--host 127.0.0.1] [--home <数据目录>]');
+  console.log('用法：node standalone.mjs [--port 8790] [--host 127.0.0.1] [--home <数据目录>] [--tavern <酒馆可执行文件>]');
   process.exit(options.bad ? 1 : 0);
 }
 if (options.port !== undefined && !(Number.isInteger(options.port) && options.port >= 0 && options.port < 65536)) {
@@ -37,11 +40,12 @@ if (options.port !== undefined && !(Number.isInteger(options.port) && options.po
 
 const companion = createCompanion({ mode: 'standalone', home: options.home || undefined });
 try {
-  const started = await companion.start({ serveApi: true, port: options.port, host: options.host || undefined });
+  const started = await companion.start({ serveApi: true, port: options.port, host: options.host || undefined, portFallback: !options.tavern });
   console.log(`[Reader-II 伴侣] 在夜梦助手的设置页「后端伴侣」里，把伴侣地址填成：http://127.0.0.1:${started.port}`);
   console.log('[Reader-II 伴侣] 按 Ctrl+C 退出。');
 } catch (error) {
-  console.error('[Reader-II 伴侣] 启动失败：' + ((error && error.message) || error));
+  const message = error.code === 'EADDRINUSE' && options.tavern ? '端口已被占用。伴侣已启动时请使用原窗口。' : error.message;
+  console.error('[Reader-II 伴侣] 启动失败：' + message);
   process.exit(1);
 }
 
@@ -53,3 +57,9 @@ async function shutdown() {
 }
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
+if (options.tavern) {
+  const exe = path.resolve(options.tavern);
+  const app = spawn(exe, [], { cwd: path.dirname(exe), stdio: 'ignore' });
+  app.once('error', async error => { console.error('无法启动酒馆：' + error.message); await companion.close(); process.exit(1); });
+  app.once('exit', shutdown);
+}

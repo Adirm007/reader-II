@@ -8,11 +8,25 @@
    */
   var modules = root.__ReaderIIModules = root.__ReaderIIModules || {};
   var SETTINGS_NAMESPACE = 'reader_ii';
+  var instance = null;
+
+  function publish(host, api) {
+    host.ReaderII = api;
+    host.ReaderAgent = api.agent;
+    host.ReaderMemory = api.memory;
+    return api;
+  }
 
   function boot() {
     var env = modules.createEnv(root);
     var host = env.host;
-    if (host.ReaderII && host.ReaderII.ready === true) return host.ReaderII;
+    /* 旧版卡内脚本卸载时，酒馆助手可能还原父窗口属性。保留运行中的助手及其对话、订阅。 */
+    if (instance) return publish(host, instance);
+    var existing = host.ReaderII;
+    if (existing && existing.ready === true && existing.agent && typeof existing.agent.open === 'function') {
+      instance = existing;
+      return instance;
+    }
 
     var kit = modules.createHostKit(env);
     var llm = modules.createLlmGateway(env);
@@ -78,7 +92,7 @@
     });
     modules.adoptLegacyTools(registry, legacy);
     var skills = modules.installSkills(registry, vfs, env, store);
-    var connectors = modules.installConnectors(registry, env, kit, function () { return agent ? agent.getSettings().connectors : []; });
+    var connectors = modules.installConnectors(registry, env, kit, agentSettings, vfs);
 
     agent = modules.createAgent(env, llm, kit, memory, {
       history: history, registry: registry, vfs: vfs, journal: journal, connectors: connectors, settingsIo: settingsIo, apiTier: legacy.apiTier,
@@ -126,8 +140,8 @@
       lobby: function () { return lobby; }
     });
 
-    try { memory.install(); } catch (error) { env.console.warn('[ReaderII] 记忆系统启动失败', error); }
     connectors.refresh();
+    try { memory.install(); } catch (error) { env.console.warn('[ReaderII] 记忆系统启动失败', error); }
     skills.loadUserSkills().catch(function () { /* 工作区不可用时没有用户知识 */ });
     mcp.load().catch(function () { /* 没有缓存就等用户点刷新 */ });
 
@@ -168,9 +182,8 @@
         try { memory.dispose(); } catch (error) { /* ignore */ }
       }
     };
-    host.ReaderII = api;
-    host.ReaderAgent = api.agent;
-    host.ReaderMemory = memory;
+    instance = api;
+    publish(host, api);
 
     /* 比我们早加载的插件可以把登记动作排进 __ReaderIIQueue，这里统一执行。 */
     var queue = Array.isArray(host.__ReaderIIQueue) ? host.__ReaderIIQueue.splice(0) : [];

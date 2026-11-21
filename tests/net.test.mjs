@@ -388,17 +388,19 @@ test('MCP · HTTP：SSE 回应、会话过期后重新初始化、连接失败�
 });
 
 test('MCP · TauriTavern：经 api.mcp 同步目录、调用、权限映射与结果映射', async () => {
-  const sent = [];
+  const sent = [], discovered = [];
+  const exa = { id: 'abcdef12-0000-4000-8000-000000000000', displayName: 'Exa', state: 'active', headers: { Authorization: 'secret-only-at-host' }, toolPermissions: { search: 'allow', crawl: 'ask' } };
+  const other = { ...exa, id: 'abcdef23-0000-4000-8000-000000000000', displayName: 'Other' };
   const tauri = {
     ready: Promise.resolve(),
     api: { mcp: {
       servers: {
-        list: async () => ({ servers: [{ id: 'abcdef12-0000-4000-8000-000000000000', displayName: 'Exa', state: 'active' }, { id: 'ffffffff-0000-4000-8000-000000000000', displayName: '停用的', state: 'paused' }], storageIssues: [] }),
-        discover: async () => ({ tools: [
+        list: async () => ({ servers: [exa, other, { id: 'ffffffff-0000-4000-8000-000000000000', displayName: '停用的', state: 'paused' }], storageIssues: [] }),
+        discover: async id => { discovered.push(id); return { tools: [
           { nativeName: 'search', description: '搜索', inputSchema: { type: 'object', properties: { q: { type: 'string' } }, required: ['q'] }, annotations: {}, permission: 'allow' },
           { nativeName: 'crawl', description: '抓取', inputSchema: { type: 'object', properties: { url: { type: 'string' } } }, annotations: {}, permission: 'ask' },
           { nativeName: 'hidden', inputSchema: { type: 'object' }, annotations: {}, permission: 'off' },
-        ] }),
+        ] }; },
       },
       tools: { testCall: async (input) => {
         sent.push(input);
@@ -407,20 +409,41 @@ test('MCP · TauriTavern：经 api.mcp 同步目录、调用、权限映射与�
       } },
     } },
   };
-  const { agent, api } = makeHost({ globals: { __TAURITAVERN__: tauri }, replies: [call('mcp_tt_abcdef_search', { q: '夜梦' }), '好。', call('mcp_tt_abcdef_crawl', { url: 'https://a.b' }), '不确定。'] });
+  const { agent, api, replies, host } = makeHost({ globals: { __TAURITAVERN__: tauri } });
   assert.equal(api.mcp.hasTauri(), true);
-  const state = await api.mcp.syncTauri();
-  same(state.servers.map((server) => [server.name, server.tools.map((tool) => tool.name)]), [['Exa', ['search', 'crawl']]]);
-  same(agent.listTools().filter((tool) => tool.toolset === 'mcp/tt_abcdef').map((tool) => tool.name), ['mcp_tt_abcdef_search', 'mcp_tt_abcdef_crawl']);
+  const listed = await api.mcp.scanTauri();
+  same(listed.map(row => [row.name, row.enabled]), [['Exa', false], ['Other', false]]);
+  assert.doesNotMatch(JSON.stringify(listed), /secret-only-at-host/);
+  same(discovered, []); same(sent, []);
+  await api.mcp.connectTauri(exa.id);
+  same(discovered, [exa.id]); same(sent, []);
+  const set = 'tt_' + host.__ReaderIIModules.hashText(exa.id);
+  const search = 'mcp_' + set + '_search', crawl = 'mcp_' + set + '_crawl';
+  same(agent.listTools().filter(tool => tool.toolset === 'mcp/' + set).map(tool => tool.name), [search, crawl]);
+  agent.saveSettings({ approval: 'yolo' });
+  replies.push(call(search, { q: '夜梦' }), '好。', call(crawl, { url: 'https://a.b' }), '不确定。');
   const asked = [];
   const confirm = async (request) => { asked.push(request.name); return 'allow'; };
   const first = await agent.run('搜', { confirm });
   assert.equal(first.steps[0].ok, true, first.steps[0].summary);
   same(sent[0], { registrationId: 'abcdef12-0000-4000-8000-000000000000', nativeName: 'search', argumentsJson: '{"q":"夜梦"}' });
   const second = await agent.run('抓', { confirm });
-  same(asked, ['mcp_tt_abcdef_crawl'], 'TauriTavern 里 Allow 的免问，Ask 的要问');
+  same(asked, [search, crawl], '宿主仅提供需要用户逐次发起的测试调用');
   assert.equal(second.steps[0].ok, false);
   assert.match(second.steps[0].summary, /不确定这次调用有没有被执行/);
+  replies.push(call(search, { q: '再次查询' }), '结束。');
+  await agent.run('再搜', { confirm: async () => { delete exa.toolPermissions.search; return 'allow'; } });
+  assert.equal(sent.length, 2, '确认期间宿主撤回许可，不能发出 testCall');
+  exa.state = 'paused';
+  await api.mcp.scanTauri();
+  assert.ok(!agent.listTools().some(tool => tool.name === crawl));
+  await api.mcp.disconnectTauri(exa.id);
+  exa.state = 'active';
+  await api.mcp.scanTauri();
+  assert.ok(!api.mcp.list().some(row => row.enabled));
+  await Promise.all([api.mcp.connectTauri(other.id), api.mcp.disconnectTauri(other.id)]);
+  assert.ok(!api.mcp.list().some(row => row.enabled));
+  same((await api.mcp.syncTauri()).servers.map(server => server.name), ['Exa', 'Other']);
 });
 
 /* 一个假伴侣，挂在酒馆插件的地址上。 */

@@ -6,48 +6,46 @@
 
 只用 Node 标准库（Node 18 及以上），**不需要 `npm install`**。
 
-## 哪些环境能用
+## 下载
 
-| 环境 | 能不能用 | 怎么装 |
-|---|---|---|
-| 电脑上的原生酒馆 | 能 | 酒馆后端插件（下面的方法一） |
-| 手机上的原生酒馆（Termux） | 能，但不强求 | 同上；无头浏览器多半没有 |
-| 电脑上的 TauriTavern | 能 | TauriTavern 装不了酒馆后端插件：用独立运行（方法二） |
-| 手机上的 TauriTavern | 不能 | — |
+在夜梦助手「设置 → 后端伴侣 → 安装或卸载伴侣」点击「下载当前版本的伴侣 ZIP」，先全部解压。也可以下载[完整源码 ZIP](https://github.com/Adirm007/reader-II/archive/refs/heads/main.zip)，其中的 `companion` 就是同一个文件夹。只需要 Node.js 18 或更新版本。缺少 Node 时下载 [Node.js LTS](https://nodejs.org/en/download)。
 
-## 方法一：装成酒馆后端插件
+## 原生 SillyTavern（Windows、macOS、Linux 或 Termux）
 
-在酒馆的根目录（有 `config.yaml` 的那个目录）里：
+**Windows 双击安装**　在运行酒馆的电脑上解压 ZIP，双击 **Windows-SillyTavern.cmd**，按回车，选择酒馆根目录的 **config.yaml**。重启酒馆一次，安装完成。卸载时再双击这个文件，输入 **2**，选择同一份 config.yaml，重启酒馆。这两步也可以用下面的命令完成。
 
-```bash
-git clone https://github.com/Adirm007/reader-II plugins/reader-ii
-```
+1. 在**运行酒馆的设备**上，打开解压出的伴侣文件夹。在这个文件夹打开终端（Windows 文件夹地址栏输入 `powershell` 后按回车），执行：
 
-然后把 `config.yaml` 里的 `enableServerPlugins` 改成 `true`，重启酒馆。
+   ```sh
+   node setup.mjs install
+   ```
 
-Termux 上是同样的两步；一条命令的写法：
+2. 按提示粘贴酒馆根目录，也就是放着 `server.js` 和 `config.yaml` 的文件夹。例如 Termux 可以直接运行 `node setup.mjs install ~/SillyTavern`。
+3. 重启酒馆，回到助手设置点「检测伴侣」。以后开酒馆就开伴侣，关酒馆就停。安装器将所需文件复制到酒馆的 `plugins/reader-ii-companion/`，会将服务器插件开关 `enableServerPlugins` 设为 `true`。原生酒馆的伴侣地址留空即可。
 
-```bash
-cd ~/SillyTavern && git clone https://github.com/Adirm007/reader-II plugins/reader-ii && sed -i 's/^enableServerPlugins:.*/enableServerPlugins: true/' config.yaml
-```
+**卸载或更新**　在解压目录运行 `node setup.mjs uninstall`，或在酒馆根目录运行 `node plugins/reader-ii-companion/setup.mjs uninstall`，随后重启酒馆。安装器仅移除自己登记的文件。如果安装时替你打开过服务器插件，卸载时会在没有其他服务器插件的情况下恢复开关。更新时先卸载旧版本，再从新版 ZIP 安装。工作文件及放行记录保存在下文的数据目录，可继续沿用。
 
-也可以不克隆整个仓库，只把 `companion/` 这个目录拷成 `plugins/reader-ii-companion/`。
+## Windows 上的 TauriTavern
 
-酒馆启动时，控制台里会出现两行：
+1. 将解压出的伴侣目录放在长期保留的位置，例如“文档”。双击里面的 **Windows-Tauri.cmd**，按回车创建桌面快捷方式。酒馆已打开时可自动识别；否则会弹出窗口让你选择 `TauriTavern.exe`。
+2. 双击桌面的 **TauriTavern + Reader-II**。它启动酒馆和伴侣，酒馆已运行时就使用那个酒馆进程。设置里的地址留空，点「检测伴侣」即可。首次授权用伴侣控制台显示的带 `#key` 的管理页地址。
+3. 酒馆只最小化到托盘时，伴侣会继续工作。从托盘退出酒馆后，伴侣也会停止。只想提前停伴侣，可以在它的窗口按 Ctrl+C。平时从酒馆原图标打开，仍是原来的启动方式。此方法不登记登录启动项、系统服务或计划任务。
 
-```
-[Reader-II 伴侣] 已启动（酒馆后端插件），版本 …
-[Reader-II 伴侣] 管理页（在这台设备的浏览器里打开；放行「设备全权」要在这里点）：http://127.0.0.1:8790/#key=…
-```
+**完整卸载**　先在助手设置点「断开」，退出酒馆。再运行 **Windows-Tauri.cmd** 输入 **2**，它会移除专用快捷方式。也可以直接删除这个桌面快捷方式。删除先前下载的 ZIP 和专门解压的伴侣目录。最后按下文「数据放在哪」清理独立的数据目录；工作区里有需要的文件先备份。共用的 Node.js 与酒馆本身可继续使用。
 
-## 方法二：独立运行
+## macOS 或 Linux 上的 TauriTavern
 
-```bash
-node companion/standalone.mjs            # 默认端口 8790，只听本机
-node companion/standalone.mjs --port 8791
-```
+1. 把伴侣解压到会保留的位置。在这个文件夹打开终端，运行一次 `node setup-desktop.mjs install`。安装器会寻找酒馆，找不到时会请你选择或粘贴路径。也可直接传入路径，例如 macOS 的 `node setup-desktop.mjs install "/Applications/TauriTavern.app"` 或 Linux 的 `node setup-desktop.mjs install "$HOME/Applications/TauriTavern.AppImage"`。AppImage 需先在文件属性中允许执行。
+2. 先完全退出从原图标启动的酒馆。以后在 macOS 桌面双击 **TauriTavern + Reader-II.command**，或从 Linux 应用菜单打开 **TauriTavern + Reader-II**。它会一起启动酒馆和伴侣，在酒馆退出后停止伴侣。
+3. 保留启动器打开的终端。在助手设置里将伴侣地址留空，点「检测伴侣」。入口使用本机地址 `http://127.0.0.1:8790`。第一次授权请打开伴侣终端里带 `#key` 的管理页地址。
 
-然后在夜梦助手的「设置 → 后端伴侣」里，把「伴侣地址」填成 `http://127.0.0.1:8790`。
+**卸载**　在助手设置点「断开」，退出酒馆。在同一解压目录运行 `node setup-desktop.mjs uninstall` 即可移除入口。确认以后用不到时，可再删除 ZIP、专用解压目录，以及下文的数据目录（先备份工作文件）。
+
+## 临时独立运行与手机
+
+也可以在解压的伴侣目录运行 `node standalone.mjs`。终端显示的本机地址默认是 `http://127.0.0.1:8790`；端口被占用时，把实际显示的地址填入「更改连接地址」。Ctrl+C 可停止。
+
+手机上的 TauriTavern 没有可加载此插件的 Node 后端。日常玩卡和助手聊天可以跳过伴侣；Android 若使用 Termux 运行原生酒馆，可按原生安装步骤配置。用手机访问别人托管的酒馆时，服务器插件要在运行酒馆的设备上装，授权后操作的是那台设备。
 
 ## 放行
 
@@ -55,6 +53,8 @@ node companion/standalone.mjs --port 8791
 2. 「设置 → 后端伴侣」点「检测」，再点「申请放行」。面板上会出现一个 4 位**配对码**。
 3. 在**装着伴侣的那台设备**上，用浏览器打开控制台里打印的管理页地址（带 `#key=…` 的那个；同一个地址也写在数据目录的 `admin-url.txt` 里）。
 4. 核对管理页上的配对码、来源与面板上的一致，选一个期限：**放行 2 小时** / **放行到伴侣重启** / **长期放行**。
+
+不想授权时，在管理页点「拒绝」。已授权可在管理页点「撤销」，或在助手里点「断开」清除这台浏览器保存的令牌。清理管理页的本地记忆可在浏览器删除对应管理页地址的站点数据。
 
 之后助手在设备上的每一步，仍然按她自己的权限设置请你确认（命令算危险操作，默认每条都问）。管理页上可以随时撤销，也能看到最近做过的操作。
 
@@ -89,7 +89,7 @@ node companion/standalone.mjs --port 8791
 | `audit.log` | 操作记录 |
 | `workspace/` | 伴侣的工作目录（`dev:/@ws/`）：命令的默认目录、截图 |
 
-更新伴侣（`git pull`）不会动这个目录。这个目录本身不能经文件接口读写（`workspace/` 除外）。
+彻底移除伴侣时，先停止伴侣，备份仍需要的 `workspace/`，再移除这整个数据目录。Windows 默认位置为 `%USERPROFILE%\.reader-ii-companion`。这个目录本身不能经文件接口读写（`workspace/` 除外）。
 
 ## 提供的操作（给开发者）
 

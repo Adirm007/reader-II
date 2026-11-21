@@ -378,7 +378,7 @@ export function createCompanion(options = {}) {
   }
 
   /* serveApi：这个端口上是否也放操作接口（独立运行时是）。port 传 0 表示随便找一个空闲端口。 */
-  async function start({ serveApi = mode === 'standalone', port, host } = {}) {
+  async function start({ serveApi = mode === 'standalone', port, host, portFallback = true } = {}) {
     if (server) return { port: actualPort, adminUrl: adminUrl() };
     if (host) config.adminHost = host;
     const wanted = port === undefined ? config.adminPort : port;
@@ -386,7 +386,7 @@ export function createCompanion(options = {}) {
     for (let attempt = 0; ; attempt += 1) {
       try { await listen(server, wanted === 0 ? 0 : wanted + attempt, config.adminHost); break; }
       catch (error) {
-        if (error.code !== 'EADDRINUSE' || wanted === 0 || attempt >= 10) { server = null; throw error; }
+        if (!portFallback || error.code !== 'EADDRINUSE' || wanted === 0 || attempt >= 10) { server = null; throw error; }
       }
     }
     actualPort = server.address().port;

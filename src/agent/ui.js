@@ -15,7 +15,7 @@
   /* 设置页和目录使用相同的顺序。 */
   var SECTIONS = [
     ['ra-reader-card', '这张卡'], ['ra-placement-card', '正文提示词位置'], ['ra-agent-card', '助手'], ['ra-tools-card', '工具调用'], ['ra-rules-card', '权限规则'],
-    ['ra-memory-card', '记忆'], ['ra-connections-card', '模型连接'], ['ra-model-card', '主模型'], ['ra-delegation-card', '子代理'], ['ra-media-card', '媒体工具'], ['ra-conn-card', '插件对接'], ['ra-net-card', '联网'],
+    ['ra-memory-card', '记忆'], ['ra-connections-card', '模型连接'], ['ra-model-card', '主模型'], ['ra-delegation-card', '子代理'], ['ra-media-card', '媒体工具'], ['ra-conn-card', '插件对接'], ['ra-mcp-card', 'MCP 工具服务'], ['ra-net-card', '联网'],
     ['ra-comp-card', '后端伴侣'], ['ra-upd-card', '版本更新'], ['ra-runs-card', '改动记录']
   ];
   var TOOL_MODE = { native: '原生调用', text: '文本协议', none: '不可用' };
@@ -274,7 +274,7 @@
         var node = append('<h4>' + title + (device ? '（在你的设备上）' : '') + '</h4><div>' + esc(request.description || request.name) + '</div>'
           + '<pre>' + esc(JSON.stringify(request.args, null, 1)) + '</pre>'
           + '<div class="ra-row"><button type="button" class="ra-btn is-main" data-answer="allow">允许</button>'
-          + (danger ? '' : '<button type="button" class="ra-btn" data-answer="always">' + esc(request.alwaysLabel || '本次对话都允许这个工具') + '</button>')
+          + (danger || request.confirmEach ? '' : '<button type="button" class="ra-btn" data-answer="always">' + esc(request.alwaysLabel || '本次对话都允许这个工具') + '</button>')
           + '<button type="button" class="ra-btn is-bad" data-answer="deny">拒绝</button></div>', 'ra-confirm' + (danger ? ' is-danger' : ''));
         var done = false;
         var finish = function (answer) {
@@ -788,11 +788,6 @@
     }
 
     function agentCardHtml(a) {
-      var sources = agent.listPlotSources();
-      // Preserve a chosen source after an imported connector has been removed.
-      if (a.plotSource && a.plotSource !== 'auto' && !sources.some(function (item) { return item.id === a.plotSource; })) {
-        sources.push({ id: a.plotSource, title: a.plotSource + '（未安装）' });
-      }
       var persona = agent.personaContext();
       return card('ra-agent-card', '助手', group('权限')
         + '<div class="ra-form">'
@@ -803,13 +798,15 @@
         + '<div class="ra-form"><label for="ra-persona-prompt">夜梦人格提示词 · ' + esc(persona.name) + '</label>'
         + '<textarea id="ra-persona-prompt" data-s="personaPrompt" data-persona-key="' + esc(persona.key) + '" rows="7">' + esc(persona.override || persona.defaultPrompt) + '</textarea>'
         + '<p class="ra-note">修改后用于该人格的助手对话和正文人设。清空后保存可恢复人格原文。</p>'
+        + '<label for="ra-appearance-prompt">夜梦当前外貌提示词</label>'
+        + '<textarea id="ra-appearance-prompt" data-s="appearancePrompt" data-prompt-key="' + esc(persona.appearance.key) + '" rows="4">' + esc(persona.appearance.prompt) + '</textarea>'
+        + '<p class="ra-note">' + (persona.id === 'custom' ? '这份外貌随当前自定义人格保存。' : '这份外貌随大厅当前的主题和装扮保存，换装后会切换。')
+        + '可用自己的话写发型、衣服等特征。保存后用于助手聊天、自拍和正文；清空后保存可恢复原貌。</p>'
         + '<label for="ra-assistant-system-prompt">助手专用系统提示词</label>'
         + '<textarea id="ra-assistant-system-prompt" data-s="a.assistantSystemPrompt" rows="4">' + esc(a.assistantSystemPrompt) + '</textarea>'
         + '<p class="ra-note">所有人格共用，只随助手对话发送。可在这里设定助手的角色、措辞和回答方式。</p></div>'
         + switchField('a.plotContext', a.plotContext, '让助手了解当前剧情', '仅在助手对话时读取所选插件已有的剧情记忆。关闭或不选来源时跳过。')
-        + '<div class="ra-form"><label for="ra-plot-source">剧情记忆来源</label><select id="ra-plot-source" data-s="a.plotSource">'
-        + option('', '不选择（关闭）', a.plotSource) + option('auto', '自动使用首个有记录的插件', a.plotSource)
-        + sources.map(function (item) { return option(esc(item.id), esc(item.title), a.plotSource); }).join('') + '</select></div>'
+        + connectorUi.plotHtml(a.plotSources)
         + switchField('a.lite', a.lite, '轻聊', '不带任何工具，只聊天')
         + switchField('a.recall', a.recall, '回答前自动带入相关记忆')
         + group('生成参数')
@@ -941,24 +938,7 @@
         + '</div></details></div>');
     }
 
-    /* 乙组的 MCP 服务器放进 #ra-mcp（data-slot="mcp"）。 */
-    function connectorsCardHtml() {
-      var custom = agent.getSettings().connectors || [];
-      var active = agent.listConnectors();
-      var activeIds = active.map(function (item) { return item.id; });
-      var builtin = active.filter(function (item) { return !item.custom; }).map(function (item) { return '<span class="ra-badge" title="' + esc(item.summary || '') + '">' + esc(item.title) + '</span>'; }).join('');
-      var rows = custom.map(function (manifest) {
-        return '<div class="ra-item" data-conn="' + esc(manifest.id) + '"><div class="ra-item-main"><b>' + esc(manifest.title || manifest.id) + '</b>'
-          + '<p class="ra-note">' + esc(manifest.id) + ' · ' + (activeIds.indexOf(manifest.id) >= 0 ? '已探测到' : '没探测到（插件没装或还没加载）') + '</p></div>'
-          + '<span class="ra-row"><button type="button" class="ra-btn is-small" data-act="conn-view">查看</button><button type="button" class="ra-btn is-small is-bad" data-act="conn-del">删除</button></span></div>';
-      }).join('');
-      return card('ra-conn-card', '插件对接', '<p class="ra-note">已探测到的插件：</p><div class="ra-row">' + (builtin || '<span class="ra-note">没有</span>') + '</div>'
-        + '<h4 class="ra-sub">自定义对接</h4><p class="ra-note">声明式的 connector.json，格式见知识 connector-authoring，也可以让助手替你写。</p>'
-        + (rows || '<p class="ra-note">还没有。</p>')
-        + '<textarea id="ra-conn-json" class="is-code" spellcheck="false" placeholder="{&quot;id&quot;: &quot;myplugin&quot;, &quot;title&quot;: &quot;我的插件&quot;, &quot;detect&quot;: &quot;window.MyPlugin&quot;, &quot;tools&quot;: […]}" style="margin-top:8px"></textarea>'
-        + '<div class="ra-row" style="margin-top:8px"><button type="button" class="ra-btn is-small" data-act="conn-save">添加 / 按 id 更新</button></div>'
-        + '<div id="ra-mcp" data-slot="mcp">' + (netUi ? netUi.mcpHtml() : '') + '</div>', '立即生效');
-    }
+    var connectorUi = modules.createConnectorUi(agent, { $: $, esc: esc, icon: icon, card: card, gotoSection: gotoSection, setDirty: setDirty });
 
     /* 联网、MCP、后端伴侣三块设置在 ui-net.js；这里只留插槽与分发。 */
     var netUi = deps && typeof deps.netUi === 'function' ? deps.netUi({
@@ -970,26 +950,6 @@
       try {
         if (action === 'rule-add') { $('#ra-rules').insertAdjacentHTML('beforeend', ruleRowHtml({})); setDirty(true); return; }
         if (action === 'rule-del') { actor.closest('[data-rule]').remove(); setDirty(true); return; }
-        var list = (agent.getSettings().connectors || []).slice();
-        var row = actor.closest('[data-conn]');
-        var id = row ? row.getAttribute('data-conn') : '';
-        if (action === 'conn-view') {
-          var found = list.filter(function (item) { return item.id === id; })[0];
-          if (found) $('#ra-conn-json').value = JSON.stringify(found, null, 2);
-          return;
-        }
-        if (action === 'conn-del') {
-          if (actor.getAttribute('data-armed') !== '1') { actor.setAttribute('data-armed', '1'); actor.textContent = '再点一次删除'; return; }
-          agent.saveSettings({ connectors: list.filter(function (item) { return item.id !== id; }) });
-          toast('已删除对接 ' + id);
-        } else if (action === 'conn-save') {
-          var manifest;
-          try { manifest = JSON.parse($('#ra-conn-json').value); } catch (error) { throw new Error('对接描述不是合法的 JSON：' + error.message); }
-          var checked = agent.validateConnector(manifest);
-          agent.saveSettings({ connectors: list.filter(function (item) { return item.id !== checked.id; }).concat([manifest]) });
-          toast('已保存对接「' + checked.title + '」，' + checked.tools + ' 个工具' + (checked.detected ? '' : '；暂时没探测到这个插件'));
-        }
-        replaceCard('ra-conn-card', connectorsCardHtml());
       } catch (error) {
         toast(message(error), true);
       }
@@ -1154,6 +1114,7 @@
       var a = agent.getSettings();
       var m = memory.getSettings();
       var scroll = pane.scrollTop;
+      connectorUi.scan();
       pane.innerHTML = readerCardHtml()
         + placementCardHtml()
         + agentCardHtml(a)
@@ -1164,7 +1125,8 @@
         + modelCardHtml()
         + modelUi.delegationHtml()
         + modelUi.mediaHtml()
-        + connectorsCardHtml()
+        + connectorUi.cardHtml()
+        + (netUi ? card('ra-mcp-card', 'MCP 工具服务', '<div id="ra-mcp">' + netUi.mcpHtml() + '</div>', '立即生效') : '')
         + (netUi ? netUi.cardsHtml() : '')
         + updatesCardHtml()
         + card('ra-runs-card', '改动记录', '<p class="ra-note">助手每一轮改过的东西都留有改动前的样子，可以按轮撤销。之后又被别处改过的不会被强行覆盖。</p><div id="ra-runs"></div>');
@@ -1173,7 +1135,9 @@
       modelUi.syncMode();
       renderToc();
       renderRuns();
+      connectorUi.discover(false);
       resolveDisplayedModel();
+      if (netUi) netUi.scanMcp();
     }
 
     function resolveDisplayedModel() {
@@ -1216,6 +1180,14 @@
           else prompts[promptKey] = value.trim();
           agentPatch.personaPrompts = prompts;
         }
+        else if (key === 'appearancePrompt' && value !== input.defaultValue) {
+          var appearance = agent.personaContext().appearance;
+          var appearanceKey = input.getAttribute('data-prompt-key');
+          var appearances = agent.getSettings().appearancePrompts;
+          if (!value.trim() || (appearanceKey === appearance.key && value.trim() === appearance.defaultPrompt)) delete appearances[appearanceKey];
+          else appearances[appearanceKey] = value.trim();
+          agentPatch.appearancePrompts = appearances;
+        }
         else if (key.indexOf('m.') === 0) memoryPatch[key.slice(2)] = value;
         else if (key.indexOf('p.') === 0) {
           var parts = key.split('.');
@@ -1228,6 +1200,7 @@
         }
       });
       if (invalid) { toast(invalid[1], true); invalid[0].focus(); return; }
+      agentPatch.plotSources = connectorUi.selection();
       try { agentPatch.subagents = modelUi.readDelegation(); }
       catch (error) { toast(message(error), true); return; }
       try { agent.saveModelSettings(modelPatch, $('#ra-model-fields').dataset.profileKey); }
@@ -1342,7 +1315,8 @@
         else if (action === 'open-panel') openSemanticPanel();
         else if (action === 'undo-run') undoRun(actor);
         else if (action.indexOf('mem-') === 0) memoryAction(action, actor);
-        else if (action.indexOf('rule-') === 0 || action.indexOf('conn-') === 0) settingsAction(action, actor);
+        else if (action.indexOf('rule-') === 0) settingsAction(action, actor);
+        else if (action.indexOf('conn-') === 0) connectorUi.action(action, actor);
         else if (action.indexOf('upd-') === 0) updatesAction(action);
         else if (netUi && /^(?:net|mcp|comp)-/.test(action)) netUi.action(action, actor, event);
       });
@@ -1351,8 +1325,7 @@
         modelUi.change(event.target);
         if (event.target.closest('#ra-model-fields')) $('#ra-model-fields').dataset.edited = '1';
         if (event.target.closest && event.target.closest('[data-s],[data-r]')) setDirty(true);
-        if (event.target.id === 'ra-plot-source') $('[data-s="a.plotContext"]').checked = !!event.target.value;
-        if (event.target.matches('[data-s="a.plotContext"]') && event.target.checked && !$('#ra-plot-source').value) $('#ra-plot-source').value = 'auto';
+        connectorUi.change(event.target);
         var placementSection = event.target.closest && event.target.closest('[data-placement-section]');
         if (placementSection) updatePlacementFields(placementSection);
         if (netUi && netUi.change(event)) return;
@@ -1361,6 +1334,7 @@
         }
       });
       overlay.addEventListener('input', function (event) {
+        if (netUi && event.target.id === 'ra-net-token') { netUi.tokenInput(event); return; }
         if (event.target.id === 'ra-text') { fitInput(); return; }
         modelUi.input(event.target);
         if (event.target.closest('#ra-model-fields')) $('#ra-model-fields').dataset.edited = '1';

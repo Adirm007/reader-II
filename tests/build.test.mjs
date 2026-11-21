@@ -23,7 +23,8 @@ test('酒馆入口和主包使用同一发布版本作为缓存键', () => {
     const appended = [];
     const window = { requestIdleCallback(callback) { callback(); } };
     const document = {
-      querySelector: () => null, createElement: () => ({ dataset: {} }),
+      getElementById: () => null, querySelector: () => null,
+      createElement: () => ({ dataset: {}, addEventListener() {} }),
       head: { appendChild: node => appended.push(node) },
     };
     vm.runInNewContext(script.replaceAll('import.meta.url', JSON.stringify(entry.href)), { URL, window, document });

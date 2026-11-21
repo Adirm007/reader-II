@@ -71,9 +71,13 @@ async function main() {
   if (params.has('unbound')) {
     const answer = '这是无卡助手的回复。';
     const marker = 'reader-smoke-unbound-reload';
-    await step('从扩展设置进入无卡助手', async () => {
-      (await until(() => $('#reader-ii-settings-entry'), 'Reader-II 入口')).click();
+    await step('从魔法棒菜单进入无卡助手', async () => {
+      const menu = await until(() => $('#reader-ii-menu'), 'Reader-II 入口');
+      delete window.ReaderII;
+      delete window.ReaderAgent;
+      menu.click();
       await until(() => $('#reader-agent-overlay')?.open && $('#ra-text'), '无卡助手');
+      assert(window.ReaderII.agent === agent && window.ReaderAgent === agent, '魔法棒入口没有恢复已加载的助手');
       assert(!window.ReaderII.lobby.isEnabled(), '无卡打开助手触发了读者大厅');
     });
     if (!sessionStorage.getItem(marker)) {
@@ -114,6 +118,7 @@ async function main() {
   await step('扩展菜单入口与 /yume 命令', async () => {
     const item = await until(() => $('#reader-ii-menu'), '菜单入口');
     assert(item.matches('#extensionsMenu > div.list-group-item') && item.firstElementChild.matches('.extensionsMenuExtensionButton'), '扩展菜单条目必须匹配酒馆原生菜单与图标样式');
+    assert(!$('#extensions_settings2 [id^="reader-ii"], #extensions_settings [id^="reader-ii"]'), '扩展设置页出现了多余的 Reader-II 入口');
     assert(mock.slash.some((command) => command.name === 'yume'), '没有注册 /yume');
   });
 
@@ -295,7 +300,7 @@ async function main() {
     await until(() => ($('#reader-agent-overlay [data-pane="memory"] .ra-scroll')?.children.length || 0) > 0, '记忆页内容');
   });
 
-  await step('设置页：清空剧情来源后保持关闭，人格与助手共用提示词分别生效', async () => {
+  await step('设置页：手动不选剧情来源可以保存，总开关与提示词独立生效', async () => {
     const previous = agent.getSettings();
     const persona = agent.personaContext();
     const field = (key) => $('#reader-agent-overlay [data-s="' + key + '"]');
@@ -303,19 +308,19 @@ async function main() {
     const systemText = '冒烟助手共用：谈话结束时道声晚安。';
     try {
       $('#reader-agent-overlay [data-tab="settings"]').click();
-      const source = await until(() => field('a.plotSource'), '剧情来源下拉框');
+      const source = await until(() => $('#ra-plot-mode'), '剧情来源设置');
       assert(source.value === 'auto' && field('a.plotContext').checked, '新设置应默认开启自动读取');
-      assert(['baibai', 'shujuku', 'lwb', 'worldengine', ''].every((id) => [...source.options].some((opt) => opt.value === id)), '剧情来源选项不全');
-      source.value = '';
+      assert(['baibai', 'shujuku', 'lwb', 'worldengine'].every((id) => $('#ra-plot-options [value="' + id + '"]')), '剧情来源选项不全');
+      source.value = 'manual';
       source.dispatchEvent(new Event('change', { bubbles: true }));
-      assert(!field('a.plotContext').checked, '选择不选后开关未关闭');
+      assert(!$('#ra-plot-options').hidden && field('a.plotContext').checked, '手动模式未显示或意外切换了总开关');
       field('personaPrompt').value = personaText;
       field('a.assistantSystemPrompt').value = systemText;
       $('#reader-agent-overlay [data-act="save-settings"]').click();
       agent.close();
       agent.open('settings');
       await until(() => field('personaPrompt'), '重开助手设置');
-      assert(field('a.plotSource').value === '' && !field('a.plotContext').checked, '重新打开后剧情开关或来源有误');
+      assert($('#ra-plot-mode').value === 'manual' && field('a.plotContext').checked && agent.getSettings().plotSources.length === 0, '重新打开后剧情开关或来源有误');
       assert(field('personaPrompt').value === personaText && field('a.assistantSystemPrompt').value === systemText, '重新打开后丢失提示词');
 
       for (const id of [persona.id, persona.id === 'genki' ? 'reader' : 'genki']) {
@@ -328,6 +333,59 @@ async function main() {
       }
     } finally {
       agent.saveSettings(previous);
+      agent.close();
+      agent.open('memory');
+    }
+  });
+
+  await step('插件：读取作者文件、添加摘要函数、重新扫描并一起使用两份剧情记忆', async () => {
+    const previous = agent.getSettings();
+    window.SmokeNotes = { first: () => '灯塔改用蓝光', second: () => '学徒收到回信' };
+    try {
+      agent.open('settings');
+      const mode = await until(() => $('#ra-plot-mode'), '选择剧情来源');
+      await until(() => /broken-notes.*id/.test($('#ra-conn-problems').textContent), '首次扫描指出插件和出错字段');
+      mode.value = 'manual';
+      mode.dispatchEvent(new Event('change', { bubbles: true }));
+      const draft = $('#ra-persona-prompt');
+      draft.value = '未保存的人格草稿';
+      $('#ra-conn-json').value = '未提交的另一个对接草稿';
+      const manifest = { id: 'smoke_notes', title: '灯塔记录', detect: 'SmokeNotes.first', brief: 'SmokeNotes.first' };
+      const files = new DataTransfer();
+      files.items.add(new File([JSON.stringify(manifest)], 'connector.json', { type: 'application/json' }));
+      $('#ra-conn-file').files = files.files;
+      $('#ra-conn-file').dispatchEvent(new Event('change', { bubbles: true }));
+      const first = await until(() => $('[data-plot-source][value="smoke_notes"]'), '从 JSON 导入摘要来源');
+      first.click();
+      $('[data-act="conn-goto-source"]').click();
+      assert($('#ra-conn-source').open, '从剧情设置未能打开添加来源');
+      $('#ra-source-name').value = '学徒笔记';
+      $('#ra-source-method').value = 'window.SmokeNotes.second';
+      $('[data-act="conn-source-add"]').click();
+      const id = agent.scanConnectors().find((row) => row.title === '学徒笔记').id;
+      const second = '[data-plot-source][value="' + id + '"]';
+      $(second).click();
+      $('[data-act="conn-scan"]').click();
+      await until(() => /扫描完成/.test($('#ra-conn-note').textContent), '重新扫描');
+      assert(/broken-notes.*id/.test($('#ra-conn-problems').textContent), '重新扫描后丢失无效对接的原因');
+      const toggle = '[data-conn="smoke_notes"] [data-act="conn-toggle"]';
+      $(toggle).click();
+      assert(/未接入|停用/.test($('[data-plot-source][value="smoke_notes"]').closest('label').textContent), '已停用来源未标注状态');
+      $('[data-plot-source][value="smoke_notes"]').click();
+      $('[data-plot-connector="smoke_notes"] [data-act="conn-toggle"]').click();
+      assert($('[data-plot-source][value="smoke_notes"]').checked && $(second).checked, '接入并选用应直接勾选该来源并保留其他多选');
+      assert(draft === $('#ra-persona-prompt') && draft.value === '未保存的人格草稿' && $('#ra-conn-json').value === '未提交的另一个对接草稿', '插件操作覆盖了其他草稿');
+      $('#reader-agent-overlay [data-act="save-settings"]').click();
+      agent.close();
+      agent.open('settings');
+      assert($('[data-plot-source][value="smoke_notes"]').checked && $(second).checked, '重开丢失多选');
+      const before = mock.llmCalls.length;
+      await agent.run('你记得哪些事？', { lite: true, remember: false });
+      const system = mock.llmCalls[before][0].content;
+      assert(system.includes('灯塔改用蓝光') && system.includes('学徒收到回信'), '模型没有同时收到两份剧情');
+    } finally {
+      agent.saveSettings(previous);
+      delete window.SmokeNotes;
       agent.close();
       agent.open('memory');
     }
@@ -409,9 +467,72 @@ async function main() {
     return cached.items[0].name;
   });
 
+  await step('GitHub：直达只读或推送授权页，粘贴后验证，错误令牌保留旧设置', async () => {
+    $('#reader-agent-overlay [data-tab="settings"]').click();
+    const card = await until(() => $('#ra-net-card'), '联网设置');
+    const links = Array.from(card.querySelectorAll('a'), (link) => new URL(link.href));
+    assert(links.length === 2 && links.every((url) => url.origin === 'https://github.com' && url.pathname === '/settings/personal-access-tokens/new'), '未直达细粒度令牌创建页');
+    assert(links.map((url) => url.searchParams.get('contents')).join(',') === 'read,write', '未按用途预填仓库权限');
+    const paste = (value) => {
+      const input = $('#ra-net-token');
+      input.value = value;
+      input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertFromPaste' }));
+    };
+    const token = () => JSON.parse(localStorage.getItem('reader_ii_secrets_v1') || '{}')['github.token'];
+    const hosts = $('#ra-net-hosts');
+    hosts.value += '\nsmoke.example.com';
+    paste('smoke-valid-token');
+    await until(() => /已验证并保存.*smoke-reader/.test($('#ra-github-note')?.textContent || ''), '显示 GitHub 账号');
+    assert(token() === 'smoke-valid-token' && $('#ra-net-token').value === '', '验证成功后没有保存或清空输入框');
+    paste('smoke-invalid-token');
+    await until(() => $('#ra-github-note')?.classList.contains('is-bad'), '无效令牌提示');
+    $('#ra-net-card [data-act="net-save"]').click();
+    assert(token() === 'smoke-valid-token', '无效令牌替换了旧令牌');
+    assert(agent.getSettings().web.allowHosts.includes('smoke.example.com'), '验证令牌时丢掉了待保存的网站设置');
+    assert(!JSON.stringify(window.SillyTavern.getContext().extensionSettings).includes('smoke-valid-token'), 'GitHub 令牌进了酒馆设置');
+    const clear = $('#ra-net-card [data-act="net-token-clear"]');
+    clear.click(); clear.click();
+    assert(!token(), '本机令牌未清除');
+  });
+
+  await step('TauriTavern MCP：设置页自动列出服务，选中一项后才读取工具', async () => {
+    const discovered = [];
+    let offline = true;
+    const id = '12345678-0000-4000-8000-000000000abc';
+    window.__TAURITAVERN__ = { api: { mcp: { servers: {
+      list: async () => {
+        if (offline) throw new Error('酒馆服务暂时离线');
+        return { servers: [{ id, displayName: '天气工具', state: 'active', toolPermissions: { forecast: 'ask' } }] };
+      },
+      discover: async key => {
+        discovered.push(key);
+        return { tools: [{ nativeName: 'forecast', permission: 'ask', inputSchema: { type: 'object' } }] };
+      },
+    }, tools: { testCall: () => { throw new Error('设置页不应执行工具'); } } } } };
+    try {
+      $('#reader-agent-overlay [data-tab="chat"]').click();
+      $('#reader-agent-overlay [data-tab="settings"]').click();
+      const row = '#ra-mcp [data-mcp="' + id + '"]';
+      await until(() => $('#ra-mcp-tt')?.textContent.includes('酒馆服务暂时离线'), '自动扫描显示宿主读取失败原因');
+      offline = false;
+      $('#ra-mcp-tt [data-act="mcp-tt-scan"]').click();
+      const connect = await until(() => $(row + ' [data-act="mcp-tt-connect"]'), '重新读取后发现天气工具');
+      assert(!$('#ra-mcp-tt').textContent.includes('读取失败'), '重试成功后仍然提示读取失败');
+      assert(discovered.length === 0 && !$('#ra-mcp-manual').open, '扫描时自动接入服务或打开手动配置');
+      connect.click();
+      const disable = await until(() => $(row + ' [data-act="mcp-tt-remove"]'), '完成接入');
+      assert(discovered.join() === id && /forecast/.test($(row).textContent), '没有显示所选服务的工具');
+      disable.click();
+      await until(() => !$(row + ' [data-act="mcp-tt-remove"]'), '助手停用工具箱');
+      assert($(row + ' [data-act="mcp-tt-connect"]'), '停用影响了宿主的登记');
+    } finally { delete window.__TAURITAVERN__; }
+  });
+
   await step('MCP：粘贴 JSON 添加服务器 → 工具箱 → 调用 → 删除（密钥不进酒馆设置）', async () => {
     $('#reader-agent-overlay [data-tab="settings"]').click();
     const box = await until(() => $('#ra-mcp-json'), 'MCP 输入框');
+    $('#ra-mcp-manual summary').click();
+    assert($('#ra-mcp-manual').open && box.offsetHeight > 0, '手动 MCP 导入没有展开');
     assert($('#ra-net-card') && $('#ra-comp-card'), '设置页缺少「联网」或「后端伴侣」卡');
     assert(!/undefined|\[object /.test($('#reader-agent-overlay [data-pane="settings"]').textContent), '设置页文字里出现了 undefined');
     box.value = JSON.stringify({ mcpServers: { smoke: { url: 'https://mcp.smoke.test/mcp', headers: { Authorization: 'Bearer s3cret-smoke' } } } });
@@ -440,6 +561,11 @@ async function main() {
 
   await step('后端伴侣：没装时如实显示；配对放行；设备上的确认只认真人点击；断开', async () => {
     $('#reader-agent-overlay [data-tab="settings"]').click();
+    const download = await until(() => $('#ra-comp-card a[download="reader-ii-companion.zip"]'), '伴侣安装包下载');
+    const packageResponse = await fetch(download.href);
+    const bytes = new Uint8Array(await packageResponse.arrayBuffer());
+    assert(packageResponse.ok && bytes[0] === 80 && bytes[1] === 75, '安装包不是可下载的 ZIP');
+    assert($('#ra-comp-card').textContent.includes('setup.mjs uninstall'), '缺少原生卸载命令');
     (await until(() => $('#reader-agent-overlay [data-act="comp-check"]'), '检测按钮')).click();
     await until(() => /没有检测到后端伴侣/.test($('#ra-comp-card')?.textContent || ''), '未检测到的提示');
     assert(/没有连接后端伴侣/.test((await vfs.list('dev:/', {})).items[0].name), 'dev:/ 没有给出说明');

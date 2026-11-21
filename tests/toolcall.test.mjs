@@ -489,6 +489,57 @@ test('文本补全轻聊只发送所选人格和助手专用系统指令；适�
   }
 });
 
+test('自拍工具与助手同读当前外貌；换主题、换装和同名自定义人格均独立', async () => {
+  const { agent, ctx, llm, run, log } = makeHost({ backend: (_body, round) => round === 1
+    ? reply({ tool_calls: [nativeCall('generate_image', { prompt: '在窗前自拍', include_self: true })] }) : reply({ content: '拍好了。' }) });
+  const vars = ctx.chatMetadata.variables;
+  vars.dream_visual_theme = 'ink';
+  vars.dream_appearance = 'victoria2';
+  const outfit = agent.personaContext().appearance;
+  assert.match(outfit.defaultPrompt, /短旗袍/);
+  vars.dream_appearance = 'victoria1';
+  assert.equal(agent.personaContext().appearance.key, outfit.key);
+  agent.saveSettings({ appearancePrompts: { [outfit.key]: '换上蓝披肩', 'custom:a': '戴眼镜' } });
+  llm.getTaskConnection = () => ({ configured: true });
+  llm.generateMedia = async (_kind, prompt) => {
+    assert.match(prompt, /在窗前自拍[\s\S]*换上蓝披肩/);
+    return { images: [{ url: 'data:image/png;base64,AQIDBA==' }] };
+  };
+  assert.equal((await run('发我自拍')).images.length, 1);
+  assert.ok(log.backend.every(entry => entry.body.messages[0].content.includes('换上蓝披肩')));
+  vars.dream_visual_theme = 'cafe';
+  assert.match(agent.personaContext().appearance.prompt, /维多利亚式/);
+  vars.dream_appearance = 'white_hoodie';
+  assert.match(agent.personaContext().appearance.prompt, /双马尾/);
+  vars.dream_visual_theme = 'summer';
+  assert.match(agent.personaContext().appearance.prompt, /连体泳衣/);
+  vars.dream_persona = 'custom';
+  vars.dream_custom_persona = JSON.stringify({ id: 'a', name: '同名', appearance: '短卷发' });
+  assert.equal(agent.personaContext().appearance.prompt, '戴眼镜');
+  vars.dream_custom_persona = { id: 'b', name: '同名', appearance: '紫色长发' };
+  assert.equal(agent.personaContext().appearance.prompt, '紫色长发');
+  agent.saveSettings({ appearancePrompts: {} });
+  vars.dream_custom_persona = { id: 'a', name: '同名', appearance: '短卷发' };
+  assert.equal(agent.personaContext().appearance.prompt, '短卷发');
+});
+
+test('纯生图模型收到本人的自拍外貌，其他主体仍使用用户原话', async () => {
+  const { agent, run, llm } = makeHost();
+  agent.saveModelSettings({ imageMode: 'generation' });
+  const appearance = agent.personaContext().appearance.prompt;
+  let prompt;
+  llm.chatReply = async options => {
+    prompt = options.messages.at(-1).content;
+    return { images: [{ url: 'data:image/png;base64,AQIDBA==' }] };
+  };
+  await run('给我发一张自拍');
+  assert.ok(prompt.includes(appearance));
+  for (const other of ['画一张猫的自拍', '在山顶画一场流星雨']) {
+    await run(other);
+    assert.equal(prompt, other);
+  }
+});
+
 test('原生函数调用：tools 随请求声明，调用取自 tool_calls，结果用 role: tool 交还；读 → 改（确认）→ 回答', async () => {
   const asked = [];
   const { run, log, worldbooks } = makeHost({

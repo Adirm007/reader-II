@@ -18,7 +18,18 @@ const MEMORY_ROWS = "h+='<div class=\"dlb-row\" data-dlb=\"eggagentset\"><div cl
 const GENERIC_HELPERS = [
   "function getReaderHostWindow(){return window.parent;}",
   "function getReaderCoreApi(){var a=window.ReaderCore||(window.parent&&window.parent.ReaderCore);if(!a||!a.__reader_core_api)throw new Error('Reader-II主系统尚未加载');return a;}",
-  "function dreamOpenAgent(tab){try{var agent=window.parent&&window.parent.ReaderAgent;if(!agent||typeof agent.open!=='function')throw new Error('夜梦助手尚未就绪');try{closeDreamLobby();}catch(e0){}agent.open(tab||'chat');return true;}catch(error){try{pToast(error&&error.message?error.message:String(error));}catch(e1){showToast(String(error&&error.message||error));}return false;}}",
+  `async function dreamOpenAgent(tab){
+    try {
+      var api = await getReaderCoreApi().loadReaderII();
+      if (!window.__readerControllerAlive) return false;
+      api.agent.open(tab || 'chat');
+      closeDreamLobby();
+      return true;
+    } catch (error) {
+      if (window.__readerControllerAlive) pToast('夜梦助手打开失败：' + (error && error.message || error));
+      return false;
+    }
+  }`,
   "function dreamOpenPanel(){try{try{closeDreamLobby();}catch(e0){}Promise.resolve(getReaderCoreApi().openPanel()).catch(function(error){showToast(error&&error.message?error.message:String(error));});return true;}catch(error){showToast(error&&error.message?error.message:String(error));return false;}}",
 ].join('\n');
 

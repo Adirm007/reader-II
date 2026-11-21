@@ -94,7 +94,7 @@ test('JSON：四个条目，字段与 v3.3 的世界书相同；能往返；EJS 
 test('核心：取上游第 1～1714 行；不读 MVU 路径、不带黑之作家与书海；带上主题地点、十二套形象、发言限制、称呼', () => {
   assert.equal(built.upstreamLines, 1714);
   assert.equal(built.upstreamVersion, '2026.11.09.1');
-  assert.ok(core.startsWith('<%_ /* READER_II_WORLDBOOK core vtest · 上游 reader-core v2026.11.09.1 */ _%>\n'));
+  assert.ok(core.startsWith('<%_ /* READER_II_WORLDBOOK core vtest · 上游 reader-core v2026.11.09.1 */_%>\n'));
   for (const token of ['getMessageVar(', 'setMessageVar(', 'dream_black_author_prompt', '_dream_black', 'DREAM_WORLDBOOK', '"op":', '99999', '书海']) {
     assert.ok(!core.includes(token), token);
   }

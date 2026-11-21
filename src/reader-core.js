@@ -705,21 +705,28 @@
     return api && api.ready === true && api.agent && typeof api.agent.open === 'function' ? api : null;
   }
 
-  function openAgent(tab) {
+  async function loadReaderII() {
     var api = currentReaderII();
-    if (!api) {
-      if (env.toastr && typeof env.toastr.warning === 'function') env.toastr.warning('夜梦助手还没有就绪，请稍后再试', 'Reader-II');
-      return Promise.resolve(false);
+    if (api) return api;
+    if (typeof modules.bootReaderII !== 'function') throw new Error('扩展缺少夜梦助手启动模块，请更新 Reader-II 后刷新酒馆');
+    return modules.bootReaderII();
+  }
+
+  async function openAgent(tab) {
+    try {
+      var api = await loadReaderII();
+      api.agent.open(tab || 'chat');
+      return true;
+    } catch (error) {
+      var message = '夜梦助手打开失败：' + (error && error.message || error);
+      if (env.toastr && typeof env.toastr.warning === 'function') env.toastr.warning(message, 'Reader-II');
+      env.console.warn('[ReaderCore]', message);
+      return false;
     }
-    api.agent.open(tab || 'chat');
-    return Promise.resolve(true);
   }
 
   API.getReaderII = currentReaderII;
-  API.loadReaderII = function () {
-    var api = currentReaderII();
-    return api ? Promise.resolve(api) : Promise.reject(new Error('夜梦助手还没有就绪'));
-  };
+  API.loadReaderII = loadReaderII;
   API.openAgent = openAgent;
   API.isEnabled = isEnabled;
   API.setEnabled = setEnabled;

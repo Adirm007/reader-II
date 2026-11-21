@@ -278,6 +278,16 @@ test('启动：全局对象、旧名与挂载点', () => {
   same(core.sort(), ['capabilities', 'delegate_task', 'edit', 'grep', 'ls', 'read', 'remove', 'run_js', 'skill', 'todo', 'toolbox', 'write']);
 });
 
+test('切换聊天还原宿主全局后，重叠的打开请求复用原助手实例', async () => {
+  const { host, api } = makeHost();
+  vm.runInContext('delete window.ReaderII; delete window.ReaderAgent;', host);
+  const [first, second] = await Promise.all([host.ReaderCore.loadReaderII(), host.ReaderCore.loadReaderII()]);
+  assert.equal(first, api);
+  assert.equal(second, api);
+  assert.equal(host.ReaderII, api);
+  assert.equal(host.ReaderAgent, api.agent);
+});
+
 test('VFS：列目录、分段读、检索、精确替换', async () => {
   const { vfs, worldbooks } = makeHost();
   const books = await vfs.list('wb:/', {});
@@ -712,7 +722,7 @@ test('省 token：轻聊不带工具；关掉剧情察知；工具箱按需打�
   assert.match(full.llmCalls[2][0].content, /slash_run/);
 });
 
-test('剧情记忆只读单选：旧设置、关闭、无记录和接口错误都不回落正文', async () => {
+test('剧情记忆来源：自动读取、手选、关闭、无记录和接口错误', async () => {
   const reads = [];
   const globals = {
     STBaiBaiBook: {
@@ -750,17 +760,17 @@ test('剧情记忆只读单选：旧设置、关闭、无记录和接口错误�
     return prompt;
   };
   const noPlot = /【当前剧情】/;
-  assert.equal(agent.getSettings().plotSource, 'auto');
+  assert.equal(agent.getSettings().plotSources, 'auto');
   assert.doesNotMatch(await story(), noPlot);
   same(reads, []);
   assert.match(await story({ plotContext: true }), /柏宝书近期记录/);
   same(reads.splice(0), ['baibai']);
-  assert.match(await story({ plotSource: 'shujuku' }), /数据库最新剧情/);
+  assert.match(await story({ plotSources: ['shujuku'] }), /数据库最新剧情/);
   assert.doesNotMatch(llmCalls.at(-1)[0].content, /柏宝书近期记录|石头|模板信息|模板指令/);
   same(reads.splice(0), ['shujuku']);
   assert.doesNotMatch(await story({}, { plotContext: false }), noPlot);
-  assert.doesNotMatch(await story({ plotSource: '' }), noPlot);
-  assert.equal(agent.getSettings().plotContext, false);
+  assert.doesNotMatch(await story({ plotSources: [] }), noPlot);
+  same(agent.getSettings().plotSources, []);
   same(reads, []);
 
   ctx.chatMetadata.extensions = { LittleWhiteBox: { storySummary: {
@@ -769,7 +779,7 @@ test('剧情记忆只读单选：旧设置、关闭、无记录和接口错误�
   } } };
   ctx.extensionPrompts = { LittleWhiteBox_StorySummary: { value: '不带聊天标识的临时插槽' } };
   const oldMetadata = clone(ctx.chatMetadata.extensions);
-  const lwb = await story({ plotContext: true, plotSource: 'lwb' });
+  const lwb = await story({ plotContext: true, plotSources: ['lwb'] });
   assert.match(lwb, /港口重开/);
   assert.doesNotMatch(lwb, /回滚账本内容|临时插槽/);
   same(ctx.chatMetadata.extensions, oldMetadata);
@@ -778,14 +788,14 @@ test('剧情记忆只读单选：旧设置、关闭、无记录和接口错误�
   ctx.chatMetadata.extensions = {};
   assert.doesNotMatch(await story(), noPlot);
 
-  assert.match(await story({ plotSource: 'worldengine' }), /幕后局势\n最近章节/);
+  assert.match(await story({ plotSources: ['worldengine'] }), /幕后局势\n最近章节/);
   assert.doesNotMatch(llmCalls.at(-1)[0].content, /隐私配置|配置值/);
   same(reads.splice(0), ['worldengine']);
   globals.WORLD_ENGINE_CORE.hasState = () => false;
   assert.doesNotMatch(await story(), noPlot);
   globals.AutoCardUpdaterAPI.exportTableAsJson = () => { throw Error('尚未就绪'); };
-  assert.doesNotMatch(await story({ plotSource: 'shujuku' }), noPlot);
-  assert.doesNotMatch(await story({ plotSource: '缺失来源' }), noPlot);
+  assert.doesNotMatch(await story({ plotSources: ['shujuku'] }), noPlot);
+  assert.doesNotMatch(await story({ plotSources: ['缺失来源'] }), noPlot);
   same(reads, []);
 });
 
@@ -809,6 +819,224 @@ test('插件对接：探测、工具箱、剧情摘要、声明式自定义对�
   assert.match(system, /摘要来自柏宝书/);
   assert.match(system, /主角抵达王都/);
   assert.match(system, /- baibai：/);
+});
+
+test('剧情多选按来源分配总预算，忽略空值、重复内容和报错，停用、删除立即生效', async () => {
+  const reads = [], globals = { Notes: {
+    port() { reads.push('港口'); return '港口的钟声。'.repeat(250); },
+    town() { reads.push('城镇'); return '城镇开门。'; },
+    duplicate() { return this.town(); },
+    empty() { return []; },
+    broken() { throw Error('暂时离线'); }
+  } };
+  const { agent, llmCalls } = makeHost({ globals, agentSettings: { plotBudget: 200, recall: false, lite: true } });
+  const sources = ['port', 'town', 'duplicate', 'empty', 'broken'].map(name => agent.addMemorySource(name, 'window.Notes.' + name));
+  const ids = sources.map(s => s.id);
+  assert.ok(sources.every(s => s.detected));
+  assert.throws(() => agent.addMemorySource('同一个来源', 'Notes.port()'), /已列为/);
+  assert.throws(() => agent.addMemorySource('未知来源', 'Notes.missing'), /找不到/);
+  agent.saveSettings({ plotSources: [...ids, ids[0]] });
+  same(agent.getSettings().plotSources, ids);
+  const story = async () => {
+    const result = await agent.run('读剧情', { remember: false });
+    assert.equal(result.error, '');
+    return llmCalls.at(-1)[0].content;
+  };
+  const prompt = await story();
+  assert.match(prompt, /摘要来自port[\s\S]*港口的钟声[\s\S]*摘要来自town[\s\S]*城镇开门/);
+  assert.doesNotMatch(prompt, /摘要来自(?:empty|broken|duplicate)/);
+  const start = prompt.indexOf('（摘要来自port'), end = prompt.indexOf('城镇开门。', start) + '城镇开门。'.length;
+  assert.ok(end - start <= 200, '多份摘要连同来源标签共用字数预算');
+  assert.equal(reads.filter(x => x === '港口').length, 1);
+  agent.setConnectorEnabled(ids[0], false);
+  agent.removeConnector(ids[2]);
+  assert.ok(!agent.getSettings().plotSources.includes(ids[2]));
+  const changed = await story();
+  assert.match(changed, /城镇开门/);
+  assert.doesNotMatch(changed, /港口的钟声/);
+  agent.setConnectorEnabled(ids[0], true);
+  assert.match(await story(), /港口的钟声/);
+});
+
+test('对接目录扫描不会运行摘要或注册未选的工具，内置与声明重复时只展示一次', async () => {
+  const manifest = { id: 'extra_notes', title: '旅途笔记', detect: 'Book', brief: 'Book.read',
+    tools: [{ name: 'journey_lookup', call: 'Book.read', effect: 'read' }] };
+  const files = { first: { reader_ii_connector: 'connector.json' }, duplicate: { reader_ii_connector: { ...manifest, id: 'baibai' } } };
+  let count = 0;
+  const globals = {
+    Book: { read() { count++; return '下一站'; } }, STBaiBaiBook: { getHistory() { return {}; } },
+    fetch: async url => {
+      if (url === '/api/extensions/discover') return { ok: true, json: async () => Object.keys(files).map(name => ({ name: 'third-party/' + name })) };
+      const [, dir, file] = String(url).match(/third-party\/([^/]+)\/([^/]+)$/) || [];
+      return { ok: true, text: async () => JSON.stringify(file === 'manifest.json' ? files[dir] : manifest) };
+    }
+  };
+  const { agent } = makeHost({ globals });
+  await Promise.all([agent.discoverConnectors(), agent.discoverConnectors()]);
+  const rows = agent.scanConnectors();
+  assert.equal(rows.filter(r => r.id === 'baibai').length, 1);
+  assert.equal(rows.find(r => r.id === 'baibai').origin, 'builtin');
+  assert.throws(() => agent.addMemorySource('另一个名字', 'STBaiBaiBook.getHistory'), /已列为「柏宝书/);
+  const offered = rows.find(r => r.id === manifest.id);
+  assert.ok(offered.present && offered.hasBrief && !offered.enabled);
+  assert.equal(count, 0);
+  assert.ok(!agent.listTools().some(t => t.name === 'journey_lookup'));
+  agent.setConnectorEnabled(manifest.id, true);
+  assert.ok(agent.listTools().some(t => t.name === 'journey_lookup'));
+  assert.equal(agent.getSettings().connectors.length, 0, '已安装插件的声明由作者维护，只保存用户的选择');
+  manifest.tools[0].name = 'journey_search';
+  const reopened = makeHost({ globals, agentSettings: agent.getSettings() }).agent;
+  await reopened.run('你好', { lite: true, remember: false, plotContext: false });
+  assert.ok(reopened.listTools().some(t => t.name === 'journey_search'), '首次对话前恢复选中的最新对接，无需先打开设置');
+  assert.ok(!reopened.listTools().some(t => t.name === 'journey_lookup'));
+  await agent.discoverConnectors({ force: true });
+  assert.ok(agent.listTools().some(t => t.name === 'journey_search'));
+  assert.ok(!agent.listTools().some(t => t.name === 'journey_lookup'));
+  agent.setConnectorEnabled(manifest.id, false);
+  assert.ok(!agent.listTools().some(t => t.name === 'journey_search'));
+  assert.equal(agent.scanConnectors().find(r => r.id === manifest.id).enabled, false);
+  assert.equal(count, 0);
+});
+
+test('扫描列出读不到的插件文件；其他可用来源仍可接入，修复后可重新扫描', async () => {
+  const files = {
+    missing: {},
+    broken: { 'manifest.json': '{' },
+    incomplete: { 'manifest.json': JSON.stringify({ reader_ii_connector: true }) },
+    notes: { 'manifest.json': JSON.stringify({ reader_ii_connector: { id: 'notes', detect: 'Notes', brief: 'Notes.read' } }) },
+  };
+  const { agent } = makeHost({ globals: {
+    Notes: { read: () => '剧终' },
+    fetch: async url => {
+      if (url === '/api/extensions/discover') return { ok: true, json: async () => Object.keys(files).map(name => 'third-party/' + name) };
+      const [, dir, name] = String(url).match(/third-party\/([^/]+)\/([^/]+)$/) || [];
+      const text = files[dir]?.[name];
+      return { ok: text !== undefined, text: async () => text };
+    },
+  } });
+  const issues = Array.from(await agent.discoverConnectors()).sort();
+  assert.deepEqual(issues, ['broken：manifest.json 的 JSON 格式有误', 'incomplete：无法读取 connector.json', 'missing：无法读取 manifest.json']);
+  assert.ok(agent.scanConnectors().find(item => item.id === 'notes').present);
+  for (const name of ['missing', 'broken', 'incomplete']) files[name]['manifest.json'] = '{}';
+  same(await agent.discoverConnectors({ force: true }), []);
+});
+
+test('只有识别能力的预置可由作者同 id 的摘要接口补全，只保留一项并由用户接入', async () => {
+  const manifest = { id: 'yuzuki', title: '柚月剧情摘要', detect: 'YuzukiMemory', brief: 'YuzukiMemory.getSummary' };
+  let reads = 0;
+  const { agent, llmCalls } = makeHost({ globals: {
+    YuzukiMemory: { getSummary() { reads++; return '湖边的灯塔已经点亮'; } },
+    fetch: async url => url === '/api/extensions/discover'
+      ? { ok: true, json: async () => ['third-party/yuzuki'] }
+      : { ok: true, text: async () => JSON.stringify({ reader_ii_connector: manifest }) },
+  } });
+  const rows = () => agent.scanConnectors().filter(item => item.id === 'yuzuki');
+  assert.equal(rows()[0].detectionOnly, true);
+  assert.equal(rows()[0].enabled, false);
+  await agent.discoverConnectors();
+  assert.equal(rows().length, 1);
+  assert.ok(rows()[0].hasBrief && !rows()[0].enabled);
+  agent.setConnectorEnabled('yuzuki', true);
+  assert.equal(reads, 0);
+  agent.saveSettings({ plotSources: ['yuzuki'] });
+  await agent.run('参考我勾选的剧情记忆', { remember: false });
+  assert.equal(reads, 1);
+  assert.match(llmCalls[0][0].content, /摘要来自柚月剧情摘要[\s\S]*湖边的灯塔/);
+});
+
+test('导入、更新及恢复已保存的插件对接时，工具名冲突不会覆盖原工具或留下半个工具箱', () => {
+  const def = (id, ...names) => ({ id, detect: 'Notes', tools: names.map(name => ({ name, call: 'Notes.read', effect: 'read' })) });
+  const broken = def('misconfigured', 'never_installed', 'read');
+  const valid = def('working', 'private_note');
+  const { agent } = makeHost({ agentSettings: { connectors: [broken, valid] }, globals: { Notes: { read() {} } } });
+  const tools = () => Object.fromEntries(agent.listTools().map(tool => [tool.name, tool.toolset]));
+  const conflicting = agent.scanConnectors().find(row => row.id === broken.id);
+  assert.equal(conflicting.enabled, false);
+  assert.match(conflicting.problem, /read.+core/);
+  assert.equal(tools().never_installed, undefined);
+  assert.equal(tools().read, 'core');
+  assert.equal(tools().private_note, 'working');
+  assert.throws(() => agent.importConnector(def('working', 'new_name', 'read')), /read.+core/);
+  assert.throws(() => agent.importConnector(def('copy', 'private_note')), /private_note.+working/);
+  assert.throws(() => agent.importConnector(def('repeat', 'same_tool', 'same_tool')), /重复工具名 same_tool/);
+  assert.equal(tools().private_note, 'working');
+  assert.equal(tools().new_name, undefined);
+  agent.importConnector(def('working', 'private_note', 'new_name'));
+  assert.equal(tools().new_name, 'working');
+  agent.removeConnector(broken.id);
+  assert.equal(tools().read, 'core');
+});
+
+test('运行时插件对接尊重其他工具的所有权，停用或重新扫描不会误删外部登记', () => {
+  const { agent } = makeHost();
+  const tool = name => ({ name, run() {} });
+  const plugin = (id, ...names) => ({ id, title: id, detect: () => true, tools: names.map(tool) });
+  agent.registerConnector(plugin('runtime_bad', 'unused', 'read'));
+  assert.throws(() => agent.setConnectorEnabled('runtime_bad', true), /read.+core/);
+  assert.ok(!agent.listTools().some(row => row.name === 'unused'));
+  agent.registerConnector(plugin('first', 'shared_tool'));
+  agent.registerConnector(plugin('second', 'shared_tool'));
+  agent.setConnectorEnabled('second', true);
+  assert.throws(() => agent.setConnectorEnabled('first', true), /shared_tool.+second/);
+  assert.equal(agent.listTools().find(row => row.name === 'shared_tool').toolset, 'second');
+  agent.setConnectorEnabled('second', false);
+  agent.setConnectorEnabled('first', true);
+  agent.registerTool({ ...tool('shared_tool'), toolset: 'independent' });
+  agent.registerTool({ ...tool('extra_in_set'), toolset: 'first' });
+  const first = agent.scanConnectors().find(row => row.id === 'first');
+  assert.equal(first.enabled, false);
+  assert.match(first.problem, /工具箱名称 first 已被使用/);
+  agent.setConnectorEnabled('first', false);
+  assert.equal(agent.listTools().find(row => row.name === 'shared_tool').toolset, 'independent');
+  assert.equal(agent.listTools().find(row => row.name === 'extra_in_set').toolset, 'first');
+  agent.registerToolset({ name: 'empty_group', summary: '外部保留的空工具箱' });
+  agent.registerConnector(plugin('empty_group', 'spare_tool'));
+  assert.throws(() => agent.setConnectorEnabled('empty_group', true), /工具箱名称 empty_group 已被使用/);
+});
+
+test('运行时对接更新时不能抢占后来接入的插件或尚未加载的内置插件工具', () => {
+  const { agent, host } = makeHost();
+  const plugin = (id, ...names) => ({ id, detect: () => true, tools: names.map(name => ({ name, run() {} })) });
+  agent.registerConnector(plugin('first', 'old_name'));
+  agent.registerConnector(plugin('second', 'keep_name'));
+  for (const id of ['first', 'second']) agent.setConnectorEnabled(id, true);
+  agent.registerConnector(plugin('first', 'new_name', 'keep_name'));
+  let rows = agent.scanConnectors();
+  assert.match(rows.find(row => row.id === 'first').problem, /keep_name.+second/);
+  assert.ok(rows.find(row => row.id === 'second').enabled);
+  assert.equal(agent.listTools().find(row => row.name === 'keep_name').toolset, 'second');
+  assert.ok(!agent.listTools().some(row => ['old_name', 'new_name'].includes(row.name)));
+  agent.registerConnector(plugin('first', 'baibai_query'));
+  assert.throws(() => agent.setConnectorEnabled('first', true), /baibai_query.+柏宝书/);
+  host.STBaiBaiBook = { getHistory() {} };
+  rows = agent.scanConnectors();
+  assert.ok(rows.find(row => row.id === 'baibai').enabled);
+  assert.equal(agent.listTools().find(row => row.name === 'baibai_query').toolset, 'baibai');
+});
+
+test('损坏的旧对接、运行时工具、扩展文件均说明原因，其他工具可继续使用', async () => {
+  const manifest = { id: 'found_notes', detect: 'MissingNotes', tools: [{ name: 'read', call: 'MissingNotes.read' }] };
+  const { agent } = makeHost({ agentSettings: { connectors: [
+    { title: '缺标识' }, { id: 'old_notes', detect: 'Notes', tools: {} },
+  ] }, globals: {
+    fetch: async url => url === '/api/extensions/discover'
+      ? { ok: true, json: async () => ['third-party/notes'] }
+      : { ok: true, text: async () => JSON.stringify({ reader_ii_connector: manifest }) },
+  } });
+  agent.registerConnector({ id: 'missing_detect' });
+  agent.registerConnector({ id: 'bad_params', detect: () => true, tools: [
+    { name: 'unused_tool', run() {} }, { name: 'malformed_tool', params: [null], run() {} },
+  ] });
+  await agent.discoverConnectors();
+  const rows = agent.scanConnectors();
+  assert.match(rows.find(row => row.title === '缺标识').problem, /id/);
+  assert.match(rows.find(row => row.id === 'old_notes').problem, /对接工具.+列表/);
+  assert.match(rows.find(row => row.id === 'missing_detect').problem, /detect/);
+  assert.match(rows.find(row => row.id === 'bad_params').problem, /malformed_tool.+name/);
+  assert.throws(() => agent.setConnectorEnabled(manifest.id, true), /read.+core/);
+  assert.ok(!agent.listTools().some(row => row.name === 'unused_tool'));
+  assert.equal(agent.listTools().find(row => row.name === 'read').toolset, 'core');
+  assert.ok(agent.listConnectors().some(row => row.id === 'tavernhelper'));
 });
 
 test('助手记忆从空库开始，旧世界书只关闭触发，新记忆支持共享、重开与导入', async () => {
