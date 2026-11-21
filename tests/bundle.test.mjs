@@ -52,7 +52,7 @@ function promptHost({ local = {}, stat = {}, formatter = false, kit = {}, resolv
   };
   if (formatter) ctx.MessageFormatter = { stage: { BEFORE_REGEX: 1 }, addHook: (fn) => hooks.push(fn) };
   const host = { addEventListener() {}, removeEventListener() {} };
-  const api = { kit: { chatKey: () => '', ...kit }, isEnabled: () => true, hostMvu: () => true, adoptLegacyCard: async () => calls.push(['adopt']) };
+  const api = { kit: { chatKey: () => '', ...kit }, isEnabled: () => true, hostMvu: () => true };
   const runtime = m.createPromptRuntime(api, {
     host, context: () => ctx, getVariables: (opts) => opts.type === 'message' ? { stat_data: structuredClone(stat) } : {},
     resolveFunction: resolve, console: { info() {}, warn: (...args) => errors.push(args), error: (...args) => errors.push(args) },
@@ -157,7 +157,6 @@ test('retireLegacy 停用旧世界书和嵌套脚本，清理未修改正则，�
     assert.equal(trees.character[0].scripts[0].enabled, false); assert.deepEqual(trees.character[0].scripts[0].data, { user: 1 });
     assert.equal(trees.character[0].scripts[1].enabled, true); assert.equal(trees.global[0].enabled, false);
     assert.deepEqual(h.ctx.extensionSettings.regex.map((x) => x.id), [legacy.regexIds[2], 'user']);
-    assert.ok(h.calls.some((x) => x[0] === 'adopt'));
     assert.deepEqual(plain(await h.runtime.retireLegacy()), { done: [], needReload: false });
     assert.deepEqual(h.errors, []);
   } finally { h.runtime.dispose(); }

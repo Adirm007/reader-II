@@ -96,3 +96,25 @@ test('交接只带摘要，保留来源；并发编辑按版本拒绝覆盖，�
   await history.remove(fromId);
   assert.equal(history.currentId(), dest);
 });
+
+test('待返回的正文刷新不会覆盖新选中的线程，带占位角色 ID 的欢迎页使用无卡记录', async () => {
+  const { ctx, history } = setup();
+  await history.ready();
+  const original = history.currentId();
+  const [, created] = await Promise.all([history.refresh(), history.create()]);
+  assert.equal(history.currentId(), created);
+  const first = history.select(original);
+  const second = history.select(created);
+  const ready = history.ready();
+  await Promise.all([first, second, ready]);
+  assert.equal(history.currentId(), created);
+  for (const emptyId of ['', -1, '-1', null, undefined]) {
+    ctx.characterId = emptyId;
+    await history.ready();
+    assert.equal(history.isUnbound(), true);
+  }
+  ctx.characterId = '0';
+  await history.ready();
+  assert.equal(history.isUnbound(), false);
+  assert.equal(history.currentId(), created);
+});

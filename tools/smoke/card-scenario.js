@@ -33,16 +33,15 @@ async function main() {
     window.ReaderII.memory.saveSettings({ enabled: true, autoExtract: true, everyTurns: 1, keepRecent: 0 });
     return mock.native ? '没有酒馆助手、没有 MVU' : '有酒馆助手与 MVU';
   });
-  await step('未启用时不注入；菜单确认后按卡启用并进入大厅', async () => {
-    assert(!window.ReaderII.lobby.isEnabled(), '新卡应未启用');
+  await step('新卡默认注入；统一入口直接进入大厅', async () => {
+    assert(window.ReaderII.lobby.isEnabled(), '新卡应默认启用');
     await mock.eventSource.emit(mock.ctx.eventTypes.GENERATION_AFTER_COMMANDS, 'normal', {}, false);
-    assert(['reader_ii_core', 'reader_ii_rules', 'reader_ii_list'].every((id) => !mock.prompts[id]?.text), '未启用就注入了提示词');
+    assert(mock.prompts.reader_ii_core?.text, '默认启用的卡没有注入核心提示词');
     const menu = await until(() => $('#reader-ii-menu'), '扩展菜单');
-    assert(menu.textContent.includes('Reader-II · 大厅'), '菜单名称不对');
+    assert(menu.textContent.trim() === 'Reader-II', '菜单名称不对');
     menu.click();
     await until(() => window.ReaderII.lobby.isEnabled() && $('#dlb-overlay'), '启用并打开大厅', 20000);
-    assert(mock.confirms.length === 1, '应先问一次');
-    assert(mock.ctx.characters[0].data.extensions.reader_ii.enabled === true, '没有保存角色卡开关');
+    assert(mock.confirms.length === 0, '默认启用时仍在询问');
   });
   await step('同一张卡可新建、切换与删除独立的助手对话', async () => {
     const threads = window.ReaderII.agent.threads;
@@ -97,9 +96,115 @@ async function main() {
     const toggle = () => $('#ra-reader-card [data-act="card-toggle"]');
     assert(toggle()?.getAttribute('aria-checked') === 'true', '卡开关应开启'); toggle().click();
     await until(() => !window.ReaderII.lobby.isEnabled() && toggle()?.getAttribute('aria-checked') === 'false', '卡停用');
+    window.ReaderII.agent.close();
+    $('#reader-ii-menu').click();
+    await until(() => $('#reader-agent-overlay')?.open && $('.ra-pane[data-pane="chat"].is-on'), '本卡停用后进入助手');
+    assert(!window.ReaderII.lobby.isEnabled(), '打开助手不应重新启用卡');
+    $('[data-tab="settings"]').click();
     toggle().click(); await until(() => window.ReaderII.lobby.isEnabled() && toggle()?.getAttribute('aria-checked') === 'true', '卡启用');
     assert(!document.querySelector('[data-act="upd-inspect"], [data-act="upd-apply"], #ra-upd-scope'), '仍有旧组件安装入口');
     window.ReaderII.agent.close();
+  });
+  await step('模型方案与列表、任务角色和媒体工具可以分别配置，关闭后保留选择', async () => {
+    await window.__smokeView('cafe', 'settings');
+    const { agent, llm } = window.ReaderII;
+    const change = (node, value) => { node.value = value; node.dispatchEvent(new Event('change', { bubbles: true })); };
+    $('#ra-preset-manager').open = true;
+    const editor = $('[data-editor="preset"]');
+    $('[data-preset-name]', editor).value = '测试反代';
+    $('[data-preset-url]', editor).value = 'https://ui-model-smoke.invalid/v1';
+    $('[data-act="models-fetch"]', editor).click();
+    const list = await until(() => $('[data-model-results] option[value="catalog-writer"]', editor), '编辑未保存连接时读取模型目录');
+    change(list.parentElement, 'catalog-writer');
+    assert($('[data-model-name]', editor).value === 'catalog-writer', '列表选择没有回填模型');
+    $('[data-act="models-preset-save"]').click();
+    const id = $('#ra-preset-choice').value;
+    assert(id && llm.getConnectionPreset(id).model === 'catalog-writer', '新方案未保存');
+    change($('#ra-delegate-mode'), 'rules');
+    $('[data-act="models-role-add"]').click();
+    const role = $('#ra-role-rows').lastElementChild;
+    $('[data-role-name]', role).value = '剧情校对';
+    $('[data-role-task]', role).value = '检查前后设定是否一致';
+    change($('[data-source-select]', role), id);
+    $('[data-model-name]', role).value = 'private-alias';
+    change($('[data-role-effort]', role), 'high');
+    $('[data-act="save-settings"]').click();
+    const saved = agent.getSettings().subagents.rules.find(rule => rule.name === '剧情校对');
+    assert(saved?.presetId === id && saved?.model === 'private-alias' && saved?.effort === 'high', '角色设置未按指定模型保存');
+    $('#ra-subagents-enabled').click();
+    assert(!agent.getSettings().subagents.enabled && agent.getSettings().subagents.rules.length, '关闭丢失了角色方案');
+    $('#ra-subagents-enabled').click();
+    const media = $('[data-editor="video"]');
+    change($('[data-source-select]', media), id);
+    $('[data-model-name]', media).value = 'catalog-film';
+    $('[data-media-enabled]', media).checked = true;
+    $('[data-act="models-media-save"]', media).click();
+    assert(llm.getTaskConnection('video').configured, '媒体工具尚未启用');
+    $('[data-media-enabled]', media).checked = false;
+    $('[data-act="models-media-save"]', media).click();
+    assert(!llm.getTaskConnection('video').configured && llm.getTaskConnection('video').model === 'catalog-film', '关闭视频工具丢失了模型');
+    change($('#ra-delegate-mode'), 'smart');
+    $('[data-act="save-settings"]').click();
+    assert(agent.getSettings().subagents.mode === 'smart' && agent.getSettings().subagents.rules.length, '切换智能代理丢失角色');
+    agent.close();
+    agent.open('settings');
+    assert($('#ra-delegate-mode').value === 'smart' && $('[data-editor="video"] [data-source-select]').value === id, '重开面板未恢复配置');
+    agent.close();
+  });
+  await step('媒体工具生成的图片与视频可在回复中打开，重开后仍在', async () => {
+    const { agent, llm } = window.ReaderII;
+    const originalReply = llm.chatReply, originalGenerate = llm.generateMedia;
+    const originalSettings = agent.getSettings();
+    const originalImage = llm.getTaskConnection('image'), originalVideo = llm.getTaskConnection('video');
+    const previous = agent.threads.currentId(), thread = await agent.threads.create();
+    const picture = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+k2yQAAAAASUVORK5CYII=';
+    const video = 'data:video/mp4;base64,AAAAHGZ0eXBpc29tAAACAGlzb21pc28y';
+    const prompts = [], calls = [];
+    try {
+      llm.saveTaskConnection('image', { enabled: true });
+      llm.saveTaskConnection('video', { enabled: true });
+      agent.saveSettings({ toolProtocol: 'text', lite: false, recall: false, plotContext: false, approval: 'auto' });
+      llm.generateMedia = async kind => {
+        calls.push(kind);
+        return kind === 'image' ? { images: [{ url: picture }] } : { videos: [{ url: video }] };
+      };
+      llm.chatReply = async request => {
+        prompts.push(JSON.stringify(request.messages));
+        return { text: prompts.length === 1
+          ? '<tool_call name="generate_image"><arg name="prompt">一张城市夜景</arg></tool_call>\n<tool_call name="generate_video"><arg name="prompt">拍摄城市夜景</arg></tool_call>'
+          : '已完成。' };
+      };
+      agent.open('chat');
+      await until(() => $('#ra-text') && !$('#ra-text').disabled, '媒体对话就绪');
+      $('#ra-text').value = '生成城市夜景的图片和视频。';
+      $('#ra-send').click();
+      await until(() => {
+        const allow = $('#ra-log [data-answer="allow"]');
+        if (allow && !allow.disabled) allow.click();
+        return $('#ra-log .ra-ai img') && $('#ra-log .ra-ai video');
+      }, '回复中的两种媒体');
+      assert(calls.includes('image') && calls.includes('video'), '主助手未调用两个媒体工具');
+      assert(!prompts.at(-1).includes('base64,'), '媒体二进制进入主模型提示词');
+      await until(() => !agent.isBusy(), '媒体任务结束');
+      const delivered = agent.getHistory().at(-1);
+      assert(delivered?.images?.[0]?.url === picture && delivered?.videos?.[0]?.url === video, '本轮已经显示，历史未保存完整附件');
+      assert(agent.threads.currentId() === thread, '本轮实际会话不匹配 ' + JSON.stringify(agent.threads.list().map(row => [row.title, row.id === thread, row.nextId ? '已交接' : '无交接'])));
+      agent.close();
+      await agent.threads.select(previous);
+      await agent.threads.select(thread);
+      assert(agent.getHistory().at(-1)?.videos?.[0]?.url === video, '重新选择线程时丢失视频附件');
+      agent.open('chat');
+      await until(() => !$('#ra-text').disabled, '重新打开媒体会话');
+      const images = Array.from(document.querySelectorAll('#ra-log .ra-ai img.ra-generated'));
+      const videos = Array.from(document.querySelectorAll('#ra-log video[controls]'));
+      assert(images.some(node => node.src === picture) && videos.some(node => node.src === video), '重开后媒体元素数量 ' + images.length + '/' + videos.length + '，记录数 ' + agent.getHistory().length);
+    } finally {
+      llm.chatReply = originalReply; llm.generateMedia = originalGenerate;
+      agent.saveSettings(originalSettings);
+      llm.saveTaskConnection('image', originalImage); llm.saveTaskConnection('video', originalVideo);
+      agent.close();
+      if (!agent.isBusy()) { await agent.threads.select(previous); await agent.threads.remove(thread); }
+    }
   });
   await step('三段正文提示词可分别设置世界书位置、深度、角色和出口，保存后重新打开仍生效', async () => {
     await window.__smokeView('cafe', 'settings');

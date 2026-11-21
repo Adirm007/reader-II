@@ -31,7 +31,8 @@ export { PROMPTS_MODULE };
 
 /* 顺序即依赖顺序：后面的模块在加载期会用到前面的。 */
 export const CORE_MODULES = [
-  'src/reader-env.js', 'src/reader-host-kit.js', 'src/reader-native-host.js', 'src/reader-agent-transport.js', 'src/reader-llm-gateway.js',
+  'src/reader-env.js', 'src/reader-host-kit.js', 'src/reader-native-host.js', 'src/reader-agent-transport.js',
+  'src/reader-media.js', 'src/reader-task-models.js', 'src/reader-llm-gateway.js',
   /* 语义层 */
   'src/reader-mvu-guard.js', 'src/reader-runtime-store.js', 'src/reader-economy.js', 'src/reader-host-adapter.js',
   'src/reader-semantic-codec.js', 'src/reader-semantic-router.js', 'src/reader-character-scan.js',
@@ -44,7 +45,7 @@ export const AGENT_MODULES = [
   'src/agent/store.js', 'src/agent/protocol.js', 'src/agent/permissions.js', 'src/agent/vfs.js', 'src/agent/providers.js', 'src/agent/tools.js',
   'src/agent/net.js', 'src/agent/web.js', 'src/agent/device.js', 'src/agent/mcp.js', 'src/agent/connectors.js', 'src/agent/skills.js',
   'src/agent/legacy-tools.js', 'src/agent/personas.js', 'src/agent/agent.js', 'src/agent/updates.js',
-  'src/agent/ui-theme.js', 'src/agent/ui-net.js', 'src/agent/ui.js', 'src/agent/boot.js',
+  'src/agent/ui-theme.js', 'src/agent/ui-net.js', 'src/agent/ui-models.js', 'src/agent/ui.js', 'src/agent/boot.js',
 ];
 export const EXT_MODULES = [...CORE_MODULES, ...AGENT_MODULES];
 

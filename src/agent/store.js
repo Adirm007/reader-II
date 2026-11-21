@@ -227,7 +227,8 @@
       var chat = typeof ctx.getCurrentChatId === 'function' ? ctx.getCurrentChatId() : ctx.chatId;
       var group = ctx.groupId != null && ctx.groupId !== '';
       var card = ctx.characters && ctx.characters[ctx.characterId];
-      if (!chat || (!group && !card && (ctx.characterId == null || ctx.characterId === -1))) return { key: '', label: '无卡' };
+      var noCharacter = ctx.characterId == null || ctx.characterId === '' || String(ctx.characterId) === '-1';
+      if (chat == null || chat === '' || (!group && noCharacter)) return { key: '', label: '无卡' };
       var owner = group ? 'group:' + ctx.groupId : 'card:' + (card && card.avatar || ctx.characterId);
       var name = group ? ((ctx.groups || []).find(function (item) { return String(item.id) === String(ctx.groupId); }) || {}).name || '群聊 ' + ctx.groupId : card && card.name || ctx.name2 || '角色卡';
       return { key: JSON.stringify([owner, String(chat)]), label: String(name) + ' / ' + chat };
@@ -380,12 +381,27 @@
       });
       return install(s, result);
     }
+    /* IndexedDB 的目录事务和正文读取之间可插入别的操作。排队到缓存安装完毕，
+       避免旧刷新最后返回，盖过较新的选择或已写入的消息。 */
+    function queued(action) {
+      return function (value) {
+        var s = scope();
+        var run = (s.pending || Promise.resolve()).then(function () { same(s); return action(value); });
+        s.pending = run.catch(function () {});
+        return run;
+      };
+    }
+    function whenReady() {
+      var s = scope();
+      return s.pending ? s.pending.then(function () { same(s); return ready(); }) : ready();
+    }
+    var newThread = queued(create);
     return {
-      ready: ready, refresh: refresh, read: read, write: write, turnId: id, currentId: currentId, canRun: canRun, isUnbound: isUnbound,
+      ready: whenReady, refresh: queued(refresh), read: read, write: queued(write), turnId: id, currentId: currentId, canRun: canRun, isUnbound: isUnbound,
       checkpoint: function () { var data = scope().data; return data && modules.clone(data.checkpoint); },
       list: function () { return modules.clone(scope().rows).sort(function (a, b) { return b.updated - a.updated; }); },
       persistent: function () { return scope().remembered; },
-      create: create, select: select, remove: remove, handoff: create
+      create: newThread, select: queued(select), remove: queued(remove), handoff: newThread
     };
   }
 

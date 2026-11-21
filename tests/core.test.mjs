@@ -94,8 +94,7 @@ function createWorld(options = {}) {
     written: [],
     saves: 0,
   };
-  /* 这张卡开着 Reader（记在卡的扩展字段里）；options.enabled 为 false 时不带这个字段。 */
-  const card = { name: '测试卡', avatar: 'test.png', data: { extensions: options.enabled === false ? {} : { reader_ii: { enabled: true } } } };
+  const card = { name: '测试卡', avatar: 'test.png', data: { extensions: options.enabled === undefined ? {} : { reader_ii: { enabled: options.enabled } } } };
   const tavernContext = {
     get chatMetadata() { return world.chatMetadata; },
     saveMetadata() {},
@@ -698,10 +697,10 @@ test('按卡启用：没启用的聊天里什么都不建、不注入、不记�
   assert.equal(await world.api.setEnabled(false), false);
   await assert.rejects(world.api.creditFp(1, 'test', 'k2'), /还没有启用/);
 
-  /* 用过 alpha 版的聊天（已有 reader_ii_runtime）不用再点一次；这张卡明确关掉时以卡为准。 */
-  const used = createWorld({ enabled: false, chatVariables: { reader_ii_runtime: { version: 1 } } });
+  const used = createWorld();
   await used.api.ready();
   assert.equal(used.api.isEnabled(), true);
+  assert.equal(used.written.length, 0, '首次进入默认启用，无需改写角色卡文件');
   used.card.data.extensions.reader_ii = { enabled: false };
   assert.equal(used.api.isEnabled(), false);
 
@@ -712,6 +711,30 @@ test('按卡启用：没启用的聊天里什么都不建、不注入、不记�
   assert.equal(group.chatMetadata.reader_ii_enabled, true);
   assert.equal(group.written.length, 0);
   assert.equal(group.api.isEnabled(), true);
+});
+
+test('空聊天中有卡就可启用，停用在同卡另一个存档也生效，欢迎页保持无卡', async () => {
+  const world = createWorld({ native: true, chat: [] });
+  await world.api.ready();
+  assert.equal(world.api.hasChat(), true);
+  assert.equal(world.api.isEnabled(), true);
+  delete world.context.writeExtensionField;
+  await world.api.setEnabled(false);
+  world.context.getCurrentChatId = () => 'another';
+  world.chatMetadata = { variables: {} };
+  assert.equal(world.api.isEnabled(), false);
+  await world.api.setEnabled(true);
+  assert.equal(world.api.isEnabled(), true);
+  delete world.context.saveSettingsDebounced;
+  delete world.context.extensionSettings;
+  world.card.data.extensions.reader_ii = { enabled: true };
+  assert.equal(await world.api.setEnabled(false), false, '仅能写聊天元数据时也能停用');
+  world.context.chat.push({ mes: '欢迎' });
+  for (const missing of [undefined, '', -1, '-1']) {
+    world.context.characterId = missing;
+    assert.equal(world.api.hasChat(), false);
+    assert.equal(world.api.isEnabled(), false);
+  }
 });
 
 test('原生宿主层（没有酒馆助手、没有 MVU）：变量存在与酒馆助手相同的位置；新楼层沿用上一楼；回复里的 JSONPatch 只收 /READER/', async () => {

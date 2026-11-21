@@ -345,8 +345,6 @@
             return list;
           });
           done.push('停用了世界书《' + book + '》里的 ' + live.length + ' 个旧条目');
-          /* 这张卡之前就在用 Reader：没有明确开关过的话，记为启用。 */
-          if (api && typeof api.adoptLegacyCard === 'function') { try { await api.adoptLegacyCard(); } catch (error) { /* ignore */ } }
         }
       } catch (error) { log.warn('[ReaderII] 检查旧世界书失败', error); }
       /* 酒馆助手脚本 */

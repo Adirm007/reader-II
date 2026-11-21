@@ -854,6 +854,7 @@ test('助手记忆从空库开始，旧世界书只关闭触发，新记忆支�
   assert.equal((await other.importAll(exported)).added, 2);
   assert.equal((await other.importAll(exported)).skipped, 2);
   memory.saveSettings({ unify: true, scope: 'all' });
+  ctx.characters[0].data.extensions.reader_ii = { enabled: false };
   assert.equal((await memory.buildInjection('猫')).text, '', '只用助手的卡不会获取 Meta 身份或记忆');
   ctx.characters[0].data.extensions.reader_ii = { enabled: true };
   const block = await memory.buildInjection('猫');

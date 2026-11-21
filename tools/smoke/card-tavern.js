@@ -430,7 +430,9 @@
       let body = null;
       try { body = init && init.body ? JSON.parse(init.body) : null; } catch (error) { body = String(init.body); }
       state.posts.push({ url, body });
-      const reply = /\/api\/extensions\/discover$/.test(url) ? [{ type: 'local', name: 'third-party/reader-II' }] : {};
+      const reply = /\/api\/extensions\/discover$/.test(url) ? [{ type: 'local', name: 'third-party/reader-II' }]
+        : /\/chat-completions\/status$/.test(url) && body?.reverse_proxy === 'https://ui-model-smoke.invalid/v1'
+          ? { data: [{ id: 'catalog-writer', context_length: 20000 }, { id: 'catalog-film' }] } : {};
       return new Response(JSON.stringify(reply), { status: 200, headers: { 'Content-Type': 'application/json' } });
     }
     return realFetch(input, init);

@@ -3,7 +3,7 @@
 
   var modules = root.__ReaderIIModules = root.__ReaderIIModules || {};
   var HOST_KIND_KEY = 'reader_ii_host_kind';
-  /* 这张卡要不要用 Reader：记在角色卡的扩展字段里（跟着卡走）；群聊与没有角色卡时记在聊天元数据里。 */
+  /* 默认启用角色卡。用户的选择随卡保存，群聊使用聊天元数据。 */
   var CARD_FIELD = 'reader_ii';
   var CHAT_FLAG = 'reader_ii_enabled';
   var LATEST = { type: 'message', message_id: 'latest' };
@@ -33,14 +33,15 @@
   /* 有没有打开着的聊天（刚进酒馆、还在欢迎页时没有）。 */
   function hasChat() {
     var ctx = context();
-    if (!ctx || !Array.isArray(ctx.chat) || !ctx.chat.length) return false;
+    if (!ctx || !Array.isArray(ctx.chat)) return false;
     var chatId = typeof ctx.getCurrentChatId === 'function' ? ctx.getCurrentChatId() : ctx.chatId;
-    return chatId !== undefined && chatId !== null && chatId !== '';
+    return chatId != null && chatId !== '' && ((ctx.groupId != null && ctx.groupId !== '')
+      || (ctx.characterId != null && ctx.characterId !== '' && String(ctx.characterId) !== '-1'));
   }
 
   function currentCard() {
     var ctx = context();
-    if (!ctx || ctx.groupId || ctx.characterId === undefined || ctx.characterId === null) return null;
+    if (!ctx || (ctx.groupId != null && ctx.groupId !== '') || ctx.characterId == null) return null;
     return ctx.characters && ctx.characters[ctx.characterId] || null;
   }
 
@@ -50,18 +51,20 @@
     return modules.isObject(field) && typeof field.enabled === 'boolean' ? field.enabled : undefined;
   }
 
-  /*
-   * 这个聊天用不用 Reader。顺序：这张卡明确开了或关了 → 聊天元数据里的开关 → 这个聊天以前用过（有 reader_ii_runtime）。
-   * 不用的聊天里，Reader 什么都不做：不建后备变量、不注入提示词、不解析事件、不挂信。
-   */
+  /* 宿主无法写角色文件时，把用户对这张卡的选择记在账号设置里。 */
+  function cardPreferenceKey(card) { return card && card.avatar ? 'avatar/' + card.avatar : ''; }
+
   function isEnabled() {
     if (!hasChat()) return false;
+    var ctx = context(), key = cardPreferenceKey(currentCard());
+    var prefs = ctx.extensionSettings && ctx.extensionSettings.reader_ii;
+    var savesCardPreference = key && ctx.extensionSettings && typeof ctx.saveSettingsDebounced === 'function';
+    if (savesCardPreference && prefs && prefs.cardFlags && typeof prefs.cardFlags[key] === 'boolean') return prefs.cardFlags[key];
+    var meta = ctx.chatMetadata;
     var card = cardFlag();
-    if (card !== undefined) return card;
-    var ctx = context();
-    var meta = ctx && ctx.chatMetadata;
+    if (card !== undefined && (typeof ctx.writeExtensionField === 'function' || savesCardPreference)) return card;
     if (meta && typeof meta[CHAT_FLAG] === 'boolean') return meta[CHAT_FLAG];
-    return chatVariables()[runtimeStore.key] !== undefined;
+    return card !== false;
   }
 
   async function setEnabled(value) {
@@ -69,6 +72,7 @@
     var ctx = context();
     if (!ctx || !hasChat()) throw new Error('请先打开一个聊天');
     var card = currentCard();
+    var key = cardPreferenceKey(card), prefs = ctx.extensionSettings && ctx.extensionSettings.reader_ii;
     if (card && typeof ctx.writeExtensionField === 'function') {
       var field = Object.assign({}, card.data && card.data.extensions && card.data.extensions[CARD_FIELD], { enabled: enabled });
       await ctx.writeExtensionField(ctx.characterId, CARD_FIELD, field);
@@ -76,10 +80,18 @@
       if (!card.data) card.data = {};
       if (!modules.isObject(card.data.extensions)) card.data.extensions = {};
       card.data.extensions[CARD_FIELD] = field;
+      if (key && prefs && prefs.cardFlags && Object.hasOwn(prefs.cardFlags, key)) {
+        delete prefs.cardFlags[key];
+        if (typeof ctx.saveSettingsDebounced === 'function') ctx.saveSettingsDebounced();
+      }
+    } else if (key && ctx.extensionSettings && typeof ctx.saveSettingsDebounced === 'function') {
+      prefs = ctx.extensionSettings.reader_ii || (ctx.extensionSettings.reader_ii = {});
+      prefs.cardFlags = Object.assign({}, prefs.cardFlags, { [key]: enabled });
+      ctx.saveSettingsDebounced();
     } else if (ctx.chatMetadata) {
       ctx.chatMetadata[CHAT_FLAG] = enabled;
-      if (typeof ctx.saveMetadata === 'function') { try { await ctx.saveMetadata(); } catch (error) { /* best-effort */ } }
-    }
+      if (typeof ctx.saveMetadata === 'function') await ctx.saveMetadata();
+    } else throw new Error('当前宿主无法保存角色卡开关');
     if (enabled) ready = ensureNamespace();
     else if (prompt) prompt.clear();
     notify('enabled_changed', null);
@@ -188,6 +200,7 @@
   /* 没启用 Reader 的聊天里什么都不建，返回一份空的默认状态。 */
   async function ensureNamespace() {
     if (!isEnabled()) return { data: { stat_data: {} }, reader: modules.createDefaultReaderState(), dormant: true };
+    if (!context().chat.length) return { data: { stat_data: {} }, reader: modules.createDefaultReaderState() };
     hookHostMvu();
     var data = readData();
     guard.guard(data);
@@ -715,8 +728,6 @@
   API.hostMvu = function () { return mvu.hostMvu(); };
   /* 最后一楼的变量（还没有时是往前找到的那一份）：提示词模板的 getvar 读它。 */
   API.readFloor = readMvuData;
-  /* 旧版世界书挂在这张卡上：这张卡之前就在用 Reader，没有明确开关过就记为启用。 */
-  API.adoptLegacyCard = function () { return cardFlag() === undefined ? setEnabled(true) : Promise.resolve(isEnabled()); };
 
   var ui = modules.createUiBridge(API, env);
   API.openPanel = ui.openPanel;

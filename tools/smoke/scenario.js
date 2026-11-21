@@ -72,7 +72,7 @@ async function main() {
     const answer = '这是无卡助手的回复。';
     const marker = 'reader-smoke-unbound-reload';
     await step('从扩展设置进入无卡助手', async () => {
-      (await until(() => $('#reader-ii-agent-settings'), '扩展设置按钮')).click();
+      (await until(() => $('#reader-ii-settings-entry'), 'Reader-II 入口')).click();
       await until(() => $('#reader-agent-overlay')?.open && $('#ra-text'), '无卡助手');
       assert(!window.ReaderII.lobby.isEnabled(), '无卡打开助手触发了读者大厅');
     });
@@ -103,11 +103,10 @@ async function main() {
     assert(errors.length === 0, errors.join(' | ').slice(0, 300));
   });
 
-  await step('记忆不在无关聊天里自动注入', async () => {
-    /* 假酒馆的聊天没有 Reader-II 启用标记：默认范围下不该有记忆注入，也不该为整理而调用模型。 */
+  await step('新卡默认启用，助手记忆仍按其独立开关控制', async () => {
     await sleep(200);
     const injected = mock.prompts['reader-ii-memory'];
-    assert(!injected || !(injected.text || injected.content), '在没用 Reader-II 的聊天里注入了记忆');
+    assert(!injected || !(injected.text || injected.content), '记忆共享关闭时注入了正文记忆');
     assert(mock.llmCalls.length === 0, '启动后就调用了模型');
     assert(!window.ReaderII.memory.getSettings().unify, '助手记忆应默认仅供助手使用');
   });
@@ -118,7 +117,8 @@ async function main() {
   });
 
   await step('菜单进入大厅，再从服务台打开助手（<dialog> 顶层）', async () => {
-    assert($('#reader-ii-menu').textContent.includes('Reader-II · 大厅'), '菜单名称不对');
+    assert($('#reader-ii-menu').textContent.trim() === 'Reader-II', '菜单名称不对');
+    assert(document.querySelectorAll('#extensionsMenu [id^="reader-ii"]').length === 1, '扩展菜单有重复的 Reader-II 入口');
     $('#reader-ii-menu').click();
     await until(() => $('#dlb-overlay'), '大厅', 20000);
     await window.ReaderII.lobby.open('eggs');

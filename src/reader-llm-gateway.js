@@ -523,7 +523,7 @@
       var type = settings.type;
       var limit = request.maxTokens || script.amount_gen;
       var body = {
-        api_type: type, api_server: textApi.getTextGenServer(type), model: textApi.getTextGenModel(settings),
+        api_type: type, api_server: textApi.getTextGenServer(type), model: request.modelOverride || textApi.getTextGenModel(settings),
         prompt: messages.map(function (message) { return message.role + ': ' + message.content; }).join('\n\n') + '\n\nassistant:',
         stream: false, max_tokens: limit, max_new_tokens: limit, temperature: settings.temp, top_p: settings.top_p,
         top_k: settings.top_k, min_p: settings.min_p, repetition_penalty: settings.rep_pen,
@@ -624,6 +624,14 @@
             return generateRaw(config);
           }, generationId, timeoutMs, request.signal);
           if (isolatedRoute(request) || rich) {
+            if (request.checkProviderStop && result && typeof result === 'object') {
+              var firstChoice = result.choices && result.choices[0], providerMessage = firstChoice && firstChoice.message;
+              var reason = result.promptFeedback && result.promptFeedback.blockReason || result.stop_reason ||
+                firstChoice && firstChoice.finish_reason || result.candidates && result.candidates[0] && result.candidates[0].finishReason;
+              if (providerMessage && providerMessage.refusal || /^(?:refusal|content_filter|safety|blocklist|prohibited_content|recitation|image_safety|spii)$/i.test(reason || '')) {
+                throw Object.assign(new Error('模型停止生成（' + (reason || 'refusal') + '）'), { code:'provider_stop' });
+              }
+            }
             var parsed = parseToolResponse(result, !!rich && !request.textOnly);
             if (parsed.toolCalls.length) throw new Error('模型为文本请求返回了未声明的工具调用，本次没有执行');
             if (rich && (parsed.text.trim() || parsed.images.length)) return parsed;
@@ -867,7 +875,7 @@
 
     async function generateImages(api, messages, request) {
       var ctx = nativeContext() || {}, settings = ctx.chatCompletionSettings || hostChatModule && hostChatModule.oai_settings || {};
-      var model = api ? api.model : modelProfile(request.route).model;
+      var model = api ? api.model : request.modelOverride || modelProfile(request.route).model;
       var lastUser = messages.slice().reverse().find(function (item) { return item.role === 'user'; });
       if (!lastUser) throw new Error('图像生成需要用户提示词');
       var headers = { 'Content-Type': 'application/json' }, url;
@@ -1001,11 +1009,14 @@
       } else {
         data = await fetchBackendBody(ctx, fetcher, body, request, label);
       }
-      if (data && data.quota_error) throw new Error(label + ' 配额不足');
+      if (data && data.quota_error) throw Object.assign(new Error(label + ' 配额不足'), { code:'insufficient_quota', status:429 });
       if (data && data.error) {
         var message = String(modules.isObject(data.error) ? data.error.message || JSON.stringify(data.error) : data.message || data.response || '接口报错').slice(0, 400);
         if (body.tools && looksUnsupported(400, message)) throw unsupportedError('这个接口不接受原生函数调用（' + message + '）');
-        throw new Error(label + ' 报错：' + message);
+        throw Object.assign(new Error(label + ' 报错：' + message), {
+          code: data.error.code || data.error.type || 'provider_error',
+          status: Number(data.error.status || data.status) || undefined
+        });
       }
       return data;
     }
@@ -1016,7 +1027,7 @@
       if (!response.ok) {
         var detail = await readFailure(response);
         if (body.tools && looksUnsupported(response.status, detail)) throw unsupportedError('这个接口不接受原生函数调用（HTTP ' + response.status + '：' + detail + '）');
-        throw new Error(label + ' 返回 HTTP ' + response.status + '：' + detail);
+        throw Object.assign(new Error(label + ' 返回 HTTP ' + response.status + '：' + detail), { status: response.status });
       }
       /* 展示用预设可以改写 Response 实例的 json()，把调用消费为正文；助手需要同一次响应的协议数据。 */
       return isolatedRoute(request) || body.tools ? JSON.parse(await response.text()) : response.json();
@@ -1033,7 +1044,7 @@
       if (!response.ok) {
         var detail = await readFailure(response);
         if (body.tools && looksUnsupported(response.status, detail)) throw unsupportedError('这个接口不接受原生函数调用（HTTP ' + response.status + '：' + detail + '）');
-        throw new Error('独立 API 返回 HTTP ' + response.status + '：' + detail);
+        throw Object.assign(new Error('独立 API 返回 HTTP ' + response.status + '：' + detail), { status: response.status });
       }
       return body.tools ? JSON.parse(await response.text()) : response.json();
     }
@@ -1050,6 +1061,7 @@
       var types = ctx.eventTypes || ctx.event_types || {};
       var eventName = types.CHAT_COMPLETION_SETTINGS_READY || 'chat_completion_settings_ready';
       function setAgentTools(data) {
+        if (request.modelOverride) data.model = request.modelOverride;
         data.stream = false;
         data.include_reasoning = true;
         if (Number(request.maxTokens) > 0) {
@@ -1077,7 +1089,7 @@
       var canPrepare = typeof api.createGenerationParameters === 'function' && typeof api.getChatCompletionModel === 'function';
       if (canPrepare) {
         var fetcher = hostFetch();
-        var model = api.getChatCompletionModel(settings);
+        var model = request.modelOverride || api.getChatCompletionModel(settings);
         var prepared = await api.createGenerationParameters(settings, model, 'quiet', messages, { allowToolCalls: false, jsonSchema: request.jsonSchema || null });
         var body = prepared.generate_data;
         assertModelRoute(request);
@@ -1213,7 +1225,7 @@
       return text;
     }
 
-    return {
+    var gateway = {
       storageKey: LEGACY_KEY,
       presetKey: PRESET_KEY,
       getSettings: readSettings,
@@ -1235,6 +1247,13 @@
       stop: stop,
       responseText: responseText
     };
+    if (modules.createTaskGateway) Object.assign(gateway, modules.createTaskGateway({
+      env: env, gateway: gateway, state: connectionState, read: readJson, write: writeJson, presetKey: PRESET_KEY,
+      presetApi: presetApi, usablePreset: usablePreset, validateEndpoint: validateEndpoint, context: nativeContext, fetcher: hostFetch,
+      metadataLimit: metadataLimit, catalogWindow: catalogWindow, imageModel: imageModel, imageChatModel: imageChatModel,
+      parseReply: parseToolResponse, requestImages: generateImages, readFailure: readFailure, delay: delay, abortError: abortError
+    }));
+    return gateway;
   }
 
   modules.normalizeReaderLlmSettings = normalizeSettings;

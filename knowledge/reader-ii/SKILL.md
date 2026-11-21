@@ -6,7 +6,7 @@ description: Reader-II 自己：FP、语义槽、轻信、大厅、抽卡各是�
 
 Reader-II 是「读者系统」：九十九夜梦作为故事外的读者，给用户写信（正文里的 `<dream>…</dream>`）、发放与消费 FP（命运点数）、提供大厅、书架、抽卡等功能。只需安装一个扩展，语义层、轻信、大厅、抽卡、提示词、助手与记忆都在其中；没有酒馆助手或 MVU 时由原生宿主层兜底。后端伴侣仅在需要操作设备时选装。
 
-入口是扩展菜单「Reader-II · 大厅」或不带内容的 `/yume`。首次在这张卡使用时先询问是否启用；大厅的彩蛋服务台提供和夜梦说说话、助手设置、语义适配、记忆四个入口。可在助手设置的「这张卡」里启停，或用 `ReaderII.lobby.isEnabled() / enable() / disable()`；`ReaderII.lobby.open('eggs')` 打开服务台。
+扩展菜单「Reader-II」与不带内容的 `/yume` 共用一个入口。角色卡默认启用并打开大厅。无卡或当前卡已停用时打开助手。大厅的彩蛋服务台提供和夜梦说说话、助手设置、语义适配、记忆四个入口。可在助手设置的「这张卡」里启停，或用 `ReaderII.lobby.isEnabled() / enable() / disable()`。`ReaderII.lobby.open('eggs')` 在启用的卡上打开服务台。
 
 **语义槽**：Reader 不认死路径，而是把「当前地点、重要角色、任务、技能、状态、货币、背包」七个槽位映射到宿主卡自己的变量上；没映射的用 Reader 自带的后备（`stat_data.READER`）。`toolbox reader` 之后：`reader_state` 看各槽位现状，`adapt_variables` 一键适配，`unbind_slot` 解绑。绑定了货币槽时，FP 的增减直接作用于宿主卡的货币。
 

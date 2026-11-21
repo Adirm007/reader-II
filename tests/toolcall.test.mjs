@@ -250,6 +250,132 @@ test('子代理只接收分配的资料和任务，使用单独的无工具请�
   assert.equal(agent.getHistory().length, 4);
 });
 
+test('关闭子代理同时移除声明、查询目录和执行权限；模型已发出的旧调用也失效', async () => {
+  const lookup = nativeCall('capabilities', { tool: 'delegate_task' });
+  const { agent, run, log, llm } = makeHost({ backend: (_body, round) => {
+    if (round === 1) {
+      agent.saveSettings({ subagents: { enabled: false } });
+      return reply({ tool_calls: [nativeCall('delegate_task', { task: '分析' }), lookup] });
+    }
+    return reply({ content: '当前已关闭子代理。' });
+  } });
+  llm.chatTask = () => assert.fail('禁止派发');
+  const result = await run('检查可用工具');
+  assert.equal(result.steps[0].ok, false);
+  assert.ok(!agent.listTools().some(item => item.name === 'delegate_task'));
+  assert.ok(log.backend[0].body.tools.some(item => item.function.name === 'delegate_task'));
+  assert.ok(!log.backend[1].body.tools.some(item => item.function.name === 'delegate_task'));
+  assert.match(log.backend[1].body.messages.at(-1).content, /未注册/);
+});
+
+test('倾向按用户配置的方案、模型与档位执行，不能在工具参数中改写固定模型', async () => {
+  const calls = [];
+  const { run, agent, llm, log } = makeHost({ backend: (_body, round) => round === 1 ? reply({ tool_calls: [
+    nativeCall('delegate_task', { profile: 'design', task: '校对界面文案', model: 'other', effort: 'high' })
+  ] }) : reply({ content: '已采纳校对结果' }) });
+  agent.saveSettings({ subagents: { enabled: true, mode: 'rules', rules: [
+    { id: 'design', name: '界面校对', task: '前端文案', model: 'reviewer', presetId: 'art', effort: 'medium' }
+  ] } });
+  llm.resolveTaskModel = async (kind, opts) => {
+    assert.equal(kind, 'delegate'); assert.equal(opts.presetId, 'art'); assert.equal(opts.model, 'reviewer');
+    return { model: 'reviewer', contextWindow: 24000, reasoningEfforts: ['low', 'high'] };
+  };
+  llm.chatTask = async opts => { calls.push(opts); return '按钮改为保存'; };
+  assert.equal((await run('请核对')).error, '');
+  assert.match(log.backend[0].body.messages[0].content, /design.*界面校对.*前端文案/);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].model, 'reviewer'); assert.equal(calls[0].presetId, 'art');
+  assert.equal(calls[0].reasoningEffort, 'high'); assert.equal(calls[0].textOnly, true);
+  assert.equal(calls[0].tools, undefined); assert.equal(calls[0].messages.length, 2);
+});
+
+test('子代理执行途中关开关会取消本次请求，主对话仍然能收尾', async () => {
+  let entered;
+  const started = new Promise(resolve => { entered = resolve; });
+  const { run, agent, llm, log } = makeHost({ backend: (_body, round) => round === 1
+    ? reply({ tool_calls: [nativeCall('delegate_task', { task: '分析', profile: 'analysis' })] }) : reply({ content: '已停止派发。' }) });
+  agent.saveSettings({ subagents: { rules: [{ id: 'analysis', task: '分析资料', model: 'another' }] } });
+  llm.resolveTaskModel = async () => ({ model: 'another', contextWindow: 32000 });
+  llm.chatTask = async ({ signal }) => new Promise((_resolve, reject) => {
+    signal.addEventListener('abort', () => reject(Object.assign(new Error('停止派发'), { name: 'AbortError' })), { once: true });
+    entered();
+  });
+  const pending = run('分析这份资料');
+  await started;
+  agent.saveSettings({ subagents: { enabled: false } });
+  const result = await pending;
+  assert.equal(agent.getSettings().subagents.rules[0].id, 'analysis');
+  assert.equal(result.aborted, false);
+  assert.equal(result.steps[0].ok, false);
+  assert.match(result.steps[0].summary, /已关闭/);
+  assert.ok(log.backend[1].body.tools.every(tool => tool.function.name !== 'delegate_task'));
+});
+
+test('智能派发时只拉一次实际连接目录，主模型选可用文本模型和经核实的档位', async () => {
+  let listings = 0;
+  const workers = [];
+  const { run, agent, llm, log } = makeHost({ backend: (_body, round) => {
+    const calls = [null, {task: '起草', material: '开头要提到码头'}, {task: '起草', model: 'writer', effort: 'high'}, {task: '校对', model: 'writer', effort: 'max'}];
+    return calls[round] ? reply({ tool_calls: [nativeCall('delegate_task', calls[round])] }) : reply({ content: '整理好了' });
+  } });
+  agent.saveSettings({ subagents: { enabled: true, mode: 'smart' } });
+  llm.listTaskModels = async (kind, opts) => {
+    listings++; assert.equal(kind, 'delegate'); assert.equal(opts.selected, 'agent');
+    return [{ id: 'writer', outputModalities: ['text'], reasoningEfforts: ['high'] }, { id: 'video-only', outputModalities: ['video'] },
+      { id: 'embedder', outputModalities: [], supportsTextChat: false }];
+  };
+  llm.resolveTaskModel = async (_kind, opts) => ({ model: opts.model, contextWindow: 32000, reasoningEfforts: ['high'] });
+  llm.chatTask = async opts => {
+    if (!workers.length) assert.match(opts.messages.at(-1).content, /开头要提到码头/);
+    else assert.doesNotMatch(opts.messages.at(-1).content, /开头要提到码头/);
+    workers.push([opts.model, opts.reasoningEffort]); return '成稿';
+  };
+  assert.equal(listings, 0);
+  assert.equal((await run('创作并校对')).error, '');
+  assert.equal(listings, 1);
+  const catalog = JSON.parse(log.backend[1].body.messages.at(-1).content);
+  same(catalog.models.map(item => item.model), ['writer']);
+  same(workers, [['writer', 'high'], ['writer', 'auto']]);
+});
+
+test('代理模型不可用、欠费、限流或超时会回退主助手，取消、内容拒绝或相同模型不再发送', async () => {
+  for (const [failure, current, expected] of [[{ status: 404 }, false, 1], [{ status: 402 }, false, 1],
+    [{ status: 429 }, false, 1], [{ name: 'TimeoutError' }, false, 1], [{ code: 'provider_stop' }, false, 0],
+    [{ name: 'AbortError' }, false, 0], [{ status: 404 }, true, 0]]) {
+    const { agent, run, llm, log } = makeHost({ text: () => '主助手完成了', backend: (_body, round) => round === 1
+      ? reply({ tool_calls: [nativeCall('delegate_task', { task: '改写', profile: 'writing' })] }) : reply({ content: '收到结果。' }) });
+    agent.saveSettings({ subagents: { rules: [{ id: 'writing', name: '写作', task: '改写', model: 'external' }] } });
+    llm.resolveTaskModel = async () => ({ model: 'external', contextWindow: 32000, isCurrent: current });
+    llm.chatTask = async () => { throw Object.assign(new Error('模型调用失败'), failure); };
+    const result = await run('改写这段');
+    assert.equal(log.text.length, expected);
+    if (failure.name === 'AbortError') assert.equal(result.aborted, true);
+    else assert.equal(result.steps[0].ok, expected === 1);
+    if (expected) assert.match(log.backend.at(-1).body.messages.at(-1).content, /已改用主助手模型/);
+  }
+});
+
+test('独立图像和视频工具只向主模型返附件编号；主模型失败也能保存和交付已生成的媒体', async () => {
+  const { run, agent, llm, log } = makeHost({ backend: (_body, round) => round === 1 ? reply({ tool_calls: [
+    nativeCall('generate_image', { prompt: '月亮插画' }), nativeCall('generate_video', { prompt: '月亮升起' })] })
+    : { status: 403, body: { error: { message: '后续文字不可用' } } } });
+  agent.saveSettings({ toolProtocol: 'native' });
+  assert.ok(!agent.listTools().some(item => item.name === 'generate_video'));
+  const image = 'data:image/png;base64,AQIDBA==', video = 'data:video/mp4;base64,AAEC';
+  llm.getTaskConnection = () => ({ configured: true });
+  llm.generateMedia = async (kind, prompt) => {
+    assert.ok(prompt.includes('月亮'));
+    return kind === 'image' ? { text: '月亮插画', images: [{ url: image }] } : { text: '预览 ' + video, videos: [{ url: video }] };
+  };
+  const result = await run('生成图像与视频');
+  assert.ok(log.backend[0].body.tools.some(item => item.function.name === 'generate_video'));
+  const wire = JSON.stringify(log.backend[1].body);
+  assert.match(wire, /image-1/); assert.match(wire, /video-1/); assert.doesNotMatch(wire, /base64/);
+  same(result.images, [{ url: image }]); same(result.videos, [{ url: video }]);
+  same(agent.getHistory().at(-1).videos, [{ url: video }]);
+  same(log.events.find(event => event.type === 'final').images, [{ url: image }]);
+});
+
 test('图片回复无文字时也保存和发出，后续模型只看到附件数量', async () => {
   const url = 'data:image/png;base64,AQIDBA==';
   const { agent, run, log } = makeHost({ backend: (body, number) => number === 1
