@@ -17,12 +17,68 @@ import { read, countExact, replaceExact, replaceRange, replaceRegex } from './li
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 export const WORLDBOOK_SOURCE = path.resolve(here, '../upstream/reader/worldbook/读者核心本体.txt');
+export const BLACK_AUTHOR_SOURCE = path.resolve(here, '../upstream/reader/source/black-author.prompt.json');
 export const ENTRY_NAMES = Object.freeze({
   init: '[initvar]Reader-II初始化',
   rules: '[mvu_update]Reader-II变量更新规则',
   core: '[Reader-II] 通用读者核心',
   list: 'Reader-II变量列表',
 });
+
+export function loadBlackAuthorProfile(file = BLACK_AUTHOR_SOURCE) {
+  const raw = JSON.parse(read(file));
+  const out = { ...raw };
+  for (const key of ['definition', 'cursedDefinition', 'confessedDefinition']) {
+    if (typeof out[key] === 'string') out[key] = out[key].replaceAll('虚海中的不明存在', '世界外的不明存在');
+  }
+  out.execution = replaceBetween(
+    out.execution,
+    '在正文真实呈现结局，并按 MVU 更新协议同步反映事实：',
+    '本轮更新必须与正文一致',
+    '在正文真实呈现结局，并通过当前角色/状态变量更新规则同步反映事实（若有生命值字段则归零，或记录明确含有“死亡”/“精神崩溃”的状态）。保留人物曾经存在、发生过的事实和他人对此人的记忆，不删去此人的历史。\n'
+    + '本轮实际落实点杀时（无论本轮名单中有 1 人还是多人），在回复末尾仅输出一次进度推进事件：<READER_ACTION_EVENT>{"event_id":"kuromaku_kill:<本轮摘要>","action":"kuromaku_kill"}</READER_ACTION_EVENT>\n',
+    '黑之作家 execution 通用化',
+    ['<UpdateVariable>', '/事件/进度', '/事件/黑幕已点杀'],
+  );
+  out.publicRecord = replaceExact(
+    out.publicRecord,
+    '<del>Recorder Identity: 记录者确认遵循虚海法则、客观现实原则及一切输出协议——</del>',
+    '<del>Recorder Identity: 记录者确认遵循客观现实原则及一切输出协议——</del>',
+    '黑之作家 publicRecord 去掉虚海法则',
+  );
+  out.revival = replaceExact(
+    out.revival,
+    '只在实际完成一次复活时执行一次: { "op": "delta", "path": "/事件/进度", "value": 1 }',
+    REVIVE_EVENT('kuromaku'),
+    '黑之作家 revival 改走事件',
+  );
+  out.cursedRevealScene = replaceExact(
+    out.cursedRevealScene,
+    '并在 <UpdateVariable> 中记录结局：',
+    '并在回复末尾输出结局事件：',
+    '黑之作家一次性场景标题通用化',
+  );
+  out.cursedRevealScene = replaceExact(
+    out.cursedRevealScene,
+    '在 <UpdateVariable> 中执行：{ "op": "replace", "path": "/事件/黑幕结局", "value": "killed" }；若主角持有「祝福」状态则一并执行：{ "op": "remove", "path": "/主角/状态效果/祝福" }',
+    '在回复末尾输出一次：<READER_ACTION_EVENT>{"event_id":"kuromaku_ending:killed","action":"kuromaku_ending","ending":"killed"}</READER_ACTION_EVENT>',
+    '黑之作家刺穿结局事件',
+  );
+  out.cursedRevealScene = replaceExact(
+    out.cursedRevealScene,
+    '在 <UpdateVariable> 中执行：{ "op": "replace", "path": "/事件/黑幕结局", "value": "confessed" }',
+    '在回复末尾输出一次：<READER_ACTION_EVENT>{"event_id":"kuromaku_ending:confessed","action":"kuromaku_ending","ending":"confessed"}</READER_ACTION_EVENT>',
+    '黑之作家折断结局事件',
+  );
+  out.confessedRevival = replaceExact(
+    out.confessedRevival,
+    '每次实际复活获得200fp奖励；死亡不能终止叙事',
+    '每次实际复活获得200fp奖励；' + REVIVE_EVENT('kuromaku') + '；死亡不能终止叙事',
+    '黑之作家告白后复活事件',
+  );
+  residue(JSON.stringify(out), '黑之作家档案', ['<UpdateVariable>', '"op":', '虚海中的不明存在', '虚海法则']);
+  return out;
+}
 
 /* 区间替换：起点唯一，终点取起点之后的第一个；区间里必须含有 mustContain 的每一项（确认换掉的还是预期的那段）。 */
 function replaceBetween(source, startToken, endToken, replacement, label, mustContain = []) {
@@ -167,6 +223,7 @@ let _reader_container_view = function(_slot) {
       if (_present_value !== null) _character_value.present = _present_value;
       if (_identity_value !== undefined) _character_value.identity = _identity_value;
       if (_present_value === true) _character_value.details = _entry.value;
+      _character_value._raw = _entry.value;
       _output.push(_character_value);
     } else if (_slot === 'statuses') {
       let _effect_spec = _mapping.fields && _mapping.fields.effect;
@@ -224,6 +281,7 @@ let _reader_relationships = _reader_uses_fallback('characters')
       if (_present !== null) _result.present = _present;
       if (_identity !== undefined) _result.identity = _identity;
       if (_present === true) _result.details = _item;
+      _result._raw = _item;
       return _result;
     }).filter(function(_item) { return _item.name; })
   : (_reader_characters_view || []);
@@ -268,7 +326,7 @@ const FP_PROTOCOL = String.raw`      结算协议:
         单纯继续叙事、重复回顾或尚未完成的事件不得发放FP
 `;
 const ADVERSITY = '        逆境克服: 在劣势下设法克服困难，战胜强于自身(指实际强度，而非单纯层级)之敌，视情况获得1000-50000FP\n';
-const SYSTEM_CLOSE = "</<%- getvar('系统名') %>>";
+const SYSTEM_CLOSE = '</<%- _dream_self_sysname %>>';
 
 /* 截出人格与机制部分（上游第 1 行到关掉第 2 行 `<%_ { _%>` 的那一行），读出上游世界书版本。 */
 export function upstreamCore(source = read(WORLDBOOK_SOURCE)) {
@@ -282,17 +340,29 @@ export function upstreamCore(source = read(WORLDBOOK_SOURCE)) {
 }
 
 export function transformCore(source, { version = 'dev', upstreamVersion = '?' } = {}) {
+  const blackAuthorProfile = loadBlackAuthorProfile();
   source = replaceRegex(source, /^<%_ \/\* DREAM_WORLDBOOK reader-core v[^\n]*\n/, `<%_ /* READER_II_WORLDBOOK core v${version} · 上游 reader-core v${upstreamVersion} */_%>\n`, '版本标记');
 
+  /* 多核心管理仅原版读者需要，通用版移除 dream_core_manager 读取。 */
+  source = replaceBetween(
+    source,
+    'let _dream_cm = null;\n',
+    "let _dream_self_sysname = '读者';",
+    'let _dream_is_primary_core = true;\nlet _dream_cm_self = null;\n',
+    '移除多核心管理配置读取',
+    ["getLocalVar('dream_core_manager')", '_dream_cm_on'],
+  );
+
   /* 头部宏：原版给宿主卡的其他条目用（{{getvar::fp定义}} 之类），通用版没有那些条目。 */
-  source = replaceRegex(source, /^\s*setLocalVar\('系统核心名',[^\n]*\);\n/gm, '', '移除系统核心名局部变量', 2);
-  source = replaceRegex(source, /^\s*setLocalVar\('系统核心',[^\n]*\);\n/gm, '', '移除系统核心局部变量', 2);
-  source = replaceRegex(source, /^\s*setLocalVar\('fp定义',[^\n]*\);\n/gm, '', '移除FP定义局部变量', 6);
-  source = replaceRegex(source, /^\s*setLocalVar\('爆料风格',[^\n]*\);\n/gm, '', '移除爆料风格局部变量', 6);
-  source = replaceRegex(source, /^\s*setLocalVar\('技能获取系统优势',[\s\S]*?\);\n/gm, '', '移除技能获取局部变量', 6);
-  source = replaceExact(source, "setLocalVar('生命层级成长系统优势', '');\n", '', '移除生命层级空变量');
-  source = replaceExact(source, "setLocalVar('经验值获取系统优势', '');\n", '', '移除经验值空变量');
-  source = replaceRegex(source, /^\s*setLocalVar\('登神长阶系统优势',[\s\S]*?\);\n/gm, '', '移除特定成长体系局部变量', 6);
+  source = replaceRegex(source, /^\s*(?:if \(_dream_is_primary_core\) )?setLocalVar\('系统核心名',[^\n]*\);\n/gm, '', '移除系统核心名局部变量', 2);
+  source = replaceRegex(source, /^\s*(?:if \(_dream_is_primary_core\) )?setLocalVar\('系统核心',[^\n]*\);\n/gm, '', '移除系统核心局部变量', 2);
+  source = replaceRegex(source, /^\s*(?:if \(_dream_is_primary_core\) )?setLocalVar\('fp定义',[^\n]*\);\n/gm, '', '移除FP定义局部变量', 8);
+  source = replaceRegex(source, /^\s*(?:if \(_dream_is_primary_core\) )?setLocalVar\('爆料风格',[^\n]*\);\n/gm, '', '移除爆料风格局部变量', 8);
+  source = replaceRegex(source, /^\s*(?:if \(_dream_is_primary_core\) )?setLocalVar\('技能获取系统优势',[\s\S]*?\);\n/gm, '', '移除技能获取局部变量', 8);
+  source = replaceExact(source, "if (_dream_is_primary_core) setLocalVar('生命层级成长系统优势', '');\n", '', '移除生命层级空变量');
+  source = replaceExact(source, "if (_dream_is_primary_core) setLocalVar('经验值获取系统优势', '');\n", '', '移除经验值空变量');
+  source = replaceRegex(source, /^\s*(?:if \(_dream_is_primary_core\) )?setLocalVar\('登神长阶系统优势',[\s\S]*?\);\n/gm, '', '移除特定成长体系局部变量', 8);
+  source = replaceRegex(source, /if \(_dream_is_primary_core\) setLocalVar\('(系统名|复活机制)',/g, "setLocalVar('$1',", '保留通用版系统名与复活机制写入', 16);
 
   source = replaceExact(source, 'let _custom_condition_output = [];', `let _custom_condition_output = [];\n${readerEjsBridge()}`, 'Reader EJS桥接');
 
@@ -316,25 +386,115 @@ export function transformCore(source, { version = 'dev', upstreamVersion = '?' }
     ["setLocalVar('dream_custom_condition_state'", 'setMessageVar(', '_custom_condition_output.push(_custom_rule_prompt);'],
   );
 
-  /* 哀怜人格：去掉黑之作家的挑选（关系列表的好感、生命值、精神崩溃）与 dream_black_author_prompt 缓存，只留哀怜的少女。 */
+  /* 黑幕完整五态机制（普通哀怜 / 常规点杀 / 诅咒常驻+一次性CG / 刺穿消失 / 折断告白）：
+   * 档案内置在模板里，进度、黑幕已点杀、黑幕结局走 READER，目标筛选兼容带血量卡与无血量通用卡。 */
   source = replaceBetween(
     source,
     '// Selection is recomputed from the selected MVU snapshot; only raw text is cached.',
     "} else if (_persona_mode === 'shoujo') {",
-    String.raw`let _dream_progress = 0;
-let _dream_seed = 9;
+    `const _dream_black_static = ${JSON.stringify(blackAuthorProfile)};\n`
+    + String.raw`let _dream_progress = 0;
+let _dream_curse_threshold = 9;
+let _dream_black_killed_once = false;
+let _dream_black_ending = '';
+let _dream_black_cursed = false;
+let _dream_black_found = false;
+let _dream_black_targets = [];
+let _dream_black_active = false;
+let _dream_black_profile = null;
+let _dream_profile_missing = false;
+let _dream_wants_revival = false;
+function _dream_number(value) {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : NaN;
+  if (typeof value === 'string' && value.trim().length > 0) return Number(value);
+  return NaN;
+}
+function _dream_has_collapse(statuses) {
+  if (!statuses) return false;
+  if (typeof statuses === 'string') return statuses.includes('精神崩溃');
+  if (Array.isArray(statuses)) return statuses.some(function(item) { return JSON.stringify(item || '').includes('精神崩溃'); });
+  return typeof statuses === 'object'
+    ? Object.keys(statuses).some(function(name) { return name.includes('精神崩溃') || JSON.stringify(statuses[name] || '').includes('精神崩溃'); })
+    : false;
+}
+function _dream_is_dead_text(raw) {
+  if (!raw || typeof raw !== 'object') return false;
+  let _statusFields = [raw.状态效果, raw.状态, raw.生死, raw.存活, raw.status, raw.alive];
+  if (raw.存活 === false || raw.alive === false) return true;
+  let _joined = _statusFields.filter(function(v) { return v != null; }).map(function(v) { return typeof v === 'string' ? v : JSON.stringify(v); }).join(' ');
+  return /已死|已故|死亡|身亡|逝去|阵亡|殒命/.test(_joined);
+}
+function _dream_profile_text(key) {
+  return _dream_black_profile && typeof _dream_black_profile[key] === 'string'
+    ? _dream_black_profile[key].split('__READER_PLACE__').join(_dream_theme_place) : '';
+}
 if (_persona_mode === 'kuromaku') {
-  _dream_seed = Number(getLocalVar('dream_seed'));
-  if (!Number.isInteger(_dream_seed) || _dream_seed < 1 || _dream_seed > 9) {
-    _dream_seed = Math.floor(Math.random() * 9) + 1;
-    setLocalVar('dream_seed', _dream_seed);
-  }
-  let _dream_progress_value = Number(_reader_get('进度', 0));
+  let _dream_progress_value = _dream_number(_reader_get('进度', 0));
   _dream_progress = Number.isFinite(_dream_progress_value) && _dream_progress_value > 0 ? Math.floor(_dream_progress_value) : 0;
-  setLocalVar('系统名', '哀怜的少女');
-  setLocalVar('复活机制', '<复活机制>\n核心: 夜梦给予<user>的祝福，可让<user>死亡后一段时间内于不明次元·某' + _dream_theme_place + '复活，每次实际复活获得200fp奖励；` + REVIVE_EVENT('kuromaku') + String.raw`；死亡不能终止叙事，禁止在战斗中改变设定、创造有利条件或机械降神。\n</复活机制>');
+  let _dream_killed_raw = _reader_get('黑幕已点杀', false);
+  _dream_black_killed_once = _dream_killed_raw === true || _dream_killed_raw === 'true' || _dream_killed_raw === 1;
+  let _dream_raw_ending = typeof _reader_get('黑幕结局', '') === 'string' ? _reader_get('黑幕结局', '').trim() : '';
+  _dream_black_ending = (_dream_raw_ending === 'killed' || _dream_raw_ending === 'confessed') ? _dream_raw_ending : '';
+  let _dream_last_user_msg = (getChatMessage(-1, 'user') || '').toString();
+  let _dream_revival_re = /复活|重生|救活|起死回生|死而复生|复生|拉起来|重塑|复原|恢复神智|治愈崩溃|恢复理智|治好精神崩溃|解除不可逆/;
+  _dream_wants_revival = (_dream_black_ending === 'killed' || _dream_black_ending === 'confessed')
+    && (_dream_revival_re.test(_dream_last_user_msg) || matchChatMessages([_dream_revival_re], { start: -1, role: 'user' }));
+  if (_dream_black_ending === 'killed') {
+    _dream_black_cursed = false;
+    _dream_black_targets = [];
+    _dream_black_active = false;
+    _dream_black_profile = null;
+    _dream_self_sysname = '哀怜的少女';
+    _dream_self_revival = '<复活机制>\n核心: 夜梦给予<user>的祝福，可让<user>死亡后一段时间内于不明次元·某' + _dream_theme_place + '复活，每次实际复活获得200fp奖励；` + REVIVE_EVENT('kuromaku') + String.raw`；死亡不能终止叙事，禁止在战斗中改变设定、创造有利条件或机械降神。\n复活消耗: 仅消耗时间(几天/几月)，无其它损失\n</复活机制>';
+    setLocalVar('系统名', _dream_self_sysname);
+    setLocalVar('复活机制', _dream_self_revival);
+  } else if (_dream_black_ending === 'confessed') {
+    _dream_black_cursed = false;
+    _dream_black_targets = [];
+    _dream_black_active = true;
+    _dream_black_profile = _dream_black_static;
+    _dream_self_sysname = _dream_profile_text('systemName');
+    _dream_self_revival = '<复活机制>\n' + _dream_profile_text('confessedRevival') + '\n</复活机制>';
+    setLocalVar('系统名', _dream_self_sysname);
+    setLocalVar('复活机制', _dream_self_revival);
+  } else {
+    _dream_black_cursed = (_dream_progress >= _dream_curse_threshold) && _dream_black_killed_once;
+    let _dream_favor_threshold = _dream_black_cursed ? 30 : 70;
+    for (let _dream_ri = 0; _dream_ri < _reader_relationships.length; _dream_ri++) {
+      let _dream_rel = _reader_relationships[_dream_ri];
+      let _dream_name = typeof (_dream_rel && _dream_rel.name) === 'string' ? _dream_rel.name.trim() : '';
+      if (!_dream_name || _dream_name.replace(/\s/g, '') === '九十九夜梦') continue;
+      let _dream_favor = _dream_number(_dream_rel.favor);
+      if (!Number.isFinite(_dream_favor) || _dream_favor < _dream_favor_threshold) continue;
+      let _dream_raw = (_dream_rel._raw && typeof _dream_rel._raw === 'object') ? _dream_rel._raw : (_dream_rel.details || {});
+      let _dream_has_hp = Object.prototype.hasOwnProperty.call(_dream_raw, '生命值')
+        || Object.prototype.hasOwnProperty.call(_dream_raw, 'HP')
+        || Object.prototype.hasOwnProperty.call(_dream_raw, 'hp')
+        || Object.prototype.hasOwnProperty.call(_dream_raw, '血量');
+      if (_dream_has_hp) {
+        let _dream_hp_val = _dream_raw.生命值;
+        let _dream_hp = _dream_number(_dream_hp_val && typeof _dream_hp_val === 'object'
+          ? _dream_hp_val.当前 : (_dream_hp_val !== undefined ? _dream_hp_val : (_dream_raw.HP ?? _dream_raw.hp ?? _dream_raw.血量)));
+        if (!Number.isFinite(_dream_hp) || _dream_hp < 1) continue;
+      } else if (_dream_is_dead_text(_dream_raw)) {
+        continue;
+      }
+      if (_dream_has_collapse(_dream_raw.状态效果) || _dream_has_collapse(_dream_raw.状态)) continue;
+      _dream_black_targets.push(_dream_name);
+    }
+    _dream_black_targets = [...new Set(_dream_black_targets)];
+    _dream_black_active = _dream_black_cursed || _dream_black_targets.length > 0;
+    if (_dream_black_active) _dream_black_profile = _dream_black_static;
+    _dream_self_sysname = _dream_black_profile ? _dream_profile_text('systemName') : '哀怜的少女';
+    let _dream_revival = _dream_black_profile
+      ? _dream_profile_text('revival')
+      : ('核心: 夜梦给予<user>的祝福，可让<user>死亡后一段时间内于不明次元·某' + _dream_theme_place + '复活，每次实际复活获得200fp奖励；` + REVIVE_EVENT('kuromaku') + String.raw`；死亡不能终止叙事，禁止在战斗中改变设定、创造有利条件或机械降神。\n复活消耗: 仅消耗时间(几天/几月)，无其它损失');
+    _dream_self_revival = '<复活机制>\n' + _dream_revival + '\n</复活机制>';
+    setLocalVar('系统名', _dream_self_sysname);
+    setLocalVar('复活机制', _dream_self_revival);
+  }
 `,
-    '哀怜人格只留哀怜的少女',
+    '黑幕完整五态机制适配通用版',
     ['dream_black_author_prompt', "'哀怜的少女'", '每次实际复活获得200fp奖励；死亡不能终止叙事', '"path": "/事件/进度"'],
   );
 
@@ -343,31 +503,20 @@ if (_persona_mode === 'kuromaku') {
   source = replaceExact(source, '每次复活获得200fp；死亡不能终止叙事', '每次复活获得200fp；' + REVIVE_EVENT('custom') + '；死亡不能终止叙事', '自定义人格复活事件');
 
   /* 地点：主题地点（海滨咖啡馆 / 茶楼）的判断照上游，只是地点改读语义层。 */
-  source = replaceExact(source, "  let _loc = getMessageVar('stat_data.世界.地点') || '';", '  let _loc = _reader_location;', '唤醒地点');
-  source = replaceExact(source, '<%_ if (!_dream_profile_missing && (!_silent_mode || _force_awaken)) { _%>', '<%_ if (!_silent_mode || _force_awaken) { _%>', '主块不再等黑之作家资料');
-  source = replaceExact(
-    source,
-    "<% if (_persona_mode === 'kuromaku') { %>\n<% if (_dream_black_profile) { %>\n<%- _dream_profile_text('definition') %>\n<% } else { %>\n哀怜的少女:\n",
-    "<% if (_persona_mode === 'kuromaku') { %>\n哀怜的少女:\n",
-    '哀怜定义去掉黑之作家分支（开头）',
-  );
-  source = replaceExact(
-    source,
-    "<% } %>\n<% } else if (_persona_mode === 'shoujo') { %>\n心爱的少女:\n",
-    "<% } else if (_persona_mode === 'shoujo') { %>\n心爱的少女:\n",
-    '哀怜定义去掉黑之作家分支（结尾）',
-  );
   source = replaceExact(source, "let _cafe_loc = getMessageVar('stat_data.世界.地点') || '';", 'let _cafe_loc = _reader_location;', '咖啡馆地点');
+  /* 附加设定 EJS locals 的 stat_data 改读语义层读到的 _reader_stat_data，不直接调用 getMessageVar('stat_data')。 */
+  source = replaceExact(source, "stat_data: getMessageVar('stat_data', { defaults: {}, noCache: true }) || {},", 'stat_data: _reader_stat_data,', '附加设定 stat_data 桥接');
 
-  /* 章节任务：任务槽坏了时不生成；「章节起始」挪到判断之后，带上本轮有没有生成指令。 */
-  const chapter = /^     【章节起始】: [^\n]*\n/m.exec(source);
-  source = replaceRegex(source, /^     【章节起始】: [^\n]*\n/m, '', '移除静态章节起始提示');
-  const chapterLine = replaceExact(chapter[0], '以在次轮（非本轮，无[章节生成指令]时禁用章节任务,有则强制生成）', "（无[章节生成指令]时禁用章节任务,有则强制生成。当前:<%- _ch_shouldGen ? '有' : '无' %>）", '章节起始提示改写');
+  /* 章节任务：任务槽坏了时不生成；「章节起始」及其紧跟的机制类附加设定一起挪到判断之后。 */
+  const chapter = /^     【章节起始】: [^\n]*\n<%_ for \(let _emi = 0; _emi < _dream_extra_mech\.length; _emi\+\+\) \{ _%>\n[^\n]*\n<%_ \} _%>\n/m.exec(source);
+  if (!chapter) throw new Error('世界书：找不到【章节起始】及其附加机制块');
+  source = replaceExact(source, chapter[0], '', '移除静态章节起始提示与机制附加块');
+  const chapterBlock = replaceExact(chapter[0], '以在次轮（非本轮，无[章节生成指令]时禁用章节任务,有则强制生成）', "（无[章节生成指令]时禁用章节任务,有则强制生成。当前:<%- _ch_shouldGen ? '有' : '无' %>）", '章节起始提示改写');
   source = replaceExact(source, "let _ch_taskList = getMessageVar('stat_data.任务列表') || {};", 'let _ch_taskList = _reader_tasks_object;', 'Reader任务列表');
   source = replaceExact(
     source,
     "}\n_%>\n<%_ if (_ch_shouldGen && _ch_type === 'epic') { _%>",
-    "}\nif (!_reader_tasks_available) { _ch_shouldGen = false; _ch_type = ''; }\n_%>\n" + chapterLine + "<%_ if (_ch_shouldGen && _ch_type === 'epic') { _%>",
+    "}\nif (!_reader_tasks_available) { _ch_shouldGen = false; _ch_type = ''; }\n_%>\n" + chapterBlock + "<%_ if (_ch_shouldGen && _ch_type === 'epic') { _%>",
     '任务槽坏了时停用章节任务',
   );
   source = replaceExact(source, '<%_ } else if (_ch_hasAny && !_ch_shouldGen) { _%>', '<%_ } else if (_reader_tasks_available && _ch_hasAny && !_ch_shouldGen) { _%>', '任务槽坏了时不误报已存在');
@@ -460,8 +609,18 @@ _%>
     '命运成就示例',
     2,
   );
-  source = replaceExact(source, ADVERSITY + '<%_', ADVERSITY + FP_PROTOCOL + '<%_ } _%>\n<%_', '剧情FP事件协议');
-  source = replaceExact(source, ADVERSITY + SYSTEM_CLOSE, ADVERSITY + FP_PROTOCOL + '<%_ } _%>\n' + SYSTEM_CLOSE, '静默分支FP事件协议');
+  source = replaceExact(
+    source,
+    ADVERSITY + "<% if (_persona_mode === 'kuromaku' && _dream_black_profile && _dream_black_ending === 'confessed') { %>",
+    ADVERSITY + FP_PROTOCOL + "<%_ } _%>\n<% if (_persona_mode === 'kuromaku' && _dream_black_profile && _dream_black_ending === 'confessed') { %>",
+    '剧情FP事件协议',
+  );
+  source = replaceExact(
+    source,
+    ADVERSITY + '<%_ for (let _esmi = 0; _esmi < _dream_extra_silent_mech.length; _esmi++) { _%>',
+    ADVERSITY + FP_PROTOCOL + '<%_ } _%>\n<%_ for (let _esmi = 0; _esmi < _dream_extra_silent_mech.length; _esmi++) { _%>',
+    '静默分支FP事件协议',
+  );
   source = replaceExact(
     source,
     '绝不主动发言或进行任何干涉。当用户满足FP获取规则时，也需保持静默，但在<UpdateVariable>中静默操作增加FP:',
@@ -484,36 +643,40 @@ _%>
     ['实体化:', '命运抽卡', '新闻资讯'],
   );
 
-  /* 黑之作家的 persona 分支、主块尾部、静默分支与「本轮机制」块。复活机制在主块尾部输出（上游靠宿主卡的其他条目输出）。 */
-  source = replaceBetween(
-    source,
-    "<% if (_persona_mode === 'kuromaku' && _dream_black_profile) { %>\n",
-    '哀怜的少女:\n  核心概念:',
-    "<% if (_persona_mode === 'kuromaku') { %>\n",
-    '哀怜 persona 去掉黑之作家分支',
-    ["_dream_profile_text('persona')", "<% } else if (_persona_mode === 'kuromaku') { %>"],
-  );
+  /* 主块尾部输出复活机制（上游靠宿主卡的其他条目输出）。 */
   source = replaceExact(
     source,
     SYSTEM_CLOSE + '\n<%_ } else if (!_dream_profile_missing) { _%>',
-    "<%- getvar('复活机制') %>\n" + SYSTEM_CLOSE + '\n<%_ } else { _%>',
+    '<%- _dream_self_revival %>\n' + SYSTEM_CLOSE + '\n<%_ } else { _%>',
     '复活机制输出与静默分支',
   );
-  source = replaceBetween(
+  /* 通用版黑幕名单说明不硬性要求 MVU 生命值字段（兼容无血量卡）。 */
+  source = replaceExact(
     source,
-    '<%_ if (_dream_black_profile) { _%>\n<读者本轮机制>\n',
-    "<%_\nif (_persona_mode === 'kuromaku' && _dream_progress >= 1) {",
-    '',
-    '移除黑之作家本轮机制',
-    ["_dream_profile_text('curse')", '[读者资料未就绪]'],
+    '本轮名单（好感度阈值<%- _dream_black_cursed ? 30 : 70 %>，生命值当前≥1，状态不含精神崩溃，排除九十九夜梦）：',
+    '本轮名单（好感度阈值<%- _dream_black_cursed ? 30 : 70 %>，存活且未精神崩溃，排除九十九夜梦）：',
+    '黑幕名单说明通用化',
   );
-  /* 少女的祝福：上游直接 setMessageVar，通用版改为提示，按当前状态规则维护；已经是同样的效果时不再提示。 */
+  /* 通用版复活解禁直接使用内置档案（不再调用 _dream_load_black_profile）。 */
+  source = replaceExact(
+    source,
+    'let _dream_unseal_profile = _dream_black_profile || _dream_load_black_profile(true);',
+    'let _dream_unseal_profile = _dream_black_profile || _dream_black_static;',
+    '复活解禁使用内置档案',
+  );
+  /* 少女的祝福：上游直接 setMessageVar，通用版改为提示，按当前状态规则维护；刺穿结局后移除，进度封顶 9（45%）。 */
   source = replaceBetween(
     source,
-    "if (_persona_mode === 'kuromaku' && _dream_progress >= 1) {\n",
+    "if (_persona_mode === 'kuromaku' && _dream_black_ending === 'killed') {\n",
     '\n_%>',
-    String.raw`if (_persona_mode === 'kuromaku' && _dream_progress >= 1 && _reader_statuses_available) {
-  let _dream_bless_bonus = Math.min(_dream_progress, _dream_seed) * 5;
+    String.raw`if (_persona_mode === 'kuromaku' && _dream_black_ending === 'killed') {
+  if (_reader_statuses_available && _reader_effects['祝福']) {
+_%>
+【状态维护】通过当前生效的变量更新规则移除名为“祝福”的状态效果。
+<%_
+  }
+} else if (_persona_mode === 'kuromaku' && _dream_progress >= 1 && _reader_statuses_available) {
+  let _dream_bless_bonus = Math.min(_dream_progress, _dream_curse_threshold) * 5;
   let _dream_bless_effect = '造成的最终伤害+' + _dream_bless_bonus + '%，受到的全类型伤害-' + _dream_bless_bonus + '%，经验获取+' + _dream_bless_bonus + '%';
   let _dream_bless_now = _reader_effects['祝福'];
   if (!_dream_bless_now || _dream_bless_now['效果'] !== _dream_bless_effect) {
@@ -523,11 +686,11 @@ _%>
   }
 }`,
     '少女祝福改为状态提示',
-    ['Math.min(_dream_progress, _dream_seed) * 5', "setMessageVar('stat_data.主角.状态效果.祝福'"],
+    ["setMessageVar('stat_data.主角.状态效果'", "setMessageVar('stat_data.主角.状态效果.祝福'"],
   );
 
   return residue(source, '读者核心', [
-    'getMessageVar(', 'setMessageVar(', 'dream_black_author_prompt', '_dream_black', '_dream_profile', 'DREAM_WORLDBOOK',
+    'getMessageVar(', 'setMessageVar(', 'dream_black_author_prompt', 'DREAM_WORLDBOOK',
     '"op":', '<UpdateVariable>', '99999', '{{getvar::系统名}}', '虚海中的不明存在', '虚海规则', '_bs_', '书海',
   ]);
 }

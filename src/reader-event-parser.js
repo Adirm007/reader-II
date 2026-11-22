@@ -25,7 +25,12 @@
     return modules.hashText ? modules.hashText(String(text || '')) : String(text || '').length + '';
   }
 
-  function createEventParser(controller, env, economy, runtimeStore, semanticRouter) {
+  function createEventParser(controller, env, economy, runtimeStore, semanticRouter, options) {
+    var enabledCheck = options && typeof options.isEnabled === 'function' ? options.isEnabled : null;
+    function active() {
+      if (!enabledCheck) return true;
+      try { return enabledCheck() === true; } catch (error) { return false; }
+    }
     function getMessage(messageId) {
       if (typeof env.getChatMessages !== 'function') return null;
       try {
@@ -108,6 +113,28 @@
       });
     }
 
+    async function rollbackKuromakuKillOperation(operation) {
+      return controller.mutate('rollback_kuromaku_kill', function (data, reader) {
+        if (!reader) return false;
+        if (typeof operation.beforeProgress === 'number') reader.进度 = Math.max(0, Math.trunc(operation.beforeProgress));
+        if (operation.beforeKilledOnce === undefined) delete reader.黑幕已点杀;
+        else reader.黑幕已点杀 = operation.beforeKilledOnce;
+        return true;
+      });
+    }
+
+    async function rollbackKuromakuEndingOperation(operation) {
+      if (operation && operation.removedBlessing && typeof semanticRouter.rollbackStatusRemoval === 'function') {
+        await semanticRouter.rollbackStatusRemoval(operation.removedBlessing);
+      }
+      return controller.mutate('rollback_kuromaku_ending', function (data, reader) {
+        if (!reader) return false;
+        if (operation.beforeEnding === undefined || operation.beforeEnding === '') delete reader.黑幕结局;
+        else reader.黑幕结局 = operation.beforeEnding;
+        return true;
+      });
+    }
+
     async function rollbackMessageTransaction(messageKey, transaction, runtime) {
       if (!transaction) return false;
       var operations = Array.isArray(transaction.operations) ? transaction.operations.slice().reverse() : [];
@@ -117,6 +144,8 @@
         else if (operation.kind === 'status_insert') await rollbackStatusOperation(operation);
         else if (operation.kind === 'task_insert' || operation.kind === 'task_remove') await rollbackTaskOperation(operation);
         else if (operation.kind === 'progress_delta') await rollbackProgressOperation(operation);
+        else if (operation.kind === 'kuromaku_kill') await rollbackKuromakuKillOperation(operation);
+        else if (operation.kind === 'kuromaku_ending') await rollbackKuromakuEndingOperation(operation);
         if (operation.settledId) delete runtime.settledEvents[operation.settledId];
       }
       delete runtime.assistantTransactions[messageKey];
@@ -173,6 +202,7 @@
     }
 
     async function processMessage(messageId) {
+      if (!active()) return { skipped: true, reason: 'disabled' };
       var message = getMessage(messageId);
       if (!message || message.role !== 'assistant') return { skipped: true, reason: 'not_assistant' };
       var text = String(message.message || '');
@@ -220,6 +250,7 @@
           results.push({ error: error.message || String(error), event: taskEvent });
         }
       }
+      var kuromakuKillApplied = false;
       for (var actionIndex = 0; actionIndex < actionEvents.length; actionIndex += 1) {
         var action = actionEvents[actionIndex];
         var actionId = String(action.event_id || action.id || action.action || actionIndex);
@@ -280,6 +311,50 @@
               throw manifestError;
             }
             results.push({ action: 'entity_manifest' });
+          } else if (action.action === 'kuromaku_kill') {
+            if (kuromakuKillApplied) {
+              results.push({ action: 'kuromaku_kill', skipped: true, reason: 'once_per_turn' });
+              continue;
+            }
+            kuromakuKillApplied = true;
+            var killBefore = { progress: 0, killedOnce: undefined };
+            var killProgress = await controller.mutate('kuromaku_kill', function (data, reader) {
+              if (!reader || !Object.prototype.hasOwnProperty.call(reader, '进度')) throw new Error('只有黑幕人格可记录点杀进度');
+              if (reader.黑幕结局 === 'killed' || reader.黑幕结局 === 'confessed') return reader.进度;
+              killBefore.progress = Math.max(0, Math.trunc(Number(reader.进度) || 0));
+              killBefore.killedOnce = Object.prototype.hasOwnProperty.call(reader, '黑幕已点杀') ? reader.黑幕已点杀 : undefined;
+              reader.进度 = killBefore.progress + 1;
+              reader.黑幕已点杀 = true;
+              return reader.进度;
+            });
+            recordOperation(messageId, {
+              kind: 'kuromaku_kill',
+              beforeProgress: killBefore.progress,
+              beforeKilledOnce: killBefore.killedOnce
+            });
+            results.push({ action: 'kuromaku_kill', progress: killProgress });
+          } else if (action.action === 'kuromaku_ending') {
+            var ending = String(action.ending || '').trim();
+            if (ending !== 'killed' && ending !== 'confessed') throw new Error('未知黑幕结局: ' + ending);
+            var endingBefore = undefined;
+            await controller.mutate('kuromaku_ending:' + ending, function (data, reader) {
+              if (!reader || !Object.prototype.hasOwnProperty.call(reader, '进度')) throw new Error('只有黑幕人格可记录结局');
+              endingBefore = Object.prototype.hasOwnProperty.call(reader, '黑幕结局') ? reader.黑幕结局 : undefined;
+              reader.黑幕结局 = ending;
+            });
+            var removedBlessing = null;
+            if (ending === 'killed' && typeof semanticRouter.removeStatus === 'function') {
+              try {
+                var removed = await semanticRouter.removeStatus('祝福');
+                if (removed && removed.removed) removedBlessing = removed;
+              } catch (removeErr) { /* best-effort */ }
+            }
+            recordOperation(messageId, {
+              kind: 'kuromaku_ending',
+              beforeEnding: endingBefore,
+              removedBlessing: removedBlessing
+            });
+            results.push({ action: 'kuromaku_ending', ending: ending, removedBlessing: !!removedBlessing });
           }
         } catch (error) {
           results.push({ error: error.message || String(error), event: action });

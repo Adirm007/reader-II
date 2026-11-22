@@ -84,6 +84,7 @@
     /* 延后做的事不该拖住进程（Node 里的测试）：定时器 unref。 */
     function later(task, ms) { var timer = setTimeout(task, ms); if (timer && typeof timer.unref === 'function') timer.unref(); return timer; }
     function enabled() { try { return !disposed && !!api && typeof api.isEnabled === 'function' && api.isEnabled() === true; } catch (error) { return false; } }
+    function coexisting() { try { return !!(api && typeof api.isCoexisting === 'function' && api.isCoexisting() === true); } catch (error) { return false; } }
     function hostHasMvu() { try { return !!(api && typeof api.hostMvu === 'function' && api.hostMvu()); } catch (error) { return false; } }
 
     /* ---------- 模板的宿主函数（照提示词模板 ST-Prompt-Template 的语义） ---------- */
@@ -142,6 +143,13 @@
           var value = readPath(chatVars, key);
           return value === undefined ? (options || {}).defaults : value;
         },
+        getMessageVar: function (key, options) {
+          var opts = options || {};
+          var value = readPath(messageVars, key);
+          var result = value === undefined ? opts.defaults : value;
+          return opts.clone ? clone(result) : result;
+        },
+        setMessageVar: function (_key, value) { return value; },
         setLocalVar: function (key, value) {
           writePath(chatVars, key, clone(value));
           writePath(cache, key, clone(value));
@@ -152,6 +160,15 @@
           var message = pick(chatMessages(role, generationType), index);
           return message ? String(message.mes == null ? '' : message.mes) : '';
         },
+        lastUserMessage: (function () {
+          var msg = pick(chatMessages('user', generationType), -1);
+          return msg ? String(msg.mes == null ? '' : msg.mes) : '';
+        })(),
+        lastCharMessage: (function () {
+          var msg = pick(chatMessages('assistant', generationType), -1);
+          return msg ? String(msg.mes == null ? '' : msg.mes) : '';
+        })(),
+        lastMessageId: Array.isArray(ctx.chat) ? ctx.chat.length - 1 : -1,
         /* patterns：字符串、正则或它们的数组；start / end 是按角色筛过之后的下标（可用负数），默认只看最后一条。 */
         matchChatMessages: function (patterns, options) {
           var opts = options || {};
@@ -313,8 +330,9 @@
       return settings.regex;
     }
 
-    /* 旧版酒馆没有格式化钩子：往全局正则里放两条内置正则（已经有旧的三条或内置的就不重复放）。 */
+    /* 旧版酒馆没有格式化钩子：往全局正则里放两条内置正则（已经有旧的三条或内置的就不重复放；共存时不放，避免劫持原版 <dream>）。 */
     function installRegexFallback() {
+      if (coexisting()) return false;
       var list = regexList();
       if (!list) return false;
       var ids = list.map(function (item) { return item && item.id; });
@@ -328,6 +346,19 @@
       });
       if (added) { var ctx = context(); if (ctx && typeof ctx.saveSettingsDebounced === 'function') ctx.saveSettingsDebounced(); }
       return true;
+    }
+
+    function syncBuiltinRegexForCoexist() {
+      var list = regexList();
+      if (!list) return;
+      var wantDisabled = coexisting();
+      var ids = BUILTIN_REGEX.map(function (item) { return item.id; });
+      var changed = false;
+      list.forEach(function (rule) {
+        if (!rule || ids.indexOf(rule.id) < 0) return;
+        if (!!rule.disabled !== wantDisabled) { rule.disabled = wantDisabled; changed = true; }
+      });
+      if (changed) { var ctx = context(); if (ctx && typeof ctx.saveSettingsDebounced === 'function') ctx.saveSettingsDebounced(); }
     }
 
     /* ---------- 旧组件 ---------- */
@@ -411,6 +442,7 @@
     }
 
     function retireOnce() {
+      if (coexisting()) return;
       var key = kit.chatKey();
       if (!key || retired[key] || disposed) return;
       var ctx = context();
@@ -803,6 +835,10 @@
     var onCoreChanged = function (event) {
       if (!event || !event.detail || event.detail.reason !== 'enabled_changed') return;
       if (!enabled()) clear();
+      if (!formatter) {
+        if (!coexisting()) installRegexFallback();
+        syncBuiltinRegexForCoexist();
+      }
       var ctx = context();
       if (ctx && typeof ctx.reloadCurrentChat === 'function' && formatter) {
         try { Promise.resolve(ctx.reloadCurrentChat()).catch(function () {}); } catch (error) { /* ignore */ }

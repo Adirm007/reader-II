@@ -854,8 +854,10 @@
     }
 
     function sharingAllowed() {
-      var core = env.host && env.host.ReaderCore;
+      var core = env.host && (env.host.__ReaderIICore || env.host.ReaderCore);
+      if (core && typeof core.isCoexisting === 'function' && core.isCoexisting()) return true;
       if (core && typeof core.isEnabled === 'function') return core.isEnabled();
+      if (env.host && env.host.ReaderCore && env.host.ReaderCore.__reader_core_api !== true) return true;
       return kit.readChatValue('reader_ii_runtime') !== undefined || kit.readChatValue('dream_persona') !== undefined;
     }
 
@@ -931,6 +933,15 @@
         if (typeof book === 'string') checkedBooks.delete(book);
         else checkedBooks.clear();
       });
+      if (env.host && typeof env.host.addEventListener === 'function') {
+        var onCoreChanged = function (event) {
+          if (event && event.detail && event.detail.reason === 'enabled_changed') {
+            refreshInjection().catch(function () {});
+          }
+        };
+        env.host.addEventListener('reader-core-changed', onCoreChanged);
+        subscriptions.push({ stop: function () { try { env.host.removeEventListener('reader-core-changed', onCoreChanged); } catch (e) {} } });
+      }
       refreshInjection().catch(function () {});
     }
 

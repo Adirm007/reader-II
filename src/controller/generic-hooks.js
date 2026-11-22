@@ -10,6 +10,7 @@
   var extra = {
     openGacha: function () { return dreamOpenGacha(); },
     openIndependentApiSettings: function () { return openIndependentApiSettings(null, pToast); },
+    openExtraSettings: function () { return typeof openExtraSettingsModal === 'function' ? openExtraSettingsModal(null, pToast) : false; },
     openAgent: function (tab) { return dreamOpenAgent(tab || 'chat'); },
     openPanel: function () { return dreamOpenPanel(); }
   };

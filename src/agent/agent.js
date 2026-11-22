@@ -334,9 +334,39 @@
     }
 
     /* ---------- 人格 ---------- */
+    function readExtraInline(kind) {
+      try {
+        var raw = kit.readChatValue('dream_extra_settings');
+        if (!raw) return '';
+        var parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        var list = Array.isArray(parsed) ? parsed : (parsed && Array.isArray(parsed.items) ? parsed.items : []);
+        var parts = [];
+        for (var i = 0; i < list.length; i += 1) {
+          var it = list[i];
+          if (!it || it.enabled === false) continue;
+          var k = it.kind === 'ejs' ? 'mechanism' : it.kind;
+          if (k !== kind) continue;
+          var body = typeof it.content === 'string' ? it.content.trim() : '';
+          if (!body || body.indexOf('<' + '%') >= 0) continue;
+          var title = typeof it.name === 'string' ? it.name.trim() : '';
+          parts.push(title ? (title + '：' + body) : body);
+        }
+        return parts.length ? ('；' + parts.join('；')) : '';
+      } catch (error) { return ''; }
+    }
+
     function personaContext(requested) {
       var id = String(requested || kit.readChatValue('dream_persona') || 'reader');
       var address = String(kit.readChatValue('dream_user_address') || '').replace(/[\r\n<>]/g, '').trim().slice(0, 24);
+      var extraPers = readExtraInline('personality');
+      var extraApp = readExtraInline('appearance');
+      function mergePers(text) {
+        if (!extraPers || !text) return text;
+        if (/^([ \t]*(?:性格|表层性格)[：:][^\r\n]*)/m.test(text)) {
+          return text.replace(/^([ \t]*(?:性格|表层性格)[：:][^\r\n]*)/m, '$1' + extraPers);
+        }
+        return text + '\n性格：' + extraPers.replace(/^；/, '');
+      }
       function profile(key, name, brief, custom) {
         var override = settings.personaPrompts[key] || '';
         var defaultPrompt = modules.defaultReaderPersonaPrompt ? modules.defaultReaderPersonaPrompt(id, custom, kit.readChatValue).trim() : brief;
@@ -346,7 +376,8 @@
           if (typeof custom.appearance === 'string' && custom.appearance.trim()) appearance.defaultPrompt = custom.appearance.trim();
         }
         appearance.prompt = settings.appearancePrompts[appearance.key] || appearance.defaultPrompt;
-        return { id: id, name: name, key: key, address: address, card: override || brief, defaultPrompt: defaultPrompt, override: override, appearance: appearance };
+        appearance.effectivePrompt = appearance.prompt + extraApp;
+        return { id: id, name: name, key: key, address: address, card: mergePers(override || brief), defaultPrompt: defaultPrompt, override: override, appearance: appearance };
       }
       if (id === 'custom') {
         var custom = kit.readChatValue('dream_custom_persona');
@@ -384,7 +415,7 @@
       var simpleSelfie = /^(?:请)?(?:给我|发我)?(?:发|来|拍)?(?:一?张)?自拍(?:照)?[吧。！？!?\s]*$/;
       var simpleEnglishSelfie = /^(?:please )?(?:(?:send me|take) a )?selfie[.!?\s]*$/i;
       if (!ownPortrait.test(input) && !simpleSelfie.test(input.trim()) && !simpleEnglishSelfie.test(input.trim())) return input;
-      return input + '\n\n画面中若出现助手本人，请使用这份外貌设定：' + persona.appearance.prompt;
+      return input + '\n\n画面中若出现助手本人，请使用这份外貌设定：' + (persona.appearance.effectivePrompt || persona.appearance.prompt);
     }
 
     function environmentBrief() {
@@ -536,7 +567,7 @@
       var parts = [
         settings.assistantSystemPrompt.trim(),
         '【你是谁 · ' + persona.name + '】\n' + persona.card + '\n' + address,
-        '【你当前的外貌】\n' + persona.appearance.prompt
+        '【你当前的外貌】\n' + (persona.appearance.effectivePrompt || persona.appearance.prompt)
       ];
       if (lite) {
         parts.push('【工作方式】\n- 始终保持上述人格口吻交流。\n- 当前为轻聊模式（不启用工具）；当用户需要查看或修改酒馆内容时，引导对方在助手设置中关闭「轻聊」。');
@@ -1210,7 +1241,7 @@
         state.toolCtx.generateMedia = async function (kind, prompt, includeSelf) {
           checkActive();
           if (!mediaConfigured(kind)) throw new Error('此媒体工具已关闭或尚未设置');
-          if (includeSelf) prompt += '\n\n助手本人的外貌：' + persona.appearance.prompt;
+          if (includeSelf) prompt += '\n\n助手本人的外貌：' + (persona.appearance.effectivePrompt || persona.appearance.prompt);
           var connection = llm.getTaskConnection(kind);
           var signature = JSON.stringify([kind, connection.selected, connection.model, prompt]);
           if (failedMedia.has(signature)) throw new Error('此生成请求已失败，本轮未重复提交：' + failedMedia.get(signature));

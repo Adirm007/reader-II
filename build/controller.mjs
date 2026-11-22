@@ -58,14 +58,31 @@ export function transformReaderUi(input) {
     '${i("eggbooksea")}><b class="q-nm">进入普罗泰利西翁</b><small class="q-ds">书海迷宫。眼下的对话会留着；输入框里有草稿的话先存好。</small><span class="sv2">进入</span>',
     '${i("eggagent")}><b class="q-nm">和夜梦说说话</b><small class="q-ds">查资料、改变量、排查这张卡、整理记忆。要动手改东西之前，她会先问你。</small><span class="sv2">打开</span>',
     '彩蛋页书海入口 → 夜梦助手');
-  s = replaceExact(s, 'g(i("eggwb"),"检查更新","分别检查正则、脚本和世界书")',
-    'g(i("eggagentset"),"助手设置","模型与工具调用方式、权限、联网与插件对接、版本更新")+g(i("eggpanel"),"语义适配","把这张卡的变量接到读者这边，可以一键适配")+g(i("eggmemory"),"记忆","查看与助手的交流记忆，可随聊天保存或存进《夜之洋》")',
-    '彩蛋页检查更新 → 助手设置 / 语义适配 / 记忆');
+  /* 通用版彩蛋页本身主门就是夜梦助手，去掉原版共存附加的第二道夜梦助手门。 */
+  s = replaceRegex(
+    s,
+    /\+\([A-Za-z_$][\w$]*\.hasAgent\?`<button type="button" class="q-door" style="margin-top:10px"\$\{i\("eggagent"\)\}>[\s\S]*?<\/button>`:""\)/,
+    '',
+    '彩蛋页移除共存附加助手门',
+  );
+  /* 通用版不需要多核心管理，移除彩蛋页核心管理行。 */
+  s = replaceRegex(
+    s,
+    /\+[A-Za-z_$][\w$]*\(i\("eggcoremgr"\),"核心管理","[^"]*",`<span class="sv2" id="dlb-egg-coremgr">\$\{[A-Za-z_$][\w$]*\([A-Za-z_$][\w$]*\.coreMgr\|\|"未启用"\)\}<\/span>`\)/,
+    '',
+    '彩蛋页移除核心管理入口',
+  );
+  s = replaceRegex(
+    s,
+    /([A-Za-z_$][\w$]*)\(i\("eggwb"\),"检查更新","分别检查正则、脚本和世界书"\)/,
+    '$1(i("eggagentset"),"助手设置","模型与工具调用方式、权限、联网与插件对接、版本更新")+$1(i("eggpanel"),"语义适配","把这张卡的变量接到读者这边，可以一键适配")+$1(i("eggmemory"),"记忆","查看与助手的交流记忆，可随聊天保存或存进《夜之洋》")',
+    '彩蛋页检查更新 → 助手设置 / 语义适配 / 记忆',
+  );
   s = replaceExact(s, 'sea:"书海迷宫"', 'sea:"夜梦助手"', '三套主题的书海标题', 3);
   s = replaceExact(s, '{text:"更新新闻"}', '{text:"请读者写一则旁观札记"}', '三套主题的点单文本', 3);
   s = replaceExact(s, 'name:"新闻更新"', 'name:"旁观札记"', '三套主题的菜单名', 3);
   /* section[data-reader-booksea] 的样式留着无害。 */
-  residue(s, 'reader-ui.js', ['eggbooksea', 'eggwb', '检查更新', '书海', '普罗泰利西翁', '更新新闻', '新闻更新']);
+  residue(s, 'reader-ui.js', ['eggbooksea', 'eggcoremgr', 'eggwb', '检查更新', '核心管理', '书海', '普罗泰利西翁', '更新新闻', '新闻更新']);
   s = renameLocalKeys(s, 'reader-ui.js');
   return assertSyntax(s, 'reader-ui.generic.js');
 }
@@ -82,9 +99,16 @@ const ADAPTER_UPDATE_TAIL = [
 
 export function transformControllerAdapter(input) {
   /* createReaderBookseaHost 不存在，bookseaHost 自然为 null，书海那几行不用改。 */
-  const s = replaceExact(input, ADAPTER_UPDATE_TAIL, '', '文件末尾两个检查更新的 setTimeout');
-  residue(s, 'controller-adapter.js', ['ReaderUpdates', 'dreamWbAutoCheck', 'getUpdateOptions', 'scriptOwner']);
+  let s = replaceExact(input, ADAPTER_UPDATE_TAIL, '', '文件末尾两个检查更新的 setTimeout');
+  s = replaceExact(s, '      try { window.ReaderCoreManager?.uninstallWorldInfoHook?.(); } catch (_) {}\n', '', '移除多核心管理器卸载钩子');
+  residue(s, 'controller-adapter.js', ['ReaderUpdates', 'ReaderCoreManager', 'dreamWbAutoCheck', 'getUpdateOptions', 'scriptOwner']);
   return assertSyntax(renameLocalKeys(s, 'controller-adapter.js'), 'controller-adapter.generic.js');
+}
+
+/* ---------- extra-settings.js（附加设定：跨人格持久生效，按机制/外貌/性格三类并入提示词） ---------- */
+export function transformExtraSettings(input) {
+  assertNoMacro(input, 'extra-settings.js');
+  return assertSyntax(input, 'extra-settings.generic.js');
 }
 
 /* ---------- reader-ui-switch.js（新旧前端切换；只换本机键） ---------- */
@@ -220,6 +244,7 @@ export function transformUpstream({ upstream = PATHS.upstream, templates = PATHS
     prelude: src('controller-prelude.js'),
     ui: transformReaderUi(src('reader-ui.js')),
     album: transformBookseaAlbum(src('booksea-album.js')),
+    extraSettings: transformExtraSettings(src('extra-settings.js')),
     legacy: transformLegacy(src('legacy-reader.js')),
     templates: transformTemplateSystem(src('template-system.js'), loadGenericTemplate(templates)),
     adapter: transformControllerAdapter(src('controller-adapter.js')),

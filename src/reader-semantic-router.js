@@ -345,6 +345,108 @@
       });
     }
 
+    async function removeStatus(name) {
+      var targetName = String(name || '').trim();
+      if (!targetName) return { removed: false };
+      return controller.mutate('remove_status:' + targetName, function (data, reader) {
+        var route = routeFor('statuses');
+        if (route.status === 'broken') return { removed: false };
+        if (route.status !== 'active') {
+          var effects = reader && reader.主角 && reader.主角.状态效果;
+          if (!modules.isObject(effects) || !Object.prototype.hasOwnProperty.call(effects, targetName)) {
+            return { removed: false };
+          }
+          var oldEntry = modules.clone(effects[targetName]);
+          delete effects[targetName];
+          return {
+            removed: true,
+            target: { kind: 'reader_status', key: targetName },
+            entry: oldEntry
+          };
+        }
+        var bound = boundContainer(data, 'statuses', route);
+        var container = bound.container;
+        var mapping = bound.mapping;
+        if (Array.isArray(container)) {
+          var namePath = mapping && mapping.name && Array.isArray(mapping.name.path) ? mapping.name.path : ['名称'];
+          var idx = container.findIndex(function (item) {
+            if (!modules.isObject(item)) return false;
+            var cur = item;
+            for (var i = 0; i < namePath.length; i += 1) {
+              if (!cur || typeof cur !== 'object') { cur = undefined; break; }
+              cur = cur[namePath[i]];
+            }
+            return typeof cur === 'string' && cur.trim() === targetName;
+          });
+          if (idx < 0) return { removed: false };
+          var removedEntry = modules.clone(container[idx]);
+          container.splice(idx, 1);
+          return {
+            removed: true,
+            target: { kind: 'host_status', rootRef: route.rootRef, locator: { index: idx } },
+            entry: removedEntry
+          };
+        }
+        if (modules.isObject(container)) {
+          var hitKey = null;
+          if (mapping && mapping.name && mapping.name.from === 'key') {
+            if (Object.prototype.hasOwnProperty.call(container, targetName)) hitKey = targetName;
+          } else {
+            var kPath = mapping && mapping.name && Array.isArray(mapping.name.path) ? mapping.name.path : [];
+            hitKey = Object.keys(container).find(function (k) {
+              if (k === targetName) return true;
+              var cur = container[k];
+              for (var i = 0; i < kPath.length; i += 1) {
+                if (!cur || typeof cur !== 'object') { cur = undefined; break; }
+                cur = cur[kPath[i]];
+              }
+              return typeof cur === 'string' && cur.trim() === targetName;
+            }) || null;
+          }
+          if (!hitKey || !Object.prototype.hasOwnProperty.call(container, hitKey)) return { removed: false };
+          var removedObj = modules.clone(container[hitKey]);
+          delete container[hitKey];
+          return {
+            removed: true,
+            target: { kind: 'host_status', rootRef: route.rootRef, locator: { key: hitKey } },
+            entry: removedObj
+          };
+        }
+        return { removed: false };
+      });
+    }
+
+    async function rollbackStatusRemoval(operation) {
+      var target = operation && operation.target;
+      var entry = operation && operation.entry;
+      if (!target || entry === undefined) return false;
+      return controller.mutate('rollback_semantic_status_remove', function (data, reader) {
+        if (target.kind === 'reader_status') {
+          var effects = reader && reader.主角 && reader.主角.状态效果;
+          if (modules.isObject(effects) && !Object.prototype.hasOwnProperty.call(effects, target.key)) {
+            effects[target.key] = modules.clone(entry);
+            return true;
+          }
+          return false;
+        }
+        if (target.kind !== 'host_status') return false;
+        var container = economy.getHostValue(data, target.rootRef, undefined);
+        if (Array.isArray(container)) {
+          var pos = target.locator && Number.isInteger(target.locator.index) ? target.locator.index : container.length;
+          container.splice(Math.min(Math.max(0, pos), container.length), 0, modules.clone(entry));
+          return true;
+        }
+        if (modules.isObject(container)) {
+          var key = target.locator && target.locator.key;
+          if (key && !Object.prototype.hasOwnProperty.call(container, key)) {
+            container[key] = modules.clone(entry);
+            return true;
+          }
+        }
+        return false;
+      });
+    }
+
     async function unbind(slot) {
       if (!modules.isSemanticSlot(slot)) throw new Error('未知语义槽位：' + slot);
       runtimeStore.mutate(function (runtime) {
@@ -530,6 +632,8 @@
       },
       insertStatusIfAbsent: insertStatusIfAbsent,
       rollbackStatusInsertion: rollbackStatusInsertion,
+      removeStatus: removeStatus,
+      rollbackStatusRemoval: rollbackStatusRemoval,
       listInventory: function () { return readContainerSlot('inventory'); },
       inventoryShape: inventoryShape,
       sync: {

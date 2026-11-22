@@ -21,7 +21,7 @@ export function promptTemplates({ version = 'dev' } = {}) {
 // 生成的模块不能用严格模式：编译出的模板靠 with (locals) 取宿主函数（getvar 等）。
 export function promptsModule(templates) {
   // 正文与助手共用上游的人格和主题装扮原文。
-  const start = templates.core.indexOf("<% if (_persona_mode === 'kuromaku') { %>\n哀怜的少女:\n  核心概念:");
+  const start = templates.core.indexOf("<% if (_persona_mode === 'kuromaku' && _dream_black_profile && _dream_black_ending === 'confessed') { %>");
   const end = templates.core.indexOf("<%\nlet _dreamAppearance", start);
   if (start < 0 || end < 0) throw new Error('读者核心里找不到可编辑的人格段落');
   const profile = templates.core.slice(start, end);
@@ -32,15 +32,32 @@ export function promptsModule(templates) {
   // 咖啡馆装扮在上游是 EJS 分支。构建时渲染每款，打包成与盛夏、水墨相同的查找表。
   const renderOutfit = new Function('locals', ejsSource(templates.core.slice(end, appearanceEnd)));
   outfits.cafe = Object.fromEntries(Object.keys(outfits.summer).map(id => {
-    const text = renderOutfit({ _persona_mode: 'reader', _dream_theme: 'cafe', getvar: () => id }).trim();
+    const text = renderOutfit({ _persona_mode: 'reader', _dream_theme: 'cafe', _dream_extra_app_inline: '', getvar: () => id }).trim();
     if (!text.startsWith('此刻形象: ')) throw new Error('无法读取咖啡馆装扮 ' + id);
     return [id, text.slice('此刻形象: '.length)];
   }));
   const theme = templates.core.match(/let _dream_theme_value =[^\n]*\n[\s\S]*?let _dream_letter_limit_re =[^\n]+/);
   if (!theme) throw new Error('读者核心里找不到主题和来信设置');
+  const personaExpr = [
+    "<%_ if (_persona_mode === 'kuromaku' && _dream_black_profile && _dream_black_ending === 'confessed') { _%>",
+    "<%- _dream_inject_persona_extra(_dream_profile_text('confessedPersona')) %>",
+    "<% if (!_dream_letter_limit_off) { %>  行为约束补充: 非面对面交流时，一天只会主动给<user>发一封信件",
+    "<% } %>",
+    "<%_ } else if (_persona_mode === 'kuromaku' && _dream_black_profile && _dream_black_cursed) { _%>",
+    "<%- _dream_inject_persona_extra(_dream_profile_text('cursedPersona')) %>",
+    "<% if (!_dream_letter_limit_off) { %>  行为约束补充: 非面对面交流时，一天只会主动给<user>发一封信件",
+    "<% } %>",
+    "<%_ } else if (_persona_mode === 'kuromaku' && _dream_black_profile) { _%>",
+    "<%- _dream_inject_persona_extra(_dream_profile_text('persona')) %>",
+    "<% if (!_dream_letter_limit_off) { %>  行为约束补充: 非面对面交流时，一天只会主动给<user>发一封信件",
+    "<% } %>",
+    "<%_ } else { _%>",
+    "<%- _dream_inject_persona_extra((typeof getPersonaPrompt === 'function' && getPersonaPrompt(_persona_mode)) || defaultPersonaPrompt(_persona_mode, _custom_persona, getLocalVar)) %>",
+    "<%_ } _%>",
+  ].join('\n');
   const source = { ...templates, core: templates.core.slice(0, start)
-    + "<%- (typeof getPersonaPrompt === 'function' && getPersonaPrompt(_persona_mode)) || defaultPersonaPrompt(_persona_mode, _custom_persona, getLocalVar) %>"
-    + "\n\n         此刻形象: <%- (typeof getAppearancePrompt === 'function' && getAppearancePrompt(_persona_mode)) || (_persona_mode === 'custom' && _custom_text('appearance', '')) || readerOutfit(_dream_theme, getLocalVar('dream_appearance')).defaultPrompt %>\n\n"
+    + personaExpr
+    + "\n\n         此刻形象: <%- ((typeof getAppearancePrompt === 'function' && getAppearancePrompt(_persona_mode)) || (_persona_mode === 'custom' && _custom_text('appearance', '')) || readerOutfit(_dream_theme, getLocalVar('dream_appearance')).defaultPrompt) + _dream_extra_app_inline %>\n\n"
     + templates.core.slice(appearanceEnd) };
   source.core = source.core.replace(themeOutfits[0], 'let _dream_theme_outfits = outfits;');
   const body = PROMPT_NAMES.map((name) => `    ${JSON.stringify(name)}: async function (locals, __esc) {\n${ejsSource(source[name])}\n    }`).join(',\n');
@@ -60,7 +77,7 @@ export function promptsModule(templates) {
     '  function defaultPersonaPrompt(id, custom, getLocalVar) {',
     theme[0],
     '    function field(key, fallback) { var s = custom && custom[key]; return typeof s === "string" && s.trim() ? s.trim() : fallback; }',
-    '    var locals = { _persona_mode: id, _custom_system_name: field("systemName", field("name", "")), _custom_text: field };',
+    '    var locals = { _persona_mode: id, _custom_system_name: field("systemName", field("name", "")), _custom_text: field, _dream_black_profile: null, _dream_black_cursed: false, _dream_black_ending: "", _dream_extra_pers_inline: "", _dream_profile_text: function () { return ""; }, _dream_inject_persona_extra: function (t) { return t; } };',
     ejsSource(profile),
     '  }',
     '  modules.defaultReaderPersonaPrompt = defaultPersonaPrompt;',

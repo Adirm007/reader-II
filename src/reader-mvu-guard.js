@@ -119,7 +119,14 @@
       var items = normalizeItems(source.背包);
       if (Object.keys(items).length) output.背包 = items;
     }
-    if (keepProgress !== false) output.进度 = finiteNonNegativeInteger(progress, 0);
+    if (keepProgress !== false) {
+      output.进度 = finiteNonNegativeInteger(progress, 0);
+      var rawKilled = Object.prototype.hasOwnProperty.call(source, '黑幕已点杀') ? source.黑幕已点杀 : eventState.黑幕已点杀;
+      if (rawKilled === true || rawKilled === 'true' || rawKilled === 1) output.黑幕已点杀 = true;
+      else if (rawKilled === false || rawKilled === 'false' || rawKilled === 0) output.黑幕已点杀 = false;
+      var rawEnding = Object.prototype.hasOwnProperty.call(source, '黑幕结局') ? source.黑幕结局 : eventState.黑幕结局;
+      if (rawEnding === 'killed' || rawEnding === 'confessed') output.黑幕结局 = rawEnding;
+    }
     return output;
   }
 
@@ -133,10 +140,16 @@
     return data;
   }
 
-  function createMvuGuard(env, runtimeStore, chatKey) {
+  function createMvuGuard(env, runtimeStore, chatKey, options) {
     var lastReader = null;
     var lastReaderChat = null;
     var installed = false;
+    var enabledCheck = options && typeof options.isEnabled === 'function' ? options.isEnabled : null;
+
+    function active() {
+      if (!enabledCheck) return true;
+      try { return enabledCheck() === true; } catch (error) { return false; }
+    }
 
     function isKuromaku() {
       if (!env || typeof env.getVariables !== 'function') return false;
@@ -147,6 +160,7 @@
     }
 
     function remember(data) {
+      if (!active()) return data;
       if (data && data.stat_data && data.stat_data.READER) {
         lastReaderChat = chatKey();
         lastReader = normalizeReaderState(data.stat_data.READER, runtimeStore && runtimeStore.read().routing, isKuromaku());
@@ -155,6 +169,7 @@
     }
 
     function guard(data, previous) {
+      if (!active()) return data;
       var fallback = previous && previous.stat_data && previous.stat_data.READER;
       if (!fallback && lastReaderChat === chatKey()) fallback = lastReader;
       var routing = runtimeStore && runtimeStore.read ? runtimeStore.read().routing : undefined;

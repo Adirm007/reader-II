@@ -17,7 +17,7 @@ const MEMORY_ROWS = "h+='<div class=\"dlb-row\" data-dlb=\"eggagentset\"><div cl
 /* 控制器里新增的小函数：通往主脚本里的 ReaderCore（语义层）、夜梦助手与适配面板。 */
 const GENERIC_HELPERS = [
   "function getReaderHostWindow(){return window.parent;}",
-  "function getReaderCoreApi(){var a=window.ReaderCore||(window.parent&&window.parent.ReaderCore);if(!a||!a.__reader_core_api)throw new Error('Reader-II主系统尚未加载');return a;}",
+  "function getReaderCoreApi(){var a=window.__ReaderIICore||(window.parent&&window.parent.__ReaderIICore)||window.ReaderCore||(window.parent&&window.parent.ReaderCore);if(!a||!a.__reader_core_api)throw new Error('Reader-II主系统尚未加载');return a;}",
   `async function dreamOpenAgent(tab){
     try {
       var api = await getReaderCoreApi().loadReaderII();
@@ -72,18 +72,32 @@ export function transformLegacy(input) {
   source = replaceFunction(source, 'writeYuanPlusStatus', "async function writeYuanPlusStatus(roleName,token,cost){var target=token||ReaderTransactions.capture();return ReaderTransactions.transact(target,target.id+':yuan',function(vars){var remain=ReaderTransactions.charge(vars,cost||0);ReaderTransactions.setStatus(vars,{name:'涟漪·缘·'+roleName,effect:'短期内更容易与“'+roleName+'”产生符合当前世界逻辑的关系起点；宣告的当轮不会遭遇此人，可以知晓的只有名字，不预设身份、立场或结果。',duration:'至实际产生关系起点',source:'缘加强'});return remain;});}");
   source = replaceFunction(source, 'handleYuanPlusOrder', "async function handleYuanPlusOrder(){return ReaderTransactions.run('paid-action',async function(token){var cost=RHYTHM_CONFIG['缘'].cost;ReaderTransactions.requireFp(token,cost);if(!window.ReaderTemplateSystem||typeof window.ReaderTemplateSystem.generateForYuanPlus!=='function')throw new Error('条目模仿（模板系统）尚未就绪');var result=await window.ReaderTemplateSystem.generateForYuanPlus(token);ReaderTransactions.assertCurrent(token);var remain=await writeYuanPlusStatus(result.entryName,token,cost);showToast('已写入世界书 '+result.bookName+'，剩余 '+remain+'FP');});}");
 
-  /* ---- 4. 文案 ---- */
-  source = replaceExact(source, '黑幕', '哀怜的少女', '人格名', countExact(source, '黑幕'));
+  /* ---- 4. 文案（保留黑幕人格名与三次确认流程） ---- */
   source = replaceExact(source, '更新新闻', '请读者写一则旁观札记', '点单文案', countExact(source, '更新新闻'));
   source = replaceExact(source, '<span>新闻更新</span>', '<span>旁观札记</span>', '菜单文案', countExact(source, '<span>新闻更新</span>'));
   source = replaceExact(source, '条目模仿与书海的请求可分别指定方案', '条目模仿、命运抽卡与夜梦助手的请求可分别指定方案', '独立 API 说明', countExact(source, '条目模仿与书海的请求可分别指定方案'));
 
-  /* ---- 5. 书海不进通用版 ---- */
+  /* ---- 5. 书海与多核心管理不进通用版 ---- */
   source = replaceExact(source, "var albumOrder=['咖啡馆','读者们','失乐园','收录','私货','书海'];", "var albumOrder=['咖啡馆','读者们','失乐园','收录','私货'];", '专辑顺序');
   source = replaceExact(source, "\n,'书海':ReaderBookseaAlbum.songs", '', '书海专辑');
   source = replaceFunction(source, 'dlbEnterBooksea', '', '书海入口函数');
   source = replaceRegex(source, /h\+='<div class="dlb-sub-h">书海迷宫<i>BOOKSEA<\/i><\/div><button type="button" class="dlb-row" data-dlb="eggbooksea"[^\n]*\n/, AGENT_DOOR + '\n', '彩蛋页书海入口');
-  source = replaceExact(source, "if(act==='eggbooksea'){dlbEnterBooksea();return;}", "if(act==='eggagent'){dreamOpenAgent('chat');return;}if(act==='eggagentset'){dreamOpenAgent('settings');return;}if(act==='eggmemory'){dreamOpenAgent('memory');return;}if(act==='eggpanel'){dreamOpenPanel();return;}", '彩蛋页入口动作');
+  source = replaceRegex(source, /if\(dreamHasReaderIIAgent\(\)\)\{h\+='<button type="button" class="dlb-row" data-dlb="eggagent"[^\n]*\n/, '', '移除共存附加助手入口');
+  source = replaceRegex(source, /h\+='<div class="dlb-row" data-dlb="eggcoremgr">[^\n]*\n/, '', '彩蛋页移除核心管理行');
+  source = replaceExact(source, "if(act==='eggbooksea'){dlbEnterBooksea();return;}\nif(act==='eggagent'){dreamOpenReaderIIAgent(e,pToast);return;}\nif(act==='eggcoremgr'){openCoreManagerSettings(e,pToast);return;}", "if(act==='eggagent'){dreamOpenAgent('chat');return;}if(act==='eggagentset'){dreamOpenAgent('settings');return;}if(act==='eggmemory'){dreamOpenAgent('memory');return;}if(act==='eggpanel'){dreamOpenPanel();return;}", '彩蛋页入口动作');
+  source = replaceExact(source, "var cmEl=ov.querySelector('#dlb-egg-coremgr');if(cmEl)cmEl.textContent=dreamCoreManagerLabel();", '', '同步彩蛋核心管理标签');
+  source = replaceExact(source, "dreamSetText(['dlb-egg-coremgr','dfm-core-mgr'],dreamCoreManagerLabel());\n", '', '同步附加核心管理标签');
+  source = replaceExact(source, "dreamSyncCoreManagerReaderSilent(snst);", '', '同步核心管理静默状态', 2);
+  source = replaceExact(
+    source,
+    '<div class="sub-opt" data-action="coreManager"><span>核心管理</span><span id="dfm-core-mgr" style="font-family:monospace;font-size:12px;letter-spacing:1px;">\'+escHtml(dreamCoreManagerLabel())+\'</span></div><div style="padding:0 10px 6px 10px;font-size:11px;color:#8a796f;font-style:italic;">多开系统核心时指定主核心、隔离宏冲突，并按核心配置静默与临时唤起词</div>',
+    '',
+    '悬浮菜单移除核心管理',
+  );
+  source = replaceExact(source, "else if(act==='coreManager'){openCoreManagerSettings(e,pToast);}", '', '悬浮菜单移除核心管理动作');
+  for (const name of ['dreamSyncCoreManagerReaderSilent', 'dreamCoreManagerLabel', 'dreamHasReaderIIAgent', 'dreamOpenReaderIIAgent', 'openCoreManagerSettings']) {
+    source = replaceFunction(source, name, '', '移除 ' + name);
+  }
   source = replaceExact(source, "['booksea_compile','书海 · 技能整备','进入迷宫前编译同行者能力'],\n['booksea_supplier','书海 · 补给员对话','迷宫里和补给员聊天、请她生成东西'],\n",
     "['agent','夜梦助手','助手对话与工具调用'],\n['memory','记忆整理','整理用户与夜梦助手的聊天（夜之洋）'],\n['adapt','语义适配','一键适配时寻找宿主变量、分析容器结构'],\n", '独立 API 调用类型');
   source = replaceExact(source, '/* 调用类型：[键, 名称, 说明]。书海读取同一份 dream_independent_api_v2.routes。正文回复始终走酒馆当前插头。 */', '/* 调用类型：[键, 名称, 说明]。主脚本里的助手、记忆与语义适配读取同一份方案表的 routes。正文回复始终走酒馆当前插头。 */', '独立 API 注释');
@@ -106,8 +120,8 @@ export function transformLegacy(input) {
   /* ---- 8. 新增的小函数 ---- */
   source = replaceExact(source, 'function hasHelperApi(){', GENERIC_HELPERS + '\nfunction hasHelperApi(){', '通用辅助函数');
 
-  /* ---- 校验：命定之诗专属的读写不应再出现 ---- */
-  for (const token of ['stat_data.命运点数', 'buildStatusPatch', 'getMainCharacter(', 'getRootVars(', 'cloneStatusEffects(', 'writeVars(', 'buildMainPatch(', 'buildFpPatch(', 'getStatusEffects(', 'dlbEnterBooksea', 'eggbooksea', 'ReaderBookseaAlbum.songs', '阿斯塔利亚', '登神长阶', 'openDreamReleaseUpdates']) {
+  /* ---- 校验：命定之诗专属的读写与多核心管理不应再出现 ---- */
+  for (const token of ['stat_data.命运点数', 'buildStatusPatch', 'getMainCharacter(', 'getRootVars(', 'cloneStatusEffects(', 'writeVars(', 'buildMainPatch(', 'buildFpPatch(', 'getStatusEffects(', 'dlbEnterBooksea', 'eggbooksea', 'eggcoremgr', 'ReaderCoreManager', 'ReaderBookseaAlbum.songs', '阿斯塔利亚', '登神长阶', 'openDreamReleaseUpdates']) {
     if (source.includes(token)) throw new Error('通用化后仍残留：' + token);
   }
   for (const name of ['getReaderCoreApi', 'dreamOpenAgent', 'dreamOpenPanel', 'getReaderHostWindow']) {

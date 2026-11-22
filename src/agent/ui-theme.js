@@ -622,6 +622,12 @@
     if (THEMES.indexOf(value) < 0) {
       try { value = env && env.storage ? env.storage.getItem(modules.localKey('dream_visual_theme')) : ''; } catch (error) { value = ''; }
     }
+    if (THEMES.indexOf(value) < 0) {
+      try {
+        var docEl = env && env.host && env.host.document && env.host.document.documentElement;
+        value = docEl ? docEl.getAttribute('data-dream-theme') : '';
+      } catch (error) { value = ''; }
+    }
     return THEMES.indexOf(value) >= 0 ? value : 'cafe';
   }
 

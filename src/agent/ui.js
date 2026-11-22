@@ -721,23 +721,33 @@
       var lobby = lobbyApi();
       var core = coreApi();
       if (!lobby) return '';
-      var hasChat = false, enabled = false;
-      try { hasChat = !!(core && core.hasChat()); enabled = hasChat && !!lobby.isEnabled(); } catch (error) { hasChat = false; }
+      var hasChat = false, enabled = false, coexisting = false, hasNativeLobby = false;
+      try {
+        hasChat = !!(core && core.hasChat());
+        coexisting = !!(lobby.isCoexisting && lobby.isCoexisting());
+        hasNativeLobby = !!(lobby.hasNativeLobby && lobby.hasNativeLobby());
+        enabled = hasChat && !!lobby.isEnabled();
+      } catch (error) { hasChat = false; }
       var name = '';
       try { name = kit.names().char || ''; } catch (error) { name = ''; }
       var body = !core ? '<p class="ra-note">读者界面尚未就绪。</p>'
         : !hasChat ? '<p class="ra-note">打开一个聊天后可切换当前角色卡的启停状态。</p>'
+        : coexisting ? '<p class="ra-note"><b>共存模式 · 已检测到原版读者核心</b><br>本卡已启用原版读者，Reader-II 已自动暂停正文提示词注入、来信接管与 MVU 写入，一切正文表现以原版读者与书海为准；仅附加「夜梦助手」与记忆系统（「助手夜梦 = 正文夜梦」开关照常生效）。</p>'
+          + (hasNativeLobby ? '<div class="ra-row ra-mt"><button type="button" class="ra-btn is-small" data-act="back-lobby">打开原版读者服务台</button></div>' : '')
         : '<div class="ra-switch-row"><div><b>在「' + esc(name || '这张卡') + '」上启用 Reader-II</b>'
           + ' <span class="ra-badge">' + (enabled ? '已启用' : '已停用') + '</span></div>'
           + '<button type="button" class="ra-switch-btn" role="switch" aria-checked="' + (enabled ? 'true' : 'false') + '" aria-label="在这张卡上启用 Reader-II" data-act="card-toggle"><span class="ra-switch" aria-hidden="true"></span></button></div>';
-      return card('ra-reader-card', '这张卡', body, '立即生效');
+      return card('ra-reader-card', '这张卡', body, coexisting ? '共存模式' : '立即生效');
     }
 
     function refreshBack() {
       var back = $('[data-act="back-lobby"]');
       if (!back) return;
       var on = false;
-      try { var lobby = lobbyApi(); on = !!(lobby && lobby.isEnabled()); } catch (error) { on = false; }
+      try {
+        var lobby = lobbyApi();
+        on = !!(lobby && (lobby.isEnabled() || (lobby.isCoexisting && lobby.isCoexisting() && lobby.hasNativeLobby && lobby.hasNativeLobby())));
+      } catch (error) { on = false; }
       back.hidden = !on;
     }
 
@@ -1317,7 +1327,12 @@
     function backToLobby() {
       close();
       var lobby = lobbyApi();
-      if (!lobby || typeof lobby.open !== 'function') return;
+      if (!lobby) return;
+      if (lobby.isCoexisting && lobby.isCoexisting() && lobby.openNativeLobby) {
+        lobby.openNativeLobby('eggs');
+        return;
+      }
+      if (typeof lobby.open !== 'function') return;
       Promise.resolve().then(function () { return lobby.open('eggs'); }).catch(function (error) { env.console.warn('[ReaderII] 回不到服务台', error); });
     }
 

@@ -15,9 +15,11 @@ function context() {
 }
 
 async function getReader() {
-  if (!window.ReaderII?.ready && !window.ReaderCore?.loadReaderII) await loadBundle();
+  const core = window.__ReaderIICore || (typeof window.ReaderCore?.loadReaderII === 'function' ? window.ReaderCore : null);
+  if (!window.ReaderII?.ready && !core?.loadReaderII) await loadBundle();
+  const nextCore = window.__ReaderIICore || (typeof window.ReaderCore?.loadReaderII === 'function' ? window.ReaderCore : null);
   if (window.ReaderII?.ready && window.ReaderII.lobby) return window.ReaderII;
-  if (window.ReaderCore?.loadReaderII) return window.ReaderCore.loadReaderII();
+  if (nextCore?.loadReaderII) return nextCore.loadReaderII();
   throw new Error('主包缺少启动模块，请重新安装 Reader-II。');
 }
 
@@ -79,7 +81,8 @@ function loadBundle() {
       reject(new Error(message));
     }
     script.addEventListener('load', () => {
-      if (window.ReaderII?.ready || window.ReaderCore?.loadReaderII) resolve();
+      const loadedCore = window.__ReaderIICore || (typeof window.ReaderCore?.loadReaderII === 'function' ? window.ReaderCore : null);
+      if (window.ReaderII?.ready || loadedCore?.loadReaderII) resolve();
       else failed('主包没有初始化成功，请检查 Reader-II 扩展文件后重试。');
     }, { once: true });
     script.addEventListener('error', () => failed('未能加载 Reader-II 主包，请检查酒馆连接，再点一次重试。'), { once: true });

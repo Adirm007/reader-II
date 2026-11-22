@@ -13,13 +13,13 @@
     var pending = new Set(), queues = new Map(), sequence = 0;
     var clone = function (value) { return JSON.parse(JSON.stringify(value)); };
     function semantic() {
-      var core = win.ReaderCore || host.ReaderCore;
+      var core = win.__ReaderIICore || host.__ReaderIICore || win.ReaderCore || host.ReaderCore;
       if (!core || !core.__reader_core_api || !core.tx) throw new Error('Reader-II 主系统尚未就绪，请稍候再试');
       return core.tx;
     }
     /* 宿主是小白X 时，楼层变量里没有宿主状态：由主脚本拼出 { kind, data, commit }（见 reader-core 的 beginTransaction）。 */
     function session(data) {
-      var core = win.ReaderCore || host.ReaderCore;
+      var core = win.__ReaderIICore || host.__ReaderIICore || win.ReaderCore || host.ReaderCore;
       var tx = core && core.__reader_core_api && core.tx;
       return tx && typeof tx.begin === 'function' ? tx.begin(data) : {kind: 'mvu', data: data};
     }
@@ -118,7 +118,7 @@
           return next;
         }, {type: 'message', message_id: token.messageId});
         if (options.onCommit && applied) options.onCommit(token);
-        if (applied) { try { (win.ReaderCore || host.ReaderCore).notifyChanged('reader_transaction'); } catch (_) {} }
+        if (applied) { try { (win.__ReaderIICore || host.__ReaderIICore || win.ReaderCore || host.ReaderCore).notifyChanged('reader_transaction'); } catch (_) {} }
         return result;
       };
       var before = queues.get(key) || Promise.resolve();

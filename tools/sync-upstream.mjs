@@ -17,6 +17,7 @@ const FILES = [
   'source/letter.js', 'source/letter-body.html', 'source/legacy-letter-body.html', 'source/reader-letter.css',
   'source/controller-prelude.js', 'source/controller-adapter.js', 'source/core-runtime.mjs',
   'source/reader-transactions.js', 'source/booksea-album.js', 'source/template-system.js',
+  'source/extra-settings.js', 'source/black-author.prompt.json',
   'source/reader-ui.js', 'source/reader-ui-switch.js',
   'worldbook/读者核心本体.txt', 'worldbook/notes.txt',
   'LICENSE',

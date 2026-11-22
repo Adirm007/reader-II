@@ -91,14 +91,14 @@ test('JSON：四个条目，字段与 v3.3 的世界书相同；能往返；EJS 
   assert.throws(() => W.assertEjs('<%_ if (true) { _%>没关上', '坏模板'), /坏模板 的 EJS 编译不过/);
 });
 
-test('核心：取上游第 1～1714 行；不读 MVU 路径、不带黑之作家与书海；带上主题地点、十二套形象、发言限制、称呼', () => {
-  assert.equal(built.upstreamLines, 1714);
-  assert.equal(built.upstreamVersion, '2026.11.09.1');
-  assert.ok(core.startsWith('<%_ /* READER_II_WORLDBOOK core vtest · 上游 reader-core v2026.11.09.1 */_%>\n'));
-  for (const token of ['getMessageVar(', 'setMessageVar(', 'dream_black_author_prompt', '_dream_black', 'DREAM_WORLDBOOK', '"op":', '99999', '书海']) {
+test('核心：取上游人格与机制部分；不读 MVU 路径、不带书海与多核心管理；保留黑幕完整机制、附加设定、主题与称呼', () => {
+  assert.ok(built.upstreamLines >= 1900, String(built.upstreamLines));
+  assert.equal(built.upstreamVersion, '2026.11.22.1');
+  assert.ok(core.startsWith('<%_ /* READER_II_WORLDBOOK core vtest · 上游 reader-core v2026.11.22.1 */_%>\n'));
+  for (const token of ['getMessageVar(', 'setMessageVar(', 'dream_black_author_prompt', 'DREAM_WORLDBOOK', '"op":', '99999', '书海', 'dream_core_manager']) {
     assert.ok(!core.includes(token), token);
   }
-  for (const token of ["getLocalVar('dream_letter_limit')", "getLocalVar('dream_user_address')", '_dream_theme_place', "'海滨咖啡馆'", "'茶楼'", '消耗9999 FP', '"action":"theme_write"', '"action":"tone_apply"', '"action":"entity_manifest"', "_reader_get('进度', 0)"]) {
+  for (const token of ["getLocalVar('dream_letter_limit')", "getLocalVar('dream_user_address')", "getLocalVar('dream_extra_settings')", '_dream_theme_place', "'海滨咖啡馆'", "'茶楼'", '消耗9999 FP', '"action":"theme_write"', '"action":"tone_apply"', '"action":"entity_manifest"', 'kuromaku_kill', 'kuromaku_ending', "_reader_get('进度', 0)"]) {
     assert.ok(core.includes(token), token);
   }
   for (const id of ['classic', 'victoria1', 'western_short', 'black_knit', 'knit_linen', 'white_mohair', 'dino_pajama', 'cold_look', 'white_hoodie', 'jacket_work', 'nailong_pajama']) {
@@ -121,19 +121,97 @@ test('读者人格：咖啡馆、复活事件、当前 FP 与结算协议、默�
   assert.doesNotMatch(out, /黑之作家|本轮名单|读者资料未就绪|本轮必须为<user>添加/);
 });
 
-test('哀怜人格：只有哀怜的少女；祝福按 READER.进度 每点 5%，封顶到种子；已是同样的效果时不再提示', async () => {
-  const local = { dream_persona: 'kuromaku', dream_seed: 2 };
-  const out = await host({ local, stat: reader({ 进度: 3 }) }).render();
-  for (const token of ['<哀怜的少女>', '哀怜的少女:', '世界外的不明存在', '"persona":"kuromaku"', '【少女的祝福状态维护】', '造成的最终伤害+10%，受到的全类型伤害-10%，经验获取+10%']) {
-    assert.ok(out.includes(token), token);
+test('黑幕人格完整五态：常规哀怜 / 达标点杀 / 进度9且已点杀触发诅咒与一次性CG / 刺穿清除祝福 / 折断告白保留祝福', async () => {
+  const local = { dream_persona: 'kuromaku' };
+  // 1. 普通哀怜（无合格目标、未达诅咒）：祝福每点进度 5%，封顶 9（45%）
+  const ordinary = await host({ local, stat: reader({ 进度: 3 }) }).render();
+  for (const token of ['<哀怜的少女>', '哀怜的少女:', '世界外的不明存在', '"persona":"kuromaku"', '【少女的祝福状态维护】', '造成的最终伤害+15%，受到的全类型伤害-15%，经验获取+15%']) {
+    assert.ok(ordinary.includes(token), token);
   }
-  assert.doesNotMatch(out, /黑之作家|本轮名单|读者资料未就绪|诅咒尽头|无形恶意/);
-  const blessed = { 类型: '特殊', 效果: '造成的最终伤害+10%，受到的全类型伤害-10%，经验获取+10%', 层数: 1, 剩余时间: '永久', 来源: '少女的祝福' };
-  assert.doesNotMatch(await host({ local, stat: reader({ 进度: 3, 主角: { 状态效果: { 祝福: blessed } } }) }).render(), /少女的祝福状态维护/);
+  assert.doesNotMatch(ordinary, /黑之作家|本轮名单|诅咒尽头|无形恶意/);
+  const blessed15 = { 类型: '特殊', 效果: '造成的最终伤害+15%，受到的全类型伤害-15%，经验获取+15%', 层数: 1, 剩余时间: '永久', 来源: '少女的祝福' };
+  assert.doesNotMatch(await host({ local, stat: reader({ 进度: 3, 主角: { 状态效果: { 祝福: blessed15 } } }) }).render(), /少女的祝福状态维护/);
   assert.doesNotMatch(await host({ local, stat: reader({ 进度: 0 }) }).render(), /少女的祝福状态维护/);
-  const seeded = host({ local: { dream_persona: 'kuromaku' }, stat: reader() });
-  await seeded.render();
-  assert.ok(Number.isInteger(seeded.chatVars.dream_seed) && seeded.chatVars.dream_seed >= 1 && seeded.chatVars.dream_seed <= 9, '没有种子时生成一个');
+
+  // 2. 进度 9 但从未点杀：不触发诅咒
+  const notCursedYet = await host({ local, stat: reader({ 进度: 9, 黑幕已点杀: false }) }).render();
+  assert.doesNotMatch(notCursedYet, /黑之作家|诅咒尽头/);
+
+  // 3. 常规点杀（好感>=70，兼容无血量通用卡；死亡/崩溃角色被排除）
+  const killTurn = await host({
+    local,
+    stat: reader({
+      关系列表: {
+        存活同伴: { 好感度: 75, 状态效果: {} },
+        已故同伴: { 好感度: 90, 状态效果: { 已死亡: { 效果: '已死' } } },
+        九十九夜梦: { 好感度: 100, 状态效果: {} },
+      },
+    }),
+  }).render();
+  assert.match(killTurn, /黑之作家/);
+  assert.ok(killTurn.includes('存活同伴'));
+  assert.ok(!killTurn.includes('已故同伴'));
+  assert.match(killTurn, /"action":"kuromaku_kill"/);
+
+  // 4. 进度 >= 9 且黑幕已点杀：诅咒常驻，切换第三人格；未主动寻找不出一次性CG，主动寻找出一次性CG
+  const cursedIdle = await host({ local, user: '在城里逛逛。', stat: reader({ 进度: 9, 黑幕已点杀: true }) }).render();
+  assert.match(cursedIdle, /黑之作家/);
+  assert.match(cursedIdle, /纸牌/);
+  assert.doesNotMatch(cursedIdle, /纸牌与仪式匕首/);
+  assert.match(cursedIdle, /\+45%/);
+
+  const cursedSeek = await host({ local, user: '夜梦，出来见我，我要找你当面对质。', stat: reader({ 进度: 9, 黑幕已点杀: true }) }).render();
+  assert.match(cursedSeek, /纸牌与仪式匕首/);
+  assert.match(cursedSeek, /"action":"kuromaku_ending","ending":"killed"/);
+  assert.match(cursedSeek, /"action":"kuromaku_ending","ending":"confessed"/);
+
+  // 5. 刺穿结局（killed）：永久回到纯哀怜的少女、移除祝福、复活解禁按需注入
+  const killedOut = await host({
+    local,
+    user: '继续旅途。',
+    stat: reader({
+      进度: 9, 黑幕已点杀: true, 黑幕结局: 'killed',
+      关系列表: { 存活同伴: { 好感度: 95, 状态效果: {} } },
+      主角: { 状态效果: { 祝福: { 效果: '造成的最终伤害+45%', 剩余时间: '永久', 来源: '少女的祝福' } } },
+    }),
+  }).render();
+  assert.match(killedOut, /<哀怜的少女>/);
+  assert.doesNotMatch(killedOut, /黑之作家|纸牌与仪式匕首|复活解禁/);
+  assert.match(killedOut, /移除名为“祝福”的状态效果/);
+
+  const killedRevive = await host({ local, user: '我想复活之前死去的同伴。', stat: reader({ 进度: 9, 黑幕已点杀: true, 黑幕结局: 'killed' }) }).render();
+  assert.match(killedRevive, /【复活解禁】/);
+
+  // 6. 折断结局（confessed）：保留告白后第三人格与祝福，零恶意/诅咒词，复活解禁按需注入
+  const confessedOut = await host({
+    local,
+    user: '今天休息。',
+    stat: reader({ 进度: 9, 黑幕已点杀: true, 黑幕结局: 'confessed', 关系列表: { 存活同伴: { 好感度: 95, 状态效果: {} } } }),
+  }).render();
+  assert.match(confessedOut, /黑之作家/);
+  assert.match(confessedOut, /卸下假面/);
+  assert.doesNotMatch(confessedOut, /【无形恶意】|【自然死亡】|【诅咒尽头】|纸牌与仪式匕首|复活解禁/);
+  assert.match(confessedOut, /造成的最终伤害\+45%/);
+});
+
+test('附加设定（机制/外貌/性格）无分隔标签直接融入对应提示词，且禁书支持超过10本', async () => {
+  const extraItems = [
+    { id: 'm1', name: '进度联动', kind: 'mechanism', enabled: true, applyWhenSilent: true, content: '当前FP=<%= stat_data.READER.命运点数 %>' },
+    { id: 'p1', name: '口癖', kind: 'personality', enabled: true, applyWhenSilent: false, content: '偶尔轻轻叹气' },
+    { id: 'a1', name: '', kind: 'appearance', enabled: true, applyWhenSilent: false, content: '戴着无框金丝眼镜' },
+  ];
+  const banlist = Array.from({ length: 14 }, (_, i) => `通用禁书${i + 1}`);
+  const out = await host({
+    local: { dream_extra_settings: JSON.stringify(extraItems), dream_banlist: JSON.stringify(banlist) },
+    user: '看看定调书架',
+    stat: reader({ 地点: '不明次元·某咖啡馆', 命运点数: 333 }),
+  }).render();
+  assert.doesNotMatch(out, /【附加设定】|性格补充|外貌补充/);
+  assert.ok(out.includes('【进度联动】: 当前FP=333'));
+  assert.match(out, /性格:[^\r\n]*；口癖：偶尔轻轻叹气/);
+  assert.match(out, /此刻形象:[^\r\n]*；戴着无框金丝眼镜/);
+  assert.match(out, /\[书目展示\]/);
+  for (const title of banlist) assert.ok(out.includes(title), title);
 });
 
 test('主题与设置：盛夏主题的地点与服装、关掉发言限制、自定义称呼', async () => {

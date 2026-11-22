@@ -21,10 +21,12 @@
   var hookedMvu = null;
   var hostKit = modules.createHostKit(env);
   var runtimeStore = modules.createRuntimeStore(env, hostKit.chatKey);
-  var guard = modules.createMvuGuard(env, runtimeStore, hostKit.chatKey);
+  var guard = modules.createMvuGuard(env, runtimeStore, hostKit.chatKey, { isEnabled: function () { return isEnabled(); } });
   var lwbHost = typeof modules.createLwbHost === 'function' ? modules.createLwbHost(env) : null;
   var queue = Promise.resolve();
   var lastHostKind = 'mvu';
+  var coexistByWorldbook = Object.create(null);
+  var lastCoexistState = false;
 
   function context() {
     try { return env.context() || null; } catch (error) { return null; }
@@ -54,8 +56,87 @@
   /* 宿主无法写角色文件时，把用户对这张卡的选择记在账号设置里。 */
   function cardPreferenceKey(card) { return card && card.avatar ? 'avatar/' + card.avatar : ''; }
 
+  /* 原版读者共存检测：同开原版 reader（卡内脚本/正则/世界书/书海）与 reader-II 时，
+   * reader-II 自动让位（不重复注入提示词、不抢信封/MVU），仅保留夜梦助手与记忆（含「助手夜梦 = 正文夜梦」）。 */
+  function detectNativeReader() {
+    try {
+      if (host && host.ReaderCore && host.ReaderCore.__reader_core_api !== true) return 'runtime';
+    } catch (error) { /* ignore */ }
+    try {
+      var doc = env.document || (host && host.document);
+      if (doc && typeof doc.getElementById === 'function' && doc.getElementById('reader-core-controller')) return 'controller';
+    } catch (error) { /* ignore */ }
+    var vars = chatVariables();
+    if (vars['系统核心'] === '九十九夜梦') return 'var:系统核心';
+    if (vars['dream_black_author_prompt'] !== undefined && vars['dream_black_author_prompt'] !== '') return 'var:dream_black_author_prompt';
+    if (vars['booksea'] !== undefined && vars['booksea'] !== null && vars['booksea'] !== '') return 'var:booksea';
+    if (vars['dream_core_manager']) {
+      try {
+        var cm = typeof vars['dream_core_manager'] === 'string' ? JSON.parse(vars['dream_core_manager']) : vars['dream_core_manager'];
+        if (cm && cm.enabled === true && (cm.primary === '九十九夜梦' || (Array.isArray(cm.activeCores) && cm.activeCores.indexOf('九十九夜梦') >= 0))) {
+          return 'var:dream_core_manager';
+        }
+      } catch (error) { /* ignore */ }
+    }
+    var card = currentCard();
+    var cardRegexes = card && card.data && card.data.extensions && Array.isArray(card.data.extensions.regex_scripts)
+      ? card.data.extensions.regex_scripts : null;
+    if (cardRegexes && cardRegexes.some(function (rule) {
+      if (!rule || rule.disabled === true) return false;
+      var name = String(rule.scriptName || '');
+      return !/Reader-II/i.test(name) && /读者对话渲染|普罗泰利西翁|书海/.test(name);
+    })) return 'card:regex';
+    var key = hostKit.chatKey();
+    if (key && coexistByWorldbook[key] === true) return 'worldbook';
+    return '';
+  }
+
+  function isCoexisting() {
+    return !!detectNativeReader();
+  }
+
+  function syncHostReaderCoreBinding() {
+    var coexisting = isCoexisting();
+    try {
+      if (coexisting) {
+        if (host && host.ReaderCore === API) delete host.ReaderCore;
+      } else if (host && (!host.ReaderCore || host.ReaderCore.__reader_core_api === true)) {
+        host.ReaderCore = API;
+      }
+    } catch (error) { /* same-origin is expected */ }
+    return coexisting;
+  }
+
+  function syncCoexistState() {
+    var now = syncHostReaderCoreBinding();
+    if (now === lastCoexistState) return now;
+    lastCoexistState = now;
+    if (now && prompt) {
+      try { prompt.clear(); } catch (error) { /* ignore */ }
+    }
+    notify('enabled_changed', null);
+    return now;
+  }
+
+  function inspectLoadedWorldInfo(data) {
+    if (!data || typeof data !== 'object') return false;
+    var lists = [data.globalLore, data.characterLore, data.chatLore, data.personaLore];
+    var found = lists.some(function (entries) {
+      return Array.isArray(entries) && entries.some(function (entry) {
+        return entry && entry.disable !== true && entry.enabled !== false
+          && typeof entry.content === 'string' && entry.content.indexOf('DREAM_WORLDBOOK') >= 0;
+      });
+    });
+    if (!found) return false;
+    var key = hostKit.chatKey();
+    if (key) coexistByWorldbook[key] = true;
+    syncCoexistState();
+    return true;
+  }
+
   function isEnabled() {
     if (!hasChat()) return false;
+    if (isCoexisting()) return false;
     var ctx = context(), key = cardPreferenceKey(currentCard());
     var prefs = ctx.extensionSettings && ctx.extensionSettings.reader_ii;
     var savesCardPreference = key && ctx.extensionSettings && typeof ctx.saveSettingsDebounced === 'function';
@@ -729,6 +810,8 @@
   API.loadReaderII = loadReaderII;
   API.openAgent = openAgent;
   API.isEnabled = isEnabled;
+  API.isCoexisting = isCoexisting;
+  API.detectNativeReader = detectNativeReader;
   API.setEnabled = setEnabled;
   API.hasChat = hasChat;
   API.absorbNativeUpdate = absorbNativeUpdate;
@@ -738,16 +821,24 @@
 
   var ui = modules.createUiBridge(API, env);
   API.openPanel = ui.openPanel;
-  var parser = modules.createEventParser(controller, env, economy, runtimeStore, semanticRouter);
+  var parser = modules.createEventParser(controller, env, economy, runtimeStore, semanticRouter, { isEnabled: isEnabled });
   API.processMessageEvents = parser.processMessage;
   API.parseFpEvents = parser.parseFpEvents;
   API.parseTaskEvents = parser.parseTaskEvents;
   API.parseActionEvents = parser.parseActionEvents;
   parser.install();
 
-  root.ReaderCore = API;
-  if (root.window) root.window.ReaderCore = API;
-  try { host.ReaderCore = API; } catch (error) { /* same-origin is expected */ }
+  root.__ReaderIICore = API;
+  if (root.window) root.window.__ReaderIICore = API;
+  try { host.__ReaderIICore = API; } catch (error) { /* same-origin is expected */ }
+  lastCoexistState = isCoexisting();
+  if (!lastCoexistState) {
+    if (!root.ReaderCore || root.ReaderCore.__reader_core_api === true) root.ReaderCore = API;
+    if (root.window && (!root.window.ReaderCore || root.window.ReaderCore.__reader_core_api === true)) root.window.ReaderCore = API;
+    try {
+      if (!host.ReaderCore || host.ReaderCore.__reader_core_api === true) host.ReaderCore = API;
+    } catch (error) { /* same-origin is expected */ }
+  }
   /* 常驻壳 host.ReaderShell（reader-shell.js）：控制器 iframe、轻信挂载与登记，经 API.kit 订阅酒馆事件。 */
   var shell = null;
   if (typeof modules.createShell === 'function') {
@@ -774,12 +865,37 @@
   }
   if (events.CHAT_CHANGED) {
     subscriptions.push(env.eventOn(events.CHAT_CHANGED, function () {
+      syncCoexistState();
       ready = ensureNamespace();
       ready.then(function () { return isEnabled() ? characterKeywordScanner.refresh() : null; }).catch(function (error) {
         env.console.warn('[ReaderCore] 切换聊天后的初始化失败', error);
       });
     }));
   }
+  try {
+    var wiCtx = context();
+    var wiSource = wiCtx && wiCtx.eventSource;
+    var wiTypes = wiCtx && (wiCtx.eventTypes || wiCtx.event_types) || events;
+    var wiEvent = wiTypes && wiTypes.WORLDINFO_ENTRIES_LOADED;
+    if (wiSource && wiEvent) {
+      if (typeof wiSource.makeFirst === 'function') wiSource.makeFirst(wiEvent, inspectLoadedWorldInfo);
+      else if (typeof wiSource.on === 'function') wiSource.on(wiEvent, inspectLoadedWorldInfo);
+      subscriptions.push({ stop: function () { try { if (typeof wiSource.removeListener === 'function') wiSource.removeListener(wiEvent, inspectLoadedWorldInfo); } catch (e) {} } });
+    }
+  } catch (error) { /* ignore */ }
+  try {
+    var listenDoc = env.document || (host && host.document);
+    if (listenDoc && typeof listenDoc.addEventListener === 'function') {
+      var onNativeReaderReady = function () { syncCoexistState(); };
+      listenDoc.addEventListener('reader:ready', onNativeReaderReady);
+      subscriptions.push({ stop: function () { try { listenDoc.removeEventListener('reader:ready', onNativeReaderReady); } catch (e) {} } });
+    }
+    if (host && typeof host.addEventListener === 'function') {
+      var onCoreManagerChanged = function () { syncCoexistState(); };
+      host.addEventListener('dream:core-manager-changed', onCoreManagerChanged);
+      subscriptions.push({ stop: function () { try { host.removeEventListener('dream:core-manager-changed', onCoreManagerChanged); } catch (e) {} } });
+    }
+  } catch (error) { /* ignore */ }
   ['MESSAGE_RECEIVED', 'MESSAGE_SENT'].forEach(function (name) {
     if (!events[name]) return;
     subscriptions.push(env.eventOn(events[name], function (messageId) {

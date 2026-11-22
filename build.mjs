@@ -77,6 +77,7 @@ export function controllerParts(parts) {
     ['generated/reader-gacha.generic.js', read('generated/reader-gacha.generic.js')],
     ['reader-ui.js', parts.ui],
     ['booksea-album.js', parts.album],
+    ['extra-settings.js', parts.extraSettings],
     ['legacy-reader.js', parts.legacy],
     ['template-system.js', parts.templates],
     ['controller-adapter.js', parts.adapter],

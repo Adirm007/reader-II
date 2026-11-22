@@ -265,12 +265,12 @@ test('letter.js：嵌套时找到酒馆主窗口，楼层号取自 iframe 属性
 
 test('一次跑完所有变换；按 7.F 的顺序拼成控制器能通过语法检查；新代码里没有酒馆宏', () => {
   const parts = C.transformUpstream();
-  assert.deepEqual(Object.keys(parts).sort(), ['adapter', 'album', 'body', 'css', 'hooks', 'legacy', 'letterScript', 'letterViews', 'prelude', 'templates', 'ui', 'uiSwitch']);
+  assert.deepEqual(Object.keys(parts).sort(), ['adapter', 'album', 'body', 'css', 'extraSettings', 'hooks', 'legacy', 'letterScript', 'letterViews', 'prelude', 'templates', 'ui', 'uiSwitch']);
   assert.equal(parts.legacy, legacy());
   assert.equal(parts.templates, templates());
   const controller = [
     parts.prelude, read(path.join(root, 'src/controller/reader-transactions-generic.js')), read(path.join(root, 'generated/reader-gacha.generic.js')),
-    parts.ui, parts.album, parts.legacy, parts.templates, parts.adapter, parts.hooks, parts.uiSwitch,
+    parts.ui, parts.album, parts.extraSettings, parts.legacy, parts.templates, parts.adapter, parts.hooks, parts.uiSwitch,
   ].join('\n;\n');
   assert.doesNotThrow(() => new vm.Script(controller, { filename: 'reader-controller.generic.js' }));
   assert.doesNotThrow(() => new vm.Script(parts.letterScript, { filename: 'letter.generic.js' }));
@@ -283,7 +283,8 @@ test('一次跑完所有变换；按 7.F 的顺序拼成控制器能通过语法
 /* 控制器与 letter.js 里还留着的 dream_* 键都是聊天变量（按聊天分开，世界书也读），不改（交接 0.6 甲组第 11 项）。 */
 const CHAT_KEYS = ['dream_persona', 'dream_appearance', 'dream_sub_persona_map', 'dream_sub_persona_panel', 'dream_custom_persona', 'dream_custom_personas',
   'dream_custom_persona_id', 'dream_custom_condition_state', 'dream_silent_mode', 'dream_cafe_envelope_beautify', 'dream_yuan_plus_enabled',
-  'dream_yuan_plus_preference', 'dream_yuan_plus_stream', 'dream_banlist', 'dream_letter_limit', 'dream_user_address', 'dream_visual_theme', 'dream_gacha'];
+  'dream_yuan_plus_preference', 'dream_yuan_plus_stream', 'dream_banlist', 'dream_letter_limit', 'dream_user_address', 'dream_visual_theme', 'dream_gacha',
+  'dream_kuromaku_confirmed', 'dream_extra_settings'];
 
 test('本机存储键：控制器与 letter.js 只用 reader-II 自己的键，旧键只在 reader-env.js 的迁移里读', () => {
   const keys = loadLocalKeys(), parts = C.transformUpstream();

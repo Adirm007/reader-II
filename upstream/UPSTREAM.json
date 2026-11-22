@@ -1,17 +1,17 @@
 {
   "repository": "Adirm007/reader",
-  "commit": "f847c4298b8ff5d65e138abaa6dc4e5ba5455869",
-  "release": "2026.11.10.8",
+  "commit": "8046947cf083d0b1d511972131dc0882d5a3eb91",
+  "release": "2026.11.22.1",
   "dirty": [],
-  "syncedAt": "2026-11-10T04:28:54.276Z",
+  "syncedAt": "2026-11-22T01:40:08.791Z",
   "files": {
     "LICENSE": {
       "bytes": 2109,
       "sha256": "8be26b90e02abfbcbb81a8ce7167026f4c2b5f8913bf5201daae48711a659448"
     },
     "gacha/README.md": {
-      "bytes": 1280,
-      "sha256": "a5d61cfa3340b5591ff16367a926480a639fc79f60643757c98b1322b2221b25"
+      "bytes": 1408,
+      "sha256": "79a7375edc513cf1b4dd8f7be3dbbc4d147ad042c8262b46eb88ef12a56e77f3"
     },
     "gacha/build.mjs": {
       "bytes": 2693,
@@ -26,8 +26,16 @@
       "sha256": "b7203134d9a58b6e97a7d09a8e471941c190d775837d35544940dda6ec7bd3f1"
     },
     "gacha/src/gacha/dossier.ts": {
-      "bytes": 17309,
-      "sha256": "a036b7557f005a5cd9d48bb7f4b8fc4256c834088d34fa2c1e6f0a49d5bf9feb"
+      "bytes": 33234,
+      "sha256": "a64a3037ffa6234df9b9588c4361834a2374222537fc3d7723fb64e2dcc03fc4"
+    },
+    "gacha/src/gacha/entry-defaults.ts": {
+      "bytes": 1226,
+      "sha256": "71a14d750bf4c127d48b455ed32cc5d6cff93b1ed544771c910f1a4557f0eedd"
+    },
+    "gacha/src/gacha/entry.ts": {
+      "bytes": 24413,
+      "sha256": "2acb3162c3c553db8d0d4a2a0dfd73443b971fca031d852735092e8793b9ad08"
     },
     "gacha/src/gacha/net.ts": {
       "bytes": 4890,
@@ -42,8 +50,8 @@
       "sha256": "1e8b40f80a102583643596c921c3e8f7ed435856f75525e295f9a9532aafdb57"
     },
     "gacha/src/gacha/session.ts": {
-      "bytes": 36248,
-      "sha256": "27bd2df01c1bf602e22918d47300cfa125ac8779842ffa4c99ce923a51436094"
+      "bytes": 49953,
+      "sha256": "a4698eb0453b807addf82a52268a3ce8bb78e394f8b7f50c290d4aed32fc011d"
     },
     "gacha/src/gacha/sources.ts": {
       "bytes": 34608,
@@ -62,16 +70,16 @@
       "sha256": "299d0e843ba220f01591bb42b7ca56ab33d841d6217983202807d1e303c2d048"
     },
     "gacha/src/reader/gacha-reader.ts": {
-      "bytes": 12863,
-      "sha256": "cd7ffbb21c3a70cfc610c50d4e6af359dea0b6e2f3f8205c8b3abe3053d7180e"
+      "bytes": 15809,
+      "sha256": "44a2936cc6fa869a7a917779ef2b0dd54404f512e47a4e3dced732ef4c90c45d"
     },
     "gacha/src/ui/gacha-art.ts": {
       "bytes": 10553,
       "sha256": "a8e5ccf2319f4c3ab5b6229af90be8cbdc12ddb24b37e02ef66416cd1766a01e"
     },
     "gacha/src/ui/gacha-panel.ts": {
-      "bytes": 63325,
-      "sha256": "b564410c393b85eddb15552a47370538522057f9a1969d7c1ff42ded33c99809"
+      "bytes": 68542,
+      "sha256": "a660efc0bbfb23f809ee2a07a9a4b01cf55a20bfd81065492fe947915504ae0b"
     },
     "gacha/src/ui/gacha-style.ts": {
       "bytes": 53100,
@@ -86,28 +94,36 @@
       "sha256": "009152e87c034f500cb64020a478519d2b540af0b3b5d840f0d864372b1a0340"
     },
     "gacha/tests/gacha.test.ts": {
-      "bytes": 74097,
-      "sha256": "28ded63e53c6ce8720fd6d9058f1c210104abd1489b729cfeba45286745091f3"
+      "bytes": 109809,
+      "sha256": "e7c2f3ae7827b9b75990e93c58df22ee87336af727923106f5f4e01b63277f21"
     },
     "gacha/tsconfig.json": {
       "bytes": 277,
       "sha256": "17066573e67dfa5923a3a865cbab7e3c43b33f4e52375b0e095ea2d2978bbb23"
+    },
+    "source/black-author.prompt.json": {
+      "bytes": 12916,
+      "sha256": "39eac3be1b9b0b8c2c7eb207082bcebe7b16678f34baac095a59e58decd60a6e"
     },
     "source/booksea-album.js": {
       "bytes": 29189,
       "sha256": "951c2b039009f3fff8f9b4393c1f970e7a3efb51577bc6ab21b23f8d5f43c69b"
     },
     "source/controller-adapter.js": {
-      "bytes": 11419,
-      "sha256": "f57c3d1f4d358ef15e7c6b78a7eb16c0f0a23a86602ab1e5af0d079a837b788f"
+      "bytes": 11500,
+      "sha256": "2c68e2aa62fa4d709f91805451a6693112229dc6b0787a0afc4ea3eecf14a5f3"
     },
     "source/controller-prelude.js": {
       "bytes": 4167,
       "sha256": "8c835ff764c081205cafd0625eba9f20a3700cf9ee97e36494b212177caebd98"
     },
     "source/core-runtime.mjs": {
-      "bytes": 25694,
-      "sha256": "87bea4680f2a054b288efad727c69151d540a61f911aa7b7aa7cc2f85f754a0b"
+      "bytes": 25911,
+      "sha256": "535d3378d99e4f51cd831628d7cbf919a7c259c0920a8ba62765a4230e1ab2d7"
+    },
+    "source/extra-settings.js": {
+      "bytes": 26675,
+      "sha256": "650fba5de1aac14ca20b4fb61eb7a0f59b6656a2b52be2d528e101cd67a83419"
     },
     "source/legacy-body.html": {
       "bytes": 17223,
@@ -122,8 +138,8 @@
       "sha256": "35758e4ba8beece01c754bd4fdfcd1d5f70e06e4d05b3d65c3d8caa52b5d6eeb"
     },
     "source/legacy-reader.js": {
-      "bytes": 736850,
-      "sha256": "a734b5ef753a9019f70234ae1e1bf00c34a7fe60f0250c8183ea4ec3d0be6427"
+      "bytes": 745783,
+      "sha256": "bca854b2c17eb3c34e59b0315f41936bd778fd681adaa65cfc2292069d6fc7a9"
     },
     "source/letter-body.html": {
       "bytes": 4703,
@@ -142,24 +158,24 @@
       "sha256": "491f467e1001cf3a9ecc45a38b3c728d94e5ad630c709a2ccc1154b6fddbaaa9"
     },
     "source/reader-ui-switch.js": {
-      "bytes": 14227,
-      "sha256": "d09eeae6cec675e10f4f9e44f7bae586d0f207ee9483657405517380e5d0a762"
+      "bytes": 14500,
+      "sha256": "948565175f80d78f31cb35d8ad83dfe593c9849ebe03639cd8539800bfbb9ee2"
     },
     "source/reader-ui.js": {
-      "bytes": 126167,
-      "sha256": "d2b362774d5b6574dce1508c4285404ecd83baddfd2dcd6f1a355ef67695246e"
+      "bytes": 126907,
+      "sha256": "889646ff3955533cf34309af94d477468fb87cdc1ab87f5bd427251403779a6e"
     },
     "source/template-system.js": {
-      "bytes": 67118,
-      "sha256": "19f821cdc2dde88abfad70d24796fcde6436719ae469bbe9c81d5d98b9915a6f"
+      "bytes": 67122,
+      "sha256": "411f010ae493060414baaada7c29556dc34351c584b7628302c5a83aca419014"
     },
     "worldbook/notes.txt": {
       "bytes": 2036,
       "sha256": "37781ed1d6e30e31826e0aa4e98afe956e6f7d1cf3187f4f3ca3f1e9deb5a809"
     },
     "worldbook/读者核心本体.txt": {
-      "bytes": 314427,
-      "sha256": "c658ff06b1a225926a3069dc729f536512ade89feafadaea50a3050da1995033"
+      "bytes": 333728,
+      "sha256": "9382090e26417f104a6d72ffef10e28a65da3a62e085997886975dfe1ff9fe7a"
     }
   }
 }

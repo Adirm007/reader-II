@@ -196,6 +196,9 @@
     function enabled() {
       try { return !api || typeof api.isEnabled !== 'function' || api.isEnabled() === true; } catch (error) { return false; }
     }
+    function coexisting() {
+      try { return !!(api && typeof api.isCoexisting === 'function' && api.isCoexisting() === true); } catch (error) { return false; }
+    }
 
     function latestMessageId() {
       var ctx = context();
@@ -312,6 +315,7 @@
         var target = frame.contentWindow;
         target.__readerRuntimeGeneration = generation;
         target.__readerHostApi = shell;
+        target.__ReaderIICore = api;
         target.ReaderCore = api;
         target.TavernHelper = helperProxy();
         target.SillyTavern = safeGet(host, 'SillyTavern');
@@ -619,9 +623,6 @@
       if (previous && previous !== shell && typeof previous.stop === 'function') {
         try { previous.stop(); } catch (error) { log.warn('[ReaderShell] 停止上一个壳', error); }
       }
-      try {
-        if (host.__dhb) { host.clearInterval(host.__dhb); host.__dhb = null; }
-      } catch (error) { /* ignore */ }
       var stale = doc.getElementById(FRAME_ID);
       if (stale) {
         try {
@@ -630,6 +631,11 @@
         } catch (error) { /* 上一个控制器已坏 */ }
         stale.remove();
       }
+      /* 与原版读者共存时绝不删原版读者的悬浮球、大厅、书海等 DOM 节点，也不停它的心跳。 */
+      if (coexisting() || !enabled()) return;
+      try {
+        if (host.__dhb) { host.clearInterval(host.__dhb); host.__dhb = null; }
+      } catch (error) { /* ignore */ }
       LEGACY_IDS.forEach(function (id) {
         var node = doc.getElementById(id);
         if (node) node.remove();

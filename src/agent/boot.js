@@ -84,8 +84,16 @@
     modules.installCoreTools(registry, { vfs: vfs, env: env, kit: kit });
     web = modules.installWebTools(registry, vfs, env, kit, { net: net, secrets: secrets });
     modules.installDeviceTools(registry, vfs, env, kit, { companion: companion });
+    function resolveCore() {
+      if (host.__ReaderIICore && host.__ReaderIICore.__reader_core_api) return host.__ReaderIICore;
+      return host.ReaderCore && host.ReaderCore.__reader_core_api ? host.ReaderCore : null;
+    }
+    function resolveNativeReader() {
+      return host.ReaderCore && host.ReaderCore.__reader_core_api !== true ? host.ReaderCore : null;
+    }
+
     var legacy = modules.createAgentTools(env, kit, {
-      core: function () { return host.ReaderCore && host.ReaderCore.__reader_core_api ? host.ReaderCore : null; },
+      core: resolveCore,
       memory: memory,
       shell: function () { return host.ReaderShell || null; },
       openUi: function (tab) { return ui ? ui.open(tab) : null; }
@@ -97,7 +105,7 @@
     agent = modules.createAgent(env, llm, kit, memory, {
       history: history, registry: registry, vfs: vfs, journal: journal, connectors: connectors, settingsIo: settingsIo, apiTier: legacy.apiTier,
       requestMoreRounds: function (request) { return ui ? ui.requestMoreRounds(request) : 0; },
-      core: function () { return host.ReaderCore && host.ReaderCore.__reader_core_api ? host.ReaderCore : null; },
+      core: resolveCore,
       envLines: function () { return [web ? web.brief() : '', mcp ? mcp.brief() : '', companion.brief()]; }
     });
     mcp = modules.createMcp(env, kit, {
@@ -135,7 +143,7 @@
       updates: updates,
       netUi: function (panel) { return modules.createNetUi(env, kit, agent, { net: net, secrets: secrets, mcp: mcp, companion: companion, web: web }, panel); },
       shell: function () { return host.ReaderShell || null; },
-      core: function () { return host.ReaderCore && host.ReaderCore.__reader_core_api ? host.ReaderCore : null; },
+      core: resolveCore,
       /* 下面才定义的 lobby：助手窗口的「服务台」返回按钮与设置页「这张卡」的开关要用。 */
       lobby: function () { return lobby; }
     });
@@ -150,16 +158,29 @@
       if (toastr && typeof toastr[kind] === 'function') toastr[kind](text, 'Reader-II');
       else env.console.info('[ReaderII] ' + text);
     }
-    function currentCore() { return host.ReaderCore && host.ReaderCore.__reader_core_api ? host.ReaderCore : null; }
+    function currentCore() { return resolveCore(); }
 
     var lobby = {
       isEnabled: function () { var core = currentCore(); return !!core && core.isEnabled(); },
+      isCoexisting: function () { var core = currentCore(); return !!(core && typeof core.isCoexisting === 'function' && core.isCoexisting()); },
+      hasNativeLobby: function () { var native = resolveNativeReader(); return !!(native && typeof native.open === 'function'); },
+      openNativeLobby: function (page) {
+        var native = resolveNativeReader();
+        if (native && typeof native.open === 'function') {
+          try { native.open(page || 'lobby'); return true; } catch (error) { env.console.warn('[ReaderII] 打开原版读者大厅失败', error); }
+        }
+        return false;
+      },
       enable: function () { var core = currentCore(); return core ? core.setEnabled(true) : Promise.reject(new Error('读者还没有就绪')); },
       disable: function () { var core = currentCore(); return core ? core.setEnabled(false) : Promise.reject(new Error('读者还没有就绪')); },
-      /* 启用的卡打开指定大厅页（默认 lobby），无卡或停用时打开助手。 */
+      /* 启用的卡打开指定大厅页（默认 lobby），无卡、停用或与原版读者共存时打开助手。 */
       open: async function (page) {
         var core = currentCore();
         var shell = host.ReaderShell;
+        if (core && typeof core.isCoexisting === 'function' && core.isCoexisting()) {
+          ui.open('chat');
+          return true;
+        }
         if (core ? !core.isEnabled() : !kit.names().chat) {
           ui.open('chat');
           return true;

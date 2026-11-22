@@ -292,10 +292,13 @@
         message_id: messageId
       });
       if (source === 'reader_owned' && category === 'resurrection' && !result.duplicate && String(event.persona || '') === 'kuromaku') {
+        var incremented = false;
         await controller.mutate('record_resurrection', function (data, reader) {
+          if (reader.黑幕结局 === 'killed' || reader.黑幕结局 === 'confessed') return;
           reader.进度 = Math.max(0, Math.trunc(Number(reader.进度) || 0)) + 1;
+          incremented = true;
         });
-        result.progressDelta = 1;
+        if (incremented) result.progressDelta = 1;
       }
       return result;
     }
