@@ -383,3 +383,46 @@ test('reader-II Black Author events: kuromaku_kill (+1 once/turn), kuromaku_endi
   core.dispose();
   await world.host.ReaderII.dispose();
 });
+
+test('reader-II avoids false coexistence on non-reader entries and recovers when native Reader worldbook is disabled', async () => {
+  const world = createCoexistWorld({
+    nativeReaderRuntime: false,
+    chatVariables: { 系统核心: '九十九夜梦', dream_black_author_prompt: '{}' },
+    statData: { 命运点数: 100 },
+  });
+  const core = world.host.__ReaderIICore;
+  // Before worldinfo is scanned, stale chat vars yield conservatively
+  assert.equal(core.isCoexisting(), true);
+
+  // Once WORLDINFO_ENTRIES_LOADED shows native reader-core is NOT enabled (even if an entry mentions DREAM_WORLDBOOK as text), reader-II recovers!
+  await world.eventSource.emit(world.eventTypes.WORLDINFO_ENTRIES_LOADED, {
+    globalLore: [],
+    characterLore: [
+      { comment: '[本体][变量]公共函数', content: 'const marker = "DREAM_WORLDBOOK";', disable: false },
+      { comment: '[本体][命定系统]梅林核心', content: '{{setvar::系统核心::梅林核心}}', disable: false },
+    ],
+  });
+  assert.equal(core.isCoexisting(), false, 'must not falsely detect native Reader when reader-core header is absent');
+  assert.equal(core.isEnabled(), true, 'stale chat vars must not permanently lock out reader-II once worldbook confirms native Reader is off');
+
+  core.dispose();
+  await world.host.ReaderII.dispose();
+});
+
+test('reader-II agent extra personality preserves literal $& and $\' without duplicating persona line', async () => {
+  const extras = [
+    { name: '', kind: 'personality', content: "价格写作$&与$'", enabled: true },
+  ];
+  const world = createCoexistWorld({
+    nativeReaderRuntime: true,
+    chatVariables: { 系统核心: '九十九夜梦', dream_persona: 'reader', dream_extra_settings: JSON.stringify(extras) },
+    statData: {},
+  });
+  const card = world.host.ReaderII.agent.personaContext().card;
+  const line = String(card).split(/\r?\n/).find((l) => l.includes('价格写作')) || '';
+  assert.ok(line.includes("价格写作$&与$'"), 'literal $& and $\' preserved in agent persona');
+  assert.equal((line.match(/性格[：:]/g) || []).length, 1, '$& must not duplicate 性格: prefix');
+
+  world.host.__ReaderIICore.dispose();
+  await world.host.ReaderII.dispose();
+});

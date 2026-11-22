@@ -93,8 +93,8 @@ test('JSON：四个条目，字段与 v3.3 的世界书相同；能往返；EJS 
 
 test('核心：取上游人格与机制部分；不读 MVU 路径、不带书海与多核心管理；保留黑幕完整机制、附加设定、主题与称呼', () => {
   assert.ok(built.upstreamLines >= 1900, String(built.upstreamLines));
-  assert.equal(built.upstreamVersion, '2026.11.22.1');
-  assert.ok(core.startsWith('<%_ /* READER_II_WORLDBOOK core vtest · 上游 reader-core v2026.11.22.1 */_%>\n'));
+  assert.equal(built.upstreamVersion, '2026.11.22.3');
+  assert.ok(core.startsWith('<%_ /* READER_II_WORLDBOOK core vtest · 上游 reader-core v2026.11.22.3 */_%>\n'));
   for (const token of ['getMessageVar(', 'setMessageVar(', 'dream_black_author_prompt', 'DREAM_WORLDBOOK', '"op":', '99999', '书海', 'dream_core_manager']) {
     assert.ok(!core.includes(token), token);
   }

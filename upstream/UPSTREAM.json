@@ -1,9 +1,9 @@
 {
   "repository": "Adirm007/reader",
-  "commit": "8046947cf083d0b1d511972131dc0882d5a3eb91",
-  "release": "2026.11.22.1",
+  "commit": "7dc143973e273ce231463038d96abbaaeba5bc82",
+  "release": "2026.11.22.3",
   "dirty": [],
-  "syncedAt": "2026-11-22T01:40:08.791Z",
+  "syncedAt": "2026-11-22T03:35:05.490Z",
   "files": {
     "LICENSE": {
       "bytes": 2109,
@@ -122,8 +122,8 @@
       "sha256": "535d3378d99e4f51cd831628d7cbf919a7c259c0920a8ba62765a4230e1ab2d7"
     },
     "source/extra-settings.js": {
-      "bytes": 26675,
-      "sha256": "650fba5de1aac14ca20b4fb61eb7a0f59b6656a2b52be2d528e101cd67a83419"
+      "bytes": 28905,
+      "sha256": "f87ece2806876629f71bb570327b976b6c752f3ce91f8f31dfdad7d7788032d9"
     },
     "source/legacy-body.html": {
       "bytes": 17223,
@@ -174,8 +174,8 @@
       "sha256": "37781ed1d6e30e31826e0aa4e98afe956e6f7d1cf3187f4f3ca3f1e9deb5a809"
     },
     "worldbook/读者核心本体.txt": {
-      "bytes": 333728,
-      "sha256": "9382090e26417f104a6d72ffef10e28a65da3a62e085997886975dfe1ff9fe7a"
+      "bytes": 333765,
+      "sha256": "a76195bc1c6d8e11714d394440aaca34fd5ef506b870e8ce2ff4a9814fec94de"
     }
   }
 }

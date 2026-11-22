@@ -363,7 +363,7 @@
       function mergePers(text) {
         if (!extraPers || !text) return text;
         if (/^([ \t]*(?:性格|表层性格)[：:][^\r\n]*)/m.test(text)) {
-          return text.replace(/^([ \t]*(?:性格|表层性格)[：:][^\r\n]*)/m, '$1' + extraPers);
+          return text.replace(/^([ \t]*(?:性格|表层性格)[：:][^\r\n]*)/m, function (_m, g1) { return g1 + extraPers; });
         }
         return text + '\n性格：' + extraPers.replace(/^；/, '');
       }

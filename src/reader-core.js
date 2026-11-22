@@ -66,6 +66,18 @@
       var doc = env.document || (host && host.document);
       if (doc && typeof doc.getElementById === 'function' && doc.getElementById('reader-core-controller')) return 'controller';
     } catch (error) { /* ignore */ }
+    var card = currentCard();
+    var cardRegexes = card && card.data && card.data.extensions && Array.isArray(card.data.extensions.regex_scripts)
+      ? card.data.extensions.regex_scripts : null;
+    if (cardRegexes && cardRegexes.some(function (rule) {
+      if (!rule || rule.disabled === true) return false;
+      var name = String(rule.scriptName || '');
+      return !/Reader-II/i.test(name) && /读者对话渲染|普罗泰利西翁|书海/.test(name);
+    })) return 'card:regex';
+    var key = hostKit.chatKey();
+    if (key && coexistByWorldbook[key] === true) return 'worldbook';
+    // 若最近一次世界书加载已确认当前聊天没有启用原版读者条目，则忽略聊天里残留的旧变量。
+    if (key && coexistByWorldbook[key] === false) return '';
     var vars = chatVariables();
     if (vars['系统核心'] === '九十九夜梦') return 'var:系统核心';
     if (vars['dream_black_author_prompt'] !== undefined && vars['dream_black_author_prompt'] !== '') return 'var:dream_black_author_prompt';
@@ -78,16 +90,6 @@
         }
       } catch (error) { /* ignore */ }
     }
-    var card = currentCard();
-    var cardRegexes = card && card.data && card.data.extensions && Array.isArray(card.data.extensions.regex_scripts)
-      ? card.data.extensions.regex_scripts : null;
-    if (cardRegexes && cardRegexes.some(function (rule) {
-      if (!rule || rule.disabled === true) return false;
-      var name = String(rule.scriptName || '');
-      return !/Reader-II/i.test(name) && /读者对话渲染|普罗泰利西翁|书海/.test(name);
-    })) return 'card:regex';
-    var key = hostKit.chatKey();
-    if (key && coexistByWorldbook[key] === true) return 'worldbook';
     return '';
   }
 
@@ -124,14 +126,13 @@
     var found = lists.some(function (entries) {
       return Array.isArray(entries) && entries.some(function (entry) {
         return entry && entry.disable !== true && entry.enabled !== false
-          && typeof entry.content === 'string' && entry.content.indexOf('DREAM_WORLDBOOK') >= 0;
+          && typeof entry.content === 'string' && /\/\*\s*DREAM_WORLDBOOK\s+reader-core\b/.test(entry.content);
       });
     });
-    if (!found) return false;
     var key = hostKit.chatKey();
-    if (key) coexistByWorldbook[key] = true;
+    if (key) coexistByWorldbook[key] = found;
     syncCoexistState();
-    return true;
+    return found;
   }
 
   function isEnabled() {
