@@ -44,13 +44,24 @@
 
   function createPermissions(getSettings) {
     var session = Object.create(null);
+    /* 规则连同各自的正则只在规则表换了的时候编译一次：一次适配会按世界书条目逐个问权限，不该每问一次都重新编译全部规则。 */
+    var compiled = { source: undefined, rules: [] };
+
+    function compileRules(source) {
+      if (source !== undefined && compiled.source === source) return compiled.rules;
+      var rules = normalizeRules(source).map(function (rule) {
+        return { effect: rule.effect, action: rule.action, pattern: rule.pattern, matcher: globToRegExp(rule.pattern) };
+      });
+      compiled = { source: source, rules: rules };
+      return rules;
+    }
 
     function settings() {
       var source = getSettings() || {};
       return {
         mode: MODE_RANK[source.mode] === undefined ? 'card' : source.mode,
         approval: ['ask', 'auto', 'yolo'].indexOf(source.approval) >= 0 ? source.approval : 'ask',
-        rules: normalizeRules(source.rules)
+        rules: compileRules(source.rules)
       };
     }
 
@@ -61,7 +72,7 @@
       for (var index = 0; index < rules.length; index += 1) {
         var rule = rules[index];
         if (rule.action !== '*' && rule.action !== action) continue;
-        if (!(globToRegExp(rule.pattern).test(target) || rule.pattern === request.tool)) continue;
+        if (!(rule.matcher.test(target) || rule.pattern === request.tool)) continue;
         if (rule.effect === 'deny') return rule;   /* 禁止优先；其余取第一条匹配的 */
         if (!hit) hit = rule;
       }

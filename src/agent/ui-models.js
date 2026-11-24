@@ -121,6 +121,38 @@
       }).join('');
       return view.card('ra-media-card', '媒体工具', html, '单独保存');
     }
+    /*
+     * 分卷导演的两个模型用途。两档各有分工，所以各配各的连接、模型与思考档位：
+     *   总导演（director）      首次编纲与结构重构，整卷只跑一两次，值得用推理强的模型；
+     *   场记（director_judge）  每轮判定偏移、预写下一轮简报，调用频繁，用便宜够用的就好。
+     * 连接除了独立方案，还可以跟随主助手、用酒馆当前连接或默认方案；场记默认跟随总导演。
+     */
+    var DIRECTOR_KINDS = [
+      ['director', '总导演', '首次编纲与结构重构：整卷只跑一两次，适合配推理能力强的模型。'],
+      ['director_judge', '场记', '每轮判定偏移、预写下一轮简报：调用频繁，适合配便宜够用的模型。']
+    ];
+    function directorBase(kind) {
+      var base = kind === 'director_judge' ? { director: '跟随总导演' } : {};
+      return Object.assign(base, { agent: '跟随主助手', tavern: '酒馆当前连接', default: '默认独立方案' });
+    }
+    function directorStatus(kind, config) {
+      var attached = llm.getConnectionPreset(config.selected);
+      var parent = config.selected === 'director' ? llm.getTaskConnection('director') : null;
+      var parentPreset = parent ? llm.getConnectionPreset(parent.selected) : null;
+      var model = config.model || (attached && attached.model) || (parent && (parent.model || (parentPreset && parentPreset.model))) || '';
+      return '当前使用 · ' + (model || (config.selected === 'agent' || (parent && parent.selected === 'agent') ? activeModel() : '所选连接的默认模型'))
+        + (config.effort && config.effort !== 'auto' ? ' · 思考 ' + config.effort : '');
+    }
+    function directorHtml() {
+      var html = DIRECTOR_KINDS.map(function (item) {
+        var kind = item[0], config = llm.getTaskConnection(kind);
+        return '<fieldset class="ra-role" data-editor="' + kind + '"><legend>' + item[1] + '</legend><p class="ra-note">' + item[2] + '</p>'
+          + '<div class="ra-model-grid">' + field('连接', '<select data-source-select data-preset-options="' + kind + '">' + presetOptions(config.selected, directorBase(kind)) + '</select>')
+          + modelPicker(config.model, false) + field('思考档位', '<select data-director-effort>' + choices(EFFORT, config.effort || 'auto') + '</select>')
+          + '<div class="ra-row"><button type="button" class="ra-btn is-small" data-act="models-director-save">应用' + item[1] + '设置</button><span class="ra-note" data-director-status>' + esc(directorStatus(kind, config)) + '</span></div></div></fieldset>';
+      }).join('');
+      return view.card('ra-director-model-card', '导演模型', '<p class="ra-note">分卷导演（「导演」页）用的两个模型。导演不随「这张卡」的开关走，在任何聊天里都可以单独启用。</p>' + html, '单独保存');
+    }
     function presetValue(box) {
       var clear = box.querySelector('[data-forget-key]');
       return { id: box.dataset.presetId || undefined, name: box.querySelector('[data-preset-name]').value.trim(), source: box.querySelector('[data-preset-source]').value,
@@ -130,7 +162,8 @@
       var scope = $('#ra-connections-card').parentNode;
       scope.querySelectorAll('[data-preset-options]').forEach(function (select) {
         var kind = select.dataset.presetOptions, selected = kind === 'edit' ? savedId : select.value;
-        var base = kind === 'main' ? { default: '跟随默认方案', tavern: '酒馆当前连接' } : kind === 'edit' ? { '': '新建独立方案' } : kind === 'role' ? { '': '继承主助手连接' } : { agent: '继承主助手连接' };
+        var base = kind === 'main' ? { default: '跟随默认方案', tavern: '酒馆当前连接' } : kind === 'edit' ? { '': '新建独立方案' } : kind === 'role' ? { '': '继承主助手连接' }
+          : kind === 'director' || kind === 'director_judge' ? directorBase(kind) : { agent: '继承主助手连接' };
         select.innerHTML = presetOptions(selected, base);
       });
     }
@@ -140,6 +173,11 @@
       var card = $('#ra-media-card');
       if (card) card.querySelectorAll('[data-media-status]').forEach(function (node) {
         node.textContent = mediaStatus(llm.getTaskConnection(node.closest('[data-editor]').dataset.editor));
+      });
+      var directorCard = $('#ra-director-model-card');
+      if (directorCard) directorCard.querySelectorAll('[data-director-status]').forEach(function (node) {
+        var kind = node.closest('[data-editor]').dataset.editor;
+        node.textContent = directorStatus(kind, llm.getTaskConnection(kind));
       });
     }
     function invalidateList(box) {
@@ -199,6 +237,12 @@
           llm.saveTaskConnection(box.dataset.editor, { selected: selected, model: model, enabled: enabled });
           refreshStatus();
           view.toast(box.dataset.editor === 'image' ? '图片工具设置已应用' : '视频工具设置已应用');
+        } else if (name === 'models-director-save') {
+          var directorKind = box.dataset.editor;
+          llm.saveTaskConnection(directorKind, { selected: box.querySelector('[data-source-select]').value, model: box.querySelector('[data-model-name]').value.trim(),
+            effort: box.querySelector('[data-director-effort]').value });
+          refreshStatus();
+          view.toast(directorKind === 'director' ? '总导演的模型设置已应用' : '场记的模型设置已应用');
         } else if (name === 'models-preset-save') {
           var preset = presetValue(box);
           if (!preset.name || !preset.apiurl || !preset.model) throw new Error('请填写方案名称、API 地址和模型名称。');
@@ -218,7 +262,7 @@
         }
       } catch (error) { view.toast(String(error && error.message || error), true); }
     }
-    return { connectionsHtml: connectionsHtml, delegationHtml: delegationHtml, mediaHtml: mediaHtml, readDelegation: readDelegation,
+    return { connectionsHtml: connectionsHtml, delegationHtml: delegationHtml, mediaHtml: mediaHtml, directorHtml: directorHtml, readDelegation: readDelegation,
       syncMode: syncMode, refreshStatus: refreshStatus, change: change, input: input, action: action, effortOptions: function (value) { return choices(EFFORT, value); } };
   }
   modules.createModelUi = createModelUi;

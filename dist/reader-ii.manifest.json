@@ -1,15 +1,15 @@
 {
   "format": 2,
   "name": "reader-ii",
-  "version": "4.1.0-alpha.14",
+  "version": "4.1.0-alpha.15",
   "hash": "SHA-256（文本使用 UTF-8 与 LF，ZIP 按原始字节）",
   "files": {
     "dist/reader-ii.ext.js": {
-      "sha256": "24e5ec047079309a47744c7ff7de2d3d0f8b2ee388783e8f779495e5e3a1c348",
-      "bytes": 2029497
+      "sha256": "b4bdc6c852f5b8fbfaeccd651970f1b5336cd0f44e654f246c53a7528b2e7c09",
+      "bytes": 2377652
     },
     "dist/reader-ii-companion.zip": {
-      "sha256": "74a65ce7121ba75f53f79cbfae35972e8b0d2075abcc4db4ae25add19a42facd",
+      "sha256": "1fe48917291a14ad37f7d27b2f7b7aed5ddf2d906b6bb5f1b97a126bc4f0a2e3",
       "bytes": 54755
     }
   }

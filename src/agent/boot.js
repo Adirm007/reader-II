@@ -2,7 +2,7 @@
   'use strict';
 
   /*
-   * 扩展包（reader-ii.ext.js）的启动入口：装配环境 → 记忆 → Agent 内核 → 面板，挂到宿主窗口的 ReaderII 上。
+   * 扩展包（reader-ii.ext.js）的启动入口：装配环境 → 记忆 → Agent 内核 → 分卷导演 → 面板，挂到宿主窗口的 ReaderII 上。
    * 两种载体都走这里：酒馆扩展直接加载；酒馆助手脚本在没有扩展时也可以加载同一份包。
    * 重复加载是安全的：已经有实例就什么都不做。
    */
@@ -139,14 +139,43 @@
       return null;
     });
     var updates = modules.createUpdater(env, kit);
+    /*
+     * 分卷导演：助手的后台子能力，有自己的锁与状态，不随「这张卡」上 Reader-II 的开关走。
+     * 它干活时在任务看板上挂牌子（jobs），状态浮窗（jobFloat）只读这块看板。
+     * prompt 是正文提示词模块（读者核心的一部分，先于这里加载）：导演往它那里登记「导演简报」这一槽；
+     * 只加载了助手模块的环境里没有它，导演照常编纲与巡检，只是没有地方注入。
+     */
+    var jobs = modules.createJobBoard();
+    var jobFloat = null;
+    var director = null;
+    try {
+      director = modules.createDirector(env, kit, llm, {
+        vfs: vfs, skills: skills, connectors: connectors, permissions: agent.permissions, journal: journal, jobs: jobs, agent: agent,
+        prompt: function () { var core = resolveCore(); return core && core.prompt || null; },
+        openTab: function (tab) { return ui ? ui.open(tab) : null; }
+      });
+    } catch (error) { env.console.warn('[ReaderII] 分卷导演启动失败', error); }
     ui = modules.createAgentUi(env, kit, agent, memory, llm, {
       updates: updates,
       netUi: function (panel) { return modules.createNetUi(env, kit, agent, { net: net, secrets: secrets, mcp: mcp, companion: companion, web: web }, panel); },
       shell: function () { return host.ReaderShell || null; },
       core: resolveCore,
       /* 下面才定义的 lobby：助手窗口的「服务台」返回按钮与设置页「这张卡」的开关要用。 */
-      lobby: function () { return lobby; }
+      lobby: function () { return lobby; },
+      director: director, jobs: jobs,
+      float: function () { return jobFloat; }
     });
+    try {
+      jobFloat = modules.createJobFloat(env, jobs, {
+        isDialogOpen: function () { return ui.isOpen(); },
+        dialogShell: function () { return ui.shell(); },
+        /* 助手窗口正停在导演页时不重复显示：那一页自己就有完整的进度与日志。 */
+        isSuppressed: function () { return ui.isOpen() && ui.currentTab() === 'director'; },
+        getTheme: function () { return ui.theme(); },
+        getMode: function () { return director ? director.getSettings().floatMode : 'all'; }
+      });
+      if (director) director.onChange(function (reason) { if (reason === 'settings') jobFloat.sync(); });
+    } catch (error) { env.console.warn('[ReaderII] 状态浮窗启动失败', error); }
 
     connectors.refresh();
     try { memory.install(); } catch (error) { env.console.warn('[ReaderII] 记忆系统启动失败', error); }
@@ -193,12 +222,16 @@
       }
     };
 
+    /* 导演挂在助手下面（ReaderII.agent.director），也直接挂在 ReaderII 上；看板一并给出来，别的后台功能可以共用浮窗。 */
+    agent.director = director;
     var api = {
       version: modules.READER_AGENT_VERSION, ready: true, carrier: env.carrier,
       agent: Object.assign(agent, { open: ui.open, close: ui.close }),
-      lobby: lobby,
+      lobby: lobby, director: director, jobs: jobs,
       memory: memory, kit: kit, llm: llm, vfs: vfs, updates: updates, mcp: mcp, companion: companion, net: net,
       dispose: function () {
+        try { if (jobFloat) jobFloat.dispose(); } catch (error) { /* ignore */ }
+        try { if (director) director.dispose(); } catch (error) { /* ignore */ }
         try { ui.dispose(); } catch (error) { /* ignore */ }
         try { memory.dispose(); } catch (error) { /* ignore */ }
       }

@@ -21,6 +21,13 @@
     { id: 'reader_ii_rules', template: 'rules', position: 1, depth: 4 },
     { id: 'reader_ii_list', template: 'list', position: 1, depth: 1 }
   ];
+  /*
+   * 可选槽位：分卷导演的《本轮导演简报》。它不是模板渲染出来的，而是由导演（agent/director.js）登记的提供者给出一段现成的文本；
+   * 也不随「这张卡」的开关走——卡没启用 Reader-II、或与原版读者共存时，只要导演在执导，这一槽照样注入。
+   * 文本在交到这里之前已经解析过主角名、失活了其余宏，所以世界书通道与最终请求的兜底拿到的是同一份，比对得上。
+   */
+  var DIRECTOR_SLOT = { id: 'reader_ii_director', template: 'director', position: 1, depth: 1 };
+  var SLOTS = PROMPTS.concat([DIRECTOR_SLOT]);
   var EVENT_RE = /<READER_(?:FP|TASK|ACTION)_EVENT>[\s\S]*?<\/READER_(?:FP|TASK|ACTION)_EVENT>/gi;
   var UPDATE_RE = /<UpdateVariable>[\s\S]*?<\/UpdateVariable>/gi;
   var DREAM_RE = /<dream>「?((?:[^<]|<(?!dream\b|\/dream>))*?)」?<\/dream>/g;
@@ -79,11 +86,21 @@
     var retired = Object.create(null);
     var placement = modules.readerPromptPlacement;
     var turn = null;
+    var directorProvider = null;
+    var directorTouched = false;   /* 旧式扩展提示词里放过导演简报：清理时才需要动它 */
 
     function context() { try { return env.context() || null; } catch (error) { return null; } }
     /* 延后做的事不该拖住进程（Node 里的测试）：定时器 unref。 */
     function later(task, ms) { var timer = setTimeout(task, ms); if (timer && typeof timer.unref === 'function') timer.unref(); return timer; }
     function enabled() { try { return !disposed && !!api && typeof api.isEnabled === 'function' && api.isEnabled() === true; } catch (error) { return false; } }
+    /* 导演槽位自己的开关：提供者说它在这个聊天里执导、且有东西可注入。 */
+    function directorOn() {
+      if (disposed || !directorProvider) return false;
+      try { return directorProvider.active() === true; } catch (error) { return false; }
+    }
+    /* 这一轮正文有没有我们要管的东西：读者的三段模板，或导演简报。 */
+    function engaged() { return enabled() || directorOn(); }
+    function slotOn(key) { return key === 'director' ? directorOn() : enabled(); }
     function coexisting() { try { return !!(api && typeof api.isCoexisting === 'function' && api.isCoexisting() === true); } catch (error) { return false; } }
     function hostHasMvu() { try { return !!(api && typeof api.hostMvu === 'function' && api.hostMvu()); } catch (error) { return false; } }
 
@@ -197,9 +214,22 @@
       saveTimer = setTimeout(function () { try { Promise.resolve(ctx.saveMetadata()).catch(function () {}); } catch (error) { /* ignore */ } }, 300);
     }
 
-    /* 渲染三份模板，返回 { core, rules, list }（没启用 Reader 的聊天里都是空串）。 */
+    /* 渲染三份模板，返回 { core, rules, list }（没启用 Reader 的聊天里都是空串）；导演在执导时另带 director。 */
     async function render(generationType) {
       var output = { core: '', rules: '', list: '' };
+      await renderStory(output, generationType);
+      if (directorOn()) {
+        try {
+          var brief = String(await directorProvider.brief(generationType) || '').trim();
+          if (brief && directorOn()) output.director = brief;
+        } catch (error) {
+          log.error('[ReaderII] 导演简报读取失败', error);
+        }
+      }
+      return output;
+    }
+
+    async function renderStory(output, generationType) {
       var templates = modules.READER_PROMPT_TEMPLATES;
       if (!enabled() || !templates) return output;
       var bridge = locals(generationType);
@@ -248,13 +278,20 @@
     function legacyInject(config, output) {
       var ctx = context() || {};
       var canPlaceInChat = ctx.mainApi === 'openai' && (hasEvent('GENERATE_AFTER_DATA') || hasEvent('CHAT_COMPLETION_SETTINGS_READY'));
+      function legacyPosition(p) { return p.position === 4 ? 1 : p.position === 0 ? 2 : 0; }
       PROMPTS.forEach(function (item) {
         var p = config[item.template];
-        var position = p.position === 4 ? 1 : p.position === 0 ? 2 : 0;
         // The old extension-prompt API has no example, author's-note or after-character slot.
         var defer = canPlaceInChat && p.position !== 0 && p.position !== 4;
-        setPrompt(item.id, p.enabled && p.position !== 7 && !defer ? output[item.template] : '', position, p.depth, p.role);
+        setPrompt(item.id, p.enabled && p.position !== 7 && !defer ? output[item.template] : '', legacyPosition(p), p.depth, p.role);
       });
+      /* 导演简报：有内容才放；之前放过的，这次没有内容也要清掉。别的时候不碰这个编号。 */
+      var d = config[DIRECTOR_SLOT.template];
+      var brief = d && d.enabled && d.position !== 7 && !(canPlaceInChat && d.position !== 0 && d.position !== 4) ? output[DIRECTOR_SLOT.template] || '' : '';
+      if (d && (brief || directorTouched)) {
+        setPrompt(DIRECTOR_SLOT.id, brief, legacyPosition(d), d.depth, d.role);
+        directorTouched = !!brief;
+      }
     }
 
     async function inject() {
@@ -271,6 +308,22 @@
 
     function clearExtensionPrompts() {
       PROMPTS.forEach(function (item) { setPrompt(item.id, '', item.position, item.depth); });
+      if (directorTouched) {
+        setPrompt(DIRECTOR_SLOT.id, '', DIRECTOR_SLOT.position, DIRECTOR_SLOT.depth);
+        directorTouched = false;
+      }
+    }
+
+    /*
+     * 读者这一侧让位（这张卡停用了 Reader-II，或检测到原版读者而进入共存）。
+     * 导演是助手的子能力，不随读者的开关走：没有导演在执导时整轮作废（与原来相同）；
+     * 导演还在执导时只撤掉读者的三段，这一轮的导演简报照常注入。
+     */
+    function yieldStory() {
+      if (!directorOn()) { clear(); return; }
+      PROMPTS.forEach(function (item) { setPrompt(item.id, '', item.position, item.depth); });
+      /* 已经渲染好的内容里可能带着读者的三段：丢掉，下一步按现在的开关重新渲染。 */
+      if (turn) turn.pending = turn.output = null;
     }
 
     /* ---------- 正文处理 ---------- */
@@ -472,7 +525,7 @@
     }
 
     function isStory(type) { return !type || ['normal', 'regenerate', 'swipe', 'continue', 'group_chat', 'group'].indexOf(type) >= 0; }
-    function current(t) { return t && t === turn && !t.auxiliary.length && enabled() && t.key === kit.chatKey(); }
+    function current(t) { return t && t === turn && !t.auxiliary.length && engaged() && t.key === kit.chatKey(); }
 
     // Cache only inside this generation. ST deletes the old floor / adds the new user message
     // between GENERATION_AFTER_COMMANDS and the actual world-info scan.
@@ -542,7 +595,7 @@
         }) : [];
       t.worldEntries = {};
       own.forEach(function (entry) {
-        var section = placement.sections.find(function (item) { return item.uid === entry.uid; });
+        var section = (placement.slots || placement.sections).find(function (item) { return item.uid === entry.uid; });
         if (!section) return;
         var depth = entry.position === 4 ? entry.depth : null;
         var applicable = rules.filter(function (rule) {
@@ -649,10 +702,11 @@
     }
     function absent(t, output, text) {
       var delivered = normalized(text);
-      return PROMPTS.map(function (slot) {
+      return SLOTS.map(function (slot) {
         var block = output[slot.template];
         var p = t.config[slot.template];
-        if (!block || !p.enabled || p.position === 7) return null;
+        /* 各槽位看各自的开关：这一轮中途停用了 Reader、而导演还在执导时，不把读者的三段补回去（反过来也一样）。 */
+        if (!block || !p || !p.enabled || p.position === 7 || !slotOn(slot.template)) return null;
         var found = t.worldEntries && t.worldEntries[slot.template];
         if (found && found.dynamic && found.entry.content && containsBlock(delivered, found.entry.content)) found.text = found.entry.content;
         if (containsBlock(delivered, block)) return null;
@@ -774,7 +828,7 @@
     listen('GENERATION_AFTER_COMMANDS', async function (type, _options, dryRun) {
       if (pauseForAuxiliary(type, dryRun, false) || dryRun) return;
       clear();
-      if (!isStory(type) || !enabled()) return;
+      if (!isStory(type) || !engaged()) return;
       var t = turn = { key: kit.chatKey(), type: type || 'normal', config: placement.placements(context()),
         listeners: [], auxiliary: [], auxiliaryEnds: 0, legacy: !hasEvent('WORLDINFO_ENTRIES_LOADED') };
       // A newly selected preset can install its own makeLast handlers after startup.
@@ -811,9 +865,12 @@
       later(retireOnce, 1500);
     });
     listen('CHAT_COMPLETION_PROMPT_READY', function (data) {
-      if (!enabled() || !data || !Array.isArray(data.chat)) return;
+      if (!data || !Array.isArray(data.chat)) return;
+      /* 事件块的清理只属于读者；导演单独执导时（卡没启用 Reader）只做最后的防吞槽兜底。 */
+      var story = enabled();
+      if (!story && !directorOn()) return;
       finishLegacyPreview(data.dryRun);
-      data.chat.forEach(function (message) {
+      if (story) data.chat.forEach(function (message) {
         if (!message || message.role === 'tool' || message.role === 'function') return;
         if (typeof message.content === 'string') message.content = cleanHistory(message.content);
         else if (Array.isArray(message.content)) message.content.forEach(function (part) { if (part && typeof part.text === 'string') part.text = cleanHistory(part.text); });
@@ -821,9 +878,11 @@
       if (!hasEvent('GENERATE_AFTER_DATA') && !hasEvent('CHAT_COMPLETION_SETTINGS_READY')) return ensureRequest(data, 'chat', data.dryRun);
     });
     listen('GENERATE_AFTER_COMBINE_PROMPTS', function (data) {
-      if (!enabled() || !data || typeof data.prompt !== 'string') return;
+      if (!data || typeof data.prompt !== 'string') return;
+      var story = enabled();
+      if (!story && !directorOn()) return;
       finishLegacyPreview(data.dryRun);
-      data.prompt = cleanHistory(data.prompt);
+      if (story) data.prompt = cleanHistory(data.prompt);
       if (!hasEvent('GENERATE_AFTER_DATA')) return ensureRequest(data, 'prompt', data.dryRun);
     });
 
@@ -834,7 +893,7 @@
     /* 启用状态变了：已经画出来的楼层要按新的规则重画一遍（来信插槽、事件块）。 */
     var onCoreChanged = function (event) {
       if (!event || !event.detail || event.detail.reason !== 'enabled_changed') return;
-      if (!enabled()) clear();
+      if (!enabled()) yieldStory();
       if (!formatter) {
         if (!coexisting()) installRegexFallback();
         syncBuiltinRegexForCoexist();
@@ -853,6 +912,21 @@
       render: render,
       inject: inject,
       clear: clear,
+      yieldStory: yieldStory,
+      /*
+       * 登记可选槽位的提供者。目前只有 'director'：{ active() → 布尔（同步、便宜）, brief(generationType) → 文本或 Promise }。
+       * 传 null 取消登记。返回是否登记成功。
+       */
+      registerSlot: function (name, provider) {
+        if (name !== DIRECTOR_SLOT.template) return false;
+        var valid = provider && typeof provider.active === 'function' && typeof provider.brief === 'function';
+        directorProvider = valid ? provider : null;
+        if (!valid && directorTouched) {
+          setPrompt(DIRECTOR_SLOT.id, '', DIRECTOR_SLOT.position, DIRECTOR_SLOT.depth);
+          directorTouched = false;
+        }
+        return !!valid;
+      },
       stripForPrompt: stripForPrompt,
       formatForDisplay: formatForDisplay,
       retireLegacy: retireLegacy,

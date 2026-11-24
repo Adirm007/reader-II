@@ -2,17 +2,19 @@
   'use strict';
 
   /*
-   * 功能说明子页面：分三大模块展示 Reader-II 全部能力，替代分散在设置表单里的长段注释。
+   * 功能说明子页面：分四大模块展示 Reader-II 全部能力，替代分散在设置表单里的长段注释。
    *   1. 前端设置调整
    *   2. 卡内使用功能
    *   3. Agent 功能
+   *   4. 单卷群像导演（Agent 的后台子能力）
    */
   var modules = root.__ReaderIIModules = root.__ReaderIIModules || {};
 
   var SECTIONS = [
     ['ra-guide-frontend', '前端设置调整'],
     ['ra-guide-card', '卡内使用功能'],
-    ['ra-guide-agent', 'Agent 功能']
+    ['ra-guide-agent', 'Agent 功能'],
+    ['ra-guide-director', '单卷群像导演']
   ];
 
   function tile(title, body) {
@@ -78,6 +80,29 @@
       + '</div>');
   }
 
+  function directorCard(card) {
+    return card('ra-guide-director', '单卷群像导演',
+      '<p class="ra-guide-lead">导演是夜梦助手的后台子能力：读完前文、设定与你的偏好，为眼前这一卷编一份「活人各自运转、容许玩家自由破局」的动态大纲，然后在后台逐轮执导，直到这一卷自然落幕。它不随「这张卡」的开关走——卡没启用 Reader-II、或与原版读者共存时，照样可以单独开启。</p>'
+      + '<div class="ra-guide-grid">'
+      + tile('开卷：勘察与四步编纲', '在「导演」页点「开卷」。导演自动收集近期正文、主角人设、角色卡、当前世界书、变量、插件的剧情摘要与已完结各卷的钩子，再分四步产出：勘察卡 → 卷核立意与关系网 → 完整大纲 → 自检与交付。随时可以暂停、插话提意见；也可以设成第 2 步后停下等你过目。')
+      + tile('每轮简报与后台巡检', '正文生成之前，注入一份不超过 550 字的《导演简报》（五栏，只写明面上的表现，不剧透后台实情）。每轮正文之后，场记在后台判定偏移并预写下一份：<b>L0</b> 顺轨、<b>L1</b> 局部绕道（只留一条补丁，不动大纲）、<b>L2</b> 结构破局（交给总导演按既成事实重写后续，可一键撤回）。')
+      + tile('跟着楼层走的状态', '状态与简报按楼层存成快照：重掷、删楼、改楼之后，自动取对得上的那一条；来回翻 Swipe 也各自对得上。聊天改名、开分支后，新聊天会把原来的档案接过去。')
+      + tile('完结、归档与世界书', '场记连续两轮确认落幕后进入「待完结」：确认后沉淀一份卷档案与跨卷钩子留给下一卷，新角色的条目由你勾选去留，一次性的条目只关不删；归档前的样子留一份，可以一键恢复。给新角色建档走助手的权限体系，并记入「改动记录」可撤销。')
+      + tile('偏好与 Skill 都可改', '长期偏好分全局与「这张卡」两层，优先级高于 Skill 的一切默认规则。导演的方法论本身（Skill）可以在「导演 → 配置」里直接编辑、导入导出、恢复内置默认，保存即生效。')
+      + tile('状态浮窗', '导演在后台干活时，页面右上角（手机在顶部）会浮出一张小牌子：当前阶段、进度、最近几行过程，可以「查看」或「停止」。打开助手窗口时它收进标题栏下面；可以设成只显示编纲、重构、归档这类大活。')
+      + '</div>'
+      + '<h4 class="ra-sub">两个模型用途</h4>'
+      + tableRows([
+        ['总导演', '首次编纲与结构重构。整卷只跑一两次，适合配推理能力强的模型；默认跟随主助手的连接。'],
+        ['场记', '每轮的偏移判定、简报预写与归档。调用频繁，适合配便宜够用的模型；默认跟随总导演。它的提示词前缀（Skill + 偏好 + 大纲）在两次重构之间逐字节不变，支持缓存的接口会便宜很多。']
+      ])
+      + '<div class="ra-row ra-mt">'
+      + '<button type="button" class="ra-btn is-small is-main" data-act="guide-jump" data-tab-target="director">打开导演页</button>'
+      + '<button type="button" class="ra-btn is-small" data-act="guide-jump" data-tab-target="settings" data-section="ra-director-model-card">配置导演模型</button>'
+      + '<button type="button" class="ra-btn is-small" data-act="guide-jump" data-tab-target="settings" data-section="ra-placement-card">简报注入位置</button>'
+      + '</div>');
+  }
+
   function createGuideUi(view) {
     function tocHtml() {
       return SECTIONS.map(function (item, index) {
@@ -85,7 +110,7 @@
       }).join('');
     }
     function contentHtml() {
-      return frontendCard(view.card) + cardFeaturesCard(view.card) + agentCard(view.card);
+      return frontendCard(view.card) + cardFeaturesCard(view.card) + agentCard(view.card) + directorCard(view.card);
     }
     return { sections: SECTIONS, tocHtml: tocHtml, contentHtml: contentHtml };
   }

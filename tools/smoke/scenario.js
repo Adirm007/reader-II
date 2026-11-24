@@ -606,6 +606,122 @@ async function main() {
     mock.companion.present = false;
   });
 
+  /* ---------- 分卷导演：导演页、状态浮窗、导演模型与简报位置 ---------- */
+  const director = window.ReaderII.director;
+  const dirOutline = ['### 板块 A：全景勘察与卷核定性', '旧港的雨季，酒馆里来了修钟的人。', '### 板块 B：核心人物与独立关系网', '- [既有] 艾琳：酒馆老板娘，嘴硬心软。',
+    '### 板块 C：后台实情与客观时钟', '**后台完整实情**：灯塔的旧账本被藏在了钟楼的夹层里。', '**客观推进时钟**：第三天傍晚港务司来清点库房。',
+    '### 板块 D：分阶段动态推演', '#### Phase 1：雨夜来客', '新看守冒雨来打听修钟的人。', '#### Phase 2：钟楼的夹层', '上钟楼校时。', '#### Phase 3：清点之日', '账本的去向摆上桌面。',
+    '### 板块 E：收束形态与跨卷钩子库', '钩子：一只怀表。'].join('\n');
+  const dirBrief = (tag) => ['【当前阶段与承接】' + tag + '。{{user}}刚在酒馆坐下。', '【在场角色意图（仅表现层）】艾琳照常擦杯子。', '【本轮细节与暗压】座钟慢了七分钟。',
+    '【节奏与情绪红线】不要快进到钟楼。', '【本轮防 AI 味忌口】禁止替玩家做决定。'].join('\n');
+  const dirDelivery = '<self_check>\n1. 通过\n</self_check>\n<volume_outline>\n' + dirOutline + '\n</volume_outline>\n<volume_index>\n'
+    + JSON.stringify({ title: '雨季的钟', phases: [{ n: 1, title: '雨夜来客' }, { n: 2, title: '钟楼的夹层' }, { n: 3, title: '清点之日' }], new_characters: [] })
+    + '\n</volume_index>\n<first_brief>\n' + dirBrief('Phase 1 · 雨夜') + '\n</first_brief>';
+  const floatNode = () => $('#reader-agent-float');
+
+  await step('导演页：开卷四步编纲；状态浮窗随助手窗口的开关换停靠位', async () => {
+    mock.replies.length = 0;
+    /* 两种模式共用同一个浏览器档案：上一种模式留下的分卷还在工作区里（档案是持久的），先清掉再从头演。 */
+    await director.ready();
+    if (director.getStatus().volume) await director.discardVolume();
+    if (director.getStatus().plan) await director.discardDraft();
+    agent.open('chat');
+    $('#reader-agent-overlay [data-tab="director"]').click();
+    await until(() => $('#rd-status-card') && $('#rd-flow-card') && $('#rd-config-card') && $('[data-act="dir-activate"]'), '导演页的几块内容');
+    assert(/空闲/.test($('#rd-status-card').textContent), '还没开卷时应显示空闲');
+    await until(() => ($('#rd-skill')?.value || '').includes('## 阶段五'), 'Skill 编辑器载入内置正文');
+    assert(!/undefined|\[object /.test($('[data-pane="director"]').textContent), '导演页文字里出现了 undefined');
+
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    mock.replies.push('《勘察卡》土壤够肥。', async () => { await gate; return '卷核：一本账与一座钟。'; }, dirOutline, dirDelivery);
+    $('#rd-say-text').value = '这一卷不要阴谋';
+    $('[data-act="dir-activate"]').click();
+    await until(() => /编纲中/.test($('#rd-status-card')?.textContent || '') && $('#rd-flow-card .rd-track li[data-on="now"]'), '编纲中的进度');
+    assert(mock.llmCalls.some((messages) => messages.some((message) => String(message.content).includes('这一卷不要阴谋'))), '开卷前交代的话没有带给导演');
+    await sleep(80);
+    assert(!floatNode()?.isConnected, '助手窗口停在导演页时不该再摆一个浮窗');
+
+    /* 换到别的页：浮窗收进窗口，成为标题栏下面的一条。 */
+    $('#reader-agent-overlay [data-tab="chat"]').click();
+    const docked = await until(() => (floatNode()?.dataset.dock === 'dialog' && floatNode().parentElement === $('#reader-agent-overlay .ra-shell') ? floatNode() : null), '浮窗停靠在窗口里');
+    assert(docked.previousElementSibling === $('#reader-agent-overlay .ra-head'), '窗口里的浮窗应紧跟在标题栏后面');
+    assert(/导演 · 编纲/.test(docked.textContent) && /第 2 步/.test(docked.textContent), '浮窗没有显示当前阶段');
+    assert(docked.dataset.theme === $('#reader-agent-overlay').dataset.theme, '浮窗的主题应与助手窗口一致');
+
+    /* 关掉窗口：浮窗回到酒馆页面上，能展开、能点。 */
+    agent.close();
+    const floating = await until(() => (floatNode()?.dataset.dock === 'page' && floatNode().parentElement === document.body ? floatNode() : null), '浮窗回到页面上');
+    assert(getComputedStyle(floating).position === 'fixed' && floating.getBoundingClientRect().width > 120, '页面上的浮窗应固定在角落');
+    floating.querySelector('[data-rf="toggle"]').click();
+    await until(() => floatNode().querySelector('[data-rf="open"]') && floatNode().querySelector('[data-rf="cancel"]'), '展开后的「查看」与「停止」');
+    assert(/第 1 步完成/.test(floatNode().querySelector('.rf-lines')?.textContent || ''), '展开后应有过程日志');
+    floatNode().querySelector('[data-rf="open"]').click();
+    await until(() => $('#reader-agent-overlay')?.open && $('.ra-pane[data-pane="director"].is-on'), '「查看」跳到导演页');
+
+    release();
+    await until(() => /执导中/.test($('#rd-status-card')?.textContent || ''), '定稿后进入执导', 15000);
+    assert($('#rd-status-card .rd-track li[data-on="now"]')?.textContent.includes('雨夜来客'), '阶段进度条没有标出当前阶段');
+    await until(() => ($('#rd-brief')?.value || '').includes('Phase 1 · 雨夜。我刚在酒馆坐下'), '首轮简报（主角名已换成实名）');
+    assert(director.injectable() && (await director.briefFor('normal')).includes('我刚在酒馆坐下'), '导演应当可以注入简报');
+    return '第 ' + director.getStatus().volume.no + ' 卷《' + director.getStatus().volume.title + '》';
+  });
+
+  await step('导演页：后台巡检更新简报；设置页有导演模型与简报位置；完结归档后可恢复', async () => {
+    mock.replies.length = 0;
+    mock.replies.push(JSON.stringify({ drift_level: 1, reason: '换了路', phase_cursor: 2, state_delta: '绕到了钟楼后面', facts_add: ['没走正门'], local_patch: '艾琳改从后门送人',
+      next_brief: dirBrief('第二轮'), volume_completed: false }));
+    mock.chat.push({ name: '我', is_user: true, mes: '我绕到钟楼后面。' }, { name: '艾琳', is_user: false, mes: '后门的锁早就锈死了。' });
+    await window.SillyTavern.getContext().eventSource.emit('generation_ended');
+    await until(() => ($('#rd-brief')?.value || '').includes('第二轮。我刚在酒馆坐下'), '巡检后的新简报', 12000);
+    const statusText = $('#rd-status-card').textContent;
+    assert(/L1 局部绕道/.test(statusText) && /Phase 2 \/ 3/.test(statusText) && /绕到了钟楼后面/.test(statusText), '状态没有跟上巡检：' + statusText.slice(0, 160));
+
+    /* 手改简报：保存时照样净化（主角名、宏）。 */
+    const briefBox = $('#rd-brief');
+    briefBox.value = '【当前阶段与承接】{{user}}站在钟楼下。{{getvar::x}}';
+    briefBox.dispatchEvent(new Event('input', { bubbles: true }));
+    $('[data-act="dir-brief-save"]').click();
+    await until(() => $('#rd-brief')?.value === '【当前阶段与承接】我站在钟楼下。｛｛getvar::x｝｝', '保存后的简报已净化');
+    /* 配置：改一项并保存。 */
+    const every = $('[data-d="cfg.patrolEvery"]');
+    every.value = '2';
+    every.dispatchEvent(new Event('input', { bubbles: true }));
+    $('[data-act="dir-config-save"]').click();
+    await until(() => director.getSettings().patrolEvery === 2, '配置已保存');
+    director.saveSettings({ patrolEvery: 1 });
+
+    /* 设置页：导演模型（总导演 / 场记）与简报的注入位置。 */
+    $('#reader-agent-overlay [data-tab="settings"]').click();
+    await until(() => $('#ra-director-model-card [data-editor="director"]') && $('#ra-director-model-card [data-editor="director_judge"]'), '导演模型卡片');
+    assert($('[data-placement-section="director"] [data-s="p.director.enabled"]'), '正文提示词位置里应有导演简报这一槽');
+    assert($('.ra-toc [data-target="ra-director-model-card"]'), '设置目录里应有导演模型');
+    const judgeBox = $('#ra-director-model-card [data-editor="director_judge"]');
+    judgeBox.querySelector('[data-model-name]').value = 'cheap-model';
+    judgeBox.querySelector('[data-director-effort]').value = 'low';
+    judgeBox.querySelector('[data-act="models-director-save"]').click();
+    const saved = window.ReaderII.llm.getTaskConnection('director_judge');
+    assert(saved.model === 'cheap-model' && saved.effort === 'low' && saved.selected === 'director', '场记的模型设置没有保存');
+    judgeBox.querySelector('[data-model-name]').value = '';
+    judgeBox.querySelector('[data-director-effort]').value = 'auto';
+    judgeBox.querySelector('[data-act="models-director-save"]').click();
+    assert(window.ReaderII.llm.getTaskConnection('director_judge').model === '', '场记的模型设置没有还原');
+
+    /* 完结本卷 → 归档 → 恢复。 */
+    $('#reader-agent-overlay [data-tab="director"]').click();
+    (await until(() => $('[data-act="dir-finish-ask"]:not(:disabled)'), '完结按钮')).click();
+    mock.replies.push(JSON.stringify({ title: '雨季的钟', summary: '账本的去向摆上了桌面。', hooks: ['一只怀表'], entries: [] }));
+    (await until(() => $('[data-act="dir-finish"]:not(:disabled)'), '确认完结')).click();
+    await until(() => /空闲/.test($('#rd-status-card')?.textContent || '') && $('[data-act="dir-restore"]'), '归档后回到空闲', 15000);
+    assert(!director.injectable(), '归档之后不该再注入');
+    await until(() => /账本的去向摆上了桌面/.test($('#rd-docs-card')?.textContent || ''), '档案列在「已完结的卷」里');
+    $('[data-act="dir-restore"]').click();
+    assert($('[data-act="dir-restore"]').getAttribute('data-armed') === '1', '危险的按钮应先进入确认态');
+    $('[data-act="dir-restore"]').click();
+    await until(() => /执导中/.test($('#rd-status-card')?.textContent || ''), '恢复上一卷');
+    assert(director.injectable(), '恢复之后应当可以注入');
+  });
+
   await step('全程没有新的报错', async () => {
     const errors = (window.__readerIIProbe && window.__readerIIProbe.errors || []).map((item) => item.text);
     assert(errors.length === 0, errors.join(' | ').slice(0, 400));

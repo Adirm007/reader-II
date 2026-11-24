@@ -40,6 +40,16 @@
       return opening;
     }
 
+    /* 以 prefix 开头的字符串键的范围；宿主没有 IDBKeyRange 时返回 null（调用方退回全量再筛）。 */
+    function prefixRange(prefix) {
+      if (!prefix) return null;
+      var Range = null;
+      try { Range = env && env.host && env.host.IDBKeyRange || root.IDBKeyRange || null; } catch (error) { Range = null; }
+      if (!Range || typeof Range.bound !== 'function') return null;
+      try { return Range.bound(prefix, prefix + '￿'); } catch (error) { return null; }
+    }
+    function startsWith(key, prefix) { return !prefix || String(key).indexOf(prefix) === 0; }
+
     function run(store, mode, work) {
       return open().then(function (db) {
         if (!db) return work(null, memory[store]);
@@ -81,8 +91,26 @@
       get: function (store, key) { return run(store, 'readonly', function (os, map) { return os ? os.get(key) : map.get(key); }); },
       put: function (store, key, value) { return run(store, 'readwrite', function (os, map) { if (os) return os.put(value, key); map.set(key, value); }); },
       del: function (store, key) { return run(store, 'readwrite', function (os, map) { if (os) return os.delete(key); map.delete(key); }); },
-      keys: function (store) { return run(store, 'readonly', function (os, map) { return os ? os.getAllKeys() : Array.from(map.keys()); }); },
-      all: function (store) { return run(store, 'readonly', function (os, map) { return os ? os.getAll() : Array.from(map.values()); }); },
+      /* prefix：只要以它开头的键（工作区列一个目录、取一轮运行的镜像时，不必把整张表搬出来）。 */
+      keys: function (store, prefix) {
+        var range = prefixRange(prefix);
+        return run(store, 'readonly', function (os, map) { return os ? (range ? os.getAllKeys(range) : os.getAllKeys()) : Array.from(map.keys()); })
+          .then(function (keys) { return prefix ? (keys || []).filter(function (key) { return startsWith(key, prefix); }) : keys; });
+      },
+      all: function (store, prefix) {
+        if (!prefix) return run(store, 'readonly', function (os, map) { return os ? os.getAll() : Array.from(map.values()); });
+        var range = prefixRange(prefix);
+        return open().then(function (db) {
+          if (!db) return Array.from(memory[store].entries()).filter(function (pair) { return startsWith(pair[0], prefix); }).map(function (pair) { return pair[1]; });
+          if (range) return run(store, 'readonly', function (os) { return os.getAll(range); });
+          /* 没有键范围：先取键再逐条取值，免得把无关的大镜像都读进来。 */
+          return run(store, 'readonly', function (os) { return os.getAllKeys(); }).then(function (keys) {
+            return Promise.all((keys || []).filter(function (key) { return startsWith(key, prefix); }).map(function (key) {
+              return run(store, 'readonly', function (os) { return os.get(key); });
+            }));
+          });
+        });
+      },
       persistent: function () { return open().then(function (db) { return !!db; }); }
     };
   }
@@ -147,12 +175,8 @@
     }
 
     async function changes(runId) {
-      var keys = (await store.keys('changes')) || [];
-      var output = [];
-      for (var index = 0; index < keys.length; index += 1) {
-        if (String(keys[index]).indexOf(runId + ':') === 0) output.push(await store.get('changes', keys[index]));
-      }
-      return output.filter(Boolean).sort(function (left, right) { return left.seq - right.seq; });
+      var rows = (await store.all('changes', runId + ':')) || [];
+      return rows.filter(function (row) { return row && row.runId === runId; }).sort(function (left, right) { return left.seq - right.seq; });
     }
 
     async function prune() {

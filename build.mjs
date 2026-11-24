@@ -7,7 +7,8 @@
  *
  * 浏览器里的功能在 dist/reader-ii.ext.js（由 index.js 在酒馆就绪后加载）：
  *   语义层（七槽路由、经济、事件）、常驻壳与读者控制器资源（大厅、轻信、抽卡；gzip + base64）、
- *   提示词模板（编译成函数）、记忆、夜梦助手（Agent 内核）与面板。
+ *   提示词模板（编译成函数）、记忆、夜梦助手（Agent 内核）、分卷导演与面板。
+ *   随包内联的默认资料（reader-defaults）：导演 Skill 的内置正文与通用角色条目模板，离线时也读得到。
  * 4.1 之前另有「卡内组件」（酒馆助手脚本、世界书、三条正则的 JSON）与 CDN 加载器，现在都并进了扩展（交接 0.9）。
  * dist/reader-ii-companion.zip 单独供用户下载；发布清单记录两个文件的 SHA-256。
  * 版本号只有一个来源：manifest.json 的 version（语义化版本），构建把它写进 modules.BUILD_VERSION。
@@ -18,7 +19,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gzipSync } from 'node:zlib';
 import vm from 'node:vm';
-import { transformUpstream } from './build/controller.mjs';
+import { transformUpstream, jsLiteral, loadGenericTemplate } from './build/controller.mjs';
 import { assertNoMacro } from './build/lib.mjs';
 import { companionZip } from './build/companion-zip.mjs';
 import { promptTemplates, promptsModule, PROMPTS_MODULE } from './build/prompts.mjs';
@@ -26,9 +27,11 @@ import { promptTemplates, promptsModule, PROMPTS_MODULE } from './build/prompts.
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const read = (file) => readFileSync(join(ROOT, file), 'utf8').replace(/\r\n/g, '\n');
 
-/* 读者控制器资源包与提示词模板由构建生成，不是源文件。 */
+/* 读者控制器资源包、提示词模板与随包默认资料由构建生成，不是源文件。 */
 export const ASSETS_MODULE = 'reader-assets';
 export { PROMPTS_MODULE };
+export const DEFAULTS_MODULE = 'reader-defaults';
+const GENERATED_MODULES = new Set([ASSETS_MODULE, PROMPTS_MODULE, DEFAULTS_MODULE]);
 
 /* 顺序即依赖顺序：后面的模块在加载期会用到前面的。 */
 export const CORE_MODULES = [
@@ -43,10 +46,13 @@ export const CORE_MODULES = [
 ];
 export const AGENT_MODULES = [
   'src/reader-memory.js',
-  'src/agent/store.js', 'src/agent/protocol.js', 'src/agent/permissions.js', 'src/agent/vfs.js', 'src/agent/providers.js', 'src/agent/tools.js',
-  'src/agent/net.js', 'src/agent/web.js', 'src/agent/device.js', 'src/agent/mcp.js', 'src/agent/connectors.js', 'src/agent/skills.js',
+  'src/agent/kernel.js', 'src/agent/jobs.js', 'src/agent/store.js', 'src/agent/protocol.js', 'src/agent/permissions.js', 'src/agent/vfs.js', 'src/agent/providers.js', 'src/agent/tools.js',
+  'src/agent/net.js', 'src/agent/web.js', 'src/agent/device.js', 'src/agent/mcp.js', 'src/agent/connectors.js', DEFAULTS_MODULE, 'src/agent/skills.js',
   'src/agent/legacy-tools.js', 'src/agent/personas.js', 'src/agent/agent.js', 'src/agent/updates.js',
-  'src/agent/ui-theme.js', 'src/agent/ui-net.js', 'src/agent/ui-connectors.js', 'src/agent/ui-models.js', 'src/agent/ui-guide.js', 'src/agent/ui.js', 'src/agent/boot.js',
+  /* 分卷导演（助手的子能力，不随「这张卡」的开关走）：纯逻辑 → 世界书建档 → 运行器。 */
+  'src/agent/director-core.js', 'src/agent/director-wb.js', 'src/agent/director.js',
+  'src/agent/ui-theme.js', 'src/agent/ui-net.js', 'src/agent/ui-connectors.js', 'src/agent/ui-models.js', 'src/agent/ui-guide.js',
+  'src/agent/ui-float.js', 'src/agent/ui-director.js', 'src/agent/ui.js', 'src/agent/boot.js',
 ];
 export const EXT_MODULES = [...CORE_MODULES, ...AGENT_MODULES];
 
@@ -121,7 +127,81 @@ export function assetsModule(packed, version) {
   ].join('\n');
 }
 
-/* 两个生成模块的代码。变换上游要零点几秒，同一个进程里按版本缓存（测试会反复打包）。 */
+/* ---------- 随包默认资料（reader-defaults） ---------- */
+
+/*
+ * 内联进扩展包的内置知识正文：名字 → 仓库里的文件。只收「功能本身要读」的那几份（导演每次编纲、巡检都要它），
+ * 其余内置知识仍按需从扩展目录取（src/agent/skills.js）。有了内联，离线、被墙、单文件加载时功能照常。
+ */
+export const INLINE_SKILLS = { 'volume-director': 'knowledge/volume-director/SKILL.md' };
+
+/*
+ * 导演 Skill 必须有的七个二级标题：src/agent/director-core.js 按它们把正文切成编纲 / 运行期 / 归档三份提示词。
+ * 内置正文少了哪一个，切片就会退回「整篇照发」，所以构建时拦住（tests/director.test.mjs 核对它与运行时的表一致）。
+ */
+export const DIRECTOR_SKILL_HEADINGS = [
+  '## 最高原则与第一性原理',
+  '## 阶段一：全景勘察与工况定性（动笔前必做）',
+  '## 阶段二：十条 AI 弊病绝杀红线（针对抽象劣质特质，不限题材）',
+  '## 阶段三：反平直叙事引擎工具箱（发散菜单，按需组合）',
+  '## 阶段四：单卷动态大纲产出规范',
+  '## 阶段五：后台运行期执导协议（适用于多轮互动实时导演）',
+  '## 阶段六：交付前铁血自检闭环（以不违背用户偏好为前提）',
+];
+
+/* 代码块之外的二级标题。 */
+export function skillHeadings(text) {
+  const found = [];
+  let fence = '';
+  for (const line of String(text).split('\n')) {
+    const mark = /^\s{0,3}(```+|~~~+)/.exec(line);
+    if (mark) { if (!fence) fence = mark[1][0]; else if (mark[1][0] === fence) fence = ''; continue; }
+    if (!fence && /^## /.test(line)) found.push(line.trim());
+  }
+  return found;
+}
+
+export function inlineDefaults() {
+  const strip = (text) => text.replace(/^﻿/, '');
+  const skills = {};
+  for (const [name, file] of Object.entries(INLINE_SKILLS)) {
+    const text = strip(read(file));
+    if (!text.trim()) throw new Error(`${file} 是空的`);
+    skills[name] = text;
+  }
+  const headings = skillHeadings(skills['volume-director']);
+  const missing = DIRECTOR_SKILL_HEADINGS.filter((heading) => !headings.includes(heading));
+  if (missing.length) throw new Error(`${INLINE_SKILLS['volume-director']} 缺少导演切片要用的二级标题：${missing.join('；')}`);
+  /* 通用角色条目模板：与读者的条目模仿、抽卡的角色条目是同一份（模板/），形状照模板库里的一条模板。 */
+  const { text, settings } = loadGenericTemplate();
+  if (!text || !settings || !settings.id || !settings.output) throw new Error('通用角色条目模板不完整，无法内联');
+  const template = {
+    id: settings.id, name: settings.name, templateText: text, generationInstruction: settings.generationInstruction,
+    entryNameRule: settings.entryNameRule, output: settings.output, builtin: true,
+  };
+  return { skills, template };
+}
+
+/* 不依赖上游变换，单独缓存：只打包 Agent 模块的测试不必为它等资源包。 */
+let defaultsCode = null;
+export function defaultsModule(defaults) {
+  if (!defaults && defaultsCode) return defaultsCode;
+  const value = defaults || inlineDefaults();
+  /* jsLiteral 把 '<' 转义掉：正文里即使写了 </script，嵌进页面也不会提前结束脚本。 */
+  const code = [
+    '(function (root) {',
+    "  'use strict';",
+    '  /* 构建生成（node build.mjs），不要手改：随包内联的默认资料。源头是 knowledge/volume-director/SKILL.md 与 模板/通用角色条目模板.*。 */',
+    '  var modules = root.__ReaderIIModules = root.__ReaderIIModules || {};',
+    '  modules.READER_BUILTIN_SKILLS = ' + jsLiteral(value.skills) + ';',
+    '  modules.READER_DEFAULT_ENTRY_TEMPLATE = ' + jsLiteral(value.template) + ';',
+    "})(typeof globalThis !== 'undefined' ? globalThis : window);",
+  ].join('\n');
+  if (!defaults) defaultsCode = code;
+  return code;
+}
+
+/* 生成模块的代码。变换上游要零点几秒，同一个进程里按版本缓存（测试会反复打包）。 */
 const generatedCache = new Map();
 export function generatedModules(version = JSON.parse(read('manifest.json')).version) {
   if (generatedCache.has(version)) return generatedCache.get(version);
@@ -130,7 +210,7 @@ export function generatedModules(version = JSON.parse(read('manifest.json')).ver
   const prompts = promptTemplates({ version });
   const value = {
     assets, packed, prompts,
-    code: { [ASSETS_MODULE]: assetsModule(packed, version), [PROMPTS_MODULE]: promptsModule(prompts.templates) },
+    code: { [ASSETS_MODULE]: assetsModule(packed, version), [PROMPTS_MODULE]: promptsModule(prompts.templates), [DEFAULTS_MODULE]: defaultsModule() },
   };
   generatedCache.set(version, value);
   return value;
@@ -141,8 +221,9 @@ export function bundle(files, generated) {
   let code = null;
   return files.map((file) => {
     let source;
-    if (file === ASSETS_MODULE || file === PROMPTS_MODULE) {
+    if (GENERATED_MODULES.has(file)) {
       if (generated && typeof generated[file] === 'string') source = generated[file];
+      else if (file === DEFAULTS_MODULE) source = defaultsModule();
       else { code = code || generatedModules().code; source = code[file]; }
     } else source = read(file);
     syntax(source, file);
@@ -151,7 +232,7 @@ export function bundle(files, generated) {
 }
 
 export function extBundle(version) {
-  return syntax(banner(version, '扩展包（语义层 + 读者界面 + 提示词 + 记忆 + 夜梦助手）') + versionModule(version) + bundle(EXT_MODULES, generatedModules(version).code) + '\n', 'dist/reader-ii.ext.js');
+  return syntax(banner(version, '扩展包（语义层 + 读者界面 + 提示词 + 记忆 + 夜梦助手 + 分卷导演）') + versionModule(version) + bundle(EXT_MODULES, generatedModules(version).code) + '\n', 'dist/reader-ii.ext.js');
 }
 
 const json = (value) => JSON.stringify(value, null, 2) + '\n';

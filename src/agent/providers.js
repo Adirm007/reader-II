@@ -746,7 +746,7 @@
       scope: function () { return 'workspace'; },
       list: async function (segs, options) {
         var prefix = segs.length ? segs.join('/') + '/' : '';
-        var keys = ((await store.keys('files')) || []).map(String).filter(function (key) { return key.indexOf(prefix) === 0; });
+        var keys = ((await store.keys('files', prefix)) || []).map(String).filter(function (key) { return key.indexOf(prefix) === 0; });
         var seen = {}, items = [];
         keys.sort().forEach(function (key) {
           var rest = key.slice(prefix.length), slash = rest.indexOf('/');

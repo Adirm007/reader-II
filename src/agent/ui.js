@@ -2,9 +2,10 @@
   'use strict';
 
   /*
-   * 夜梦助手窗口：对话 / 记忆 / 设置 三页，画在酒馆主文档里。
+   * 夜梦助手窗口：对话 / 导演 / 记忆 / 设置 / 说明 五页，画在酒馆主文档里。
    * 用 <dialog>.showModal() 进入浏览器顶层，大厅与抽卡面板的 z-index 盖不住它。
    * 样式在 ui-theme.js（与语义适配面板共用一套主题变量与外框），这里只有标记与接线。
+   * 「导演」页的内容在 ui-director.js；后台任务的状态浮窗在 ui-float.js，窗口开着时它收进标题栏下面。
    * 可从大厅的彩蛋服务台进入，也可从无卡或停用卡的 Reader-II 入口直接进入。
    * 标记里的 id、data-act、data-tab、data-s 等是冒烟脚本认的约定（tools/smoke/），改名要两边一起改。
    */
@@ -12,10 +13,11 @@
   var OVERLAY_ID = 'reader-agent-overlay';
   var TYPE_ORDER = ['episode', 'fact', 'bond', 'howto'];
   var INPUT_MAX_HEIGHT = 160;   /* 输入框随内容长高到这里为止，再多就在框里滚动 */
+  var TABS = ['chat', 'director', 'memory', 'settings', 'guide'];
   /* 设置页和目录使用相同的顺序。 */
   var SECTIONS = [
     ['ra-reader-card', '这张卡'], ['ra-placement-card', '正文提示词位置'], ['ra-agent-card', '助手'], ['ra-tools-card', '工具调用'], ['ra-rules-card', '权限规则'],
-    ['ra-memory-card', '记忆'], ['ra-connections-card', '模型连接'], ['ra-model-card', '主模型'], ['ra-delegation-card', '子代理'], ['ra-media-card', '媒体工具'], ['ra-conn-card', '插件对接'], ['ra-mcp-card', 'MCP 工具服务'], ['ra-net-card', '联网'],
+    ['ra-memory-card', '记忆'], ['ra-connections-card', '模型连接'], ['ra-model-card', '主模型'], ['ra-delegation-card', '子代理'], ['ra-director-model-card', '导演模型'], ['ra-media-card', '媒体工具'], ['ra-conn-card', '插件对接'], ['ra-mcp-card', 'MCP 工具服务'], ['ra-net-card', '联网'],
     ['ra-comp-card', '后端伴侣'], ['ra-upd-card', '版本更新'], ['ra-runs-card', '改动记录']
   ];
   var TOOL_MODE = { native: '原生调用', text: '文本协议', none: '不可用' };
@@ -769,13 +771,14 @@
       var placement = modules.readerPromptPlacement;
       if (!placement) return '';
       var config = placement.placements(kit.context());
-      var body = placement.sections.map(function (section) {
+      /* slots = 读者的三段 + 可选槽位（导演简报）。可选槽位不随「这张卡」的开关走，旁边说明一句它什么时候才有内容。 */
+      var body = (placement.slots || placement.sections).map(function (section) {
         var v = config[section.key];
         var prefix = 'p.' + section.key + '.';
         var positionOptions = placement.positions.map(function (entry) { return option(entry[0], entry[1], v.position); }).join('');
         var chatOnly = ' data-placement-position="4"' + (v.position === 4 ? '' : ' hidden');
         return '<section class="ra-subcard" data-placement-section="' + section.key + '" aria-label="' + section.label + '">'
-          + switchField(prefix + 'enabled', v.enabled, section.label)
+          + switchField(prefix + 'enabled', v.enabled, section.label, section.key === 'director' ? '只在导演执导时才有内容；这张卡没启用 Reader-II 也照常注入' : '')
           + '<div data-placement-fields' + (v.enabled ? '' : ' hidden') + '><div class="ra-nums">'
           + '<label class="ra-num">注入位置<select data-s="' + prefix + 'position">' + positionOptions + '</select></label>'
           + numberField(prefix + 'order', '插入顺序', v.order, 0, 9999)
@@ -1059,6 +1062,10 @@
 
     /* ---------- 功能说明子页面 ---------- */
     var guideUi = typeof modules.createGuideUi === 'function' ? modules.createGuideUi({ card: card }) : null;
+    /* ---------- 导演页（内容在 ui-director.js；这里只留插槽与分发） ---------- */
+    var director = deps && (typeof deps.director === 'function' ? deps.director() : deps.director) || null;
+    var directorUi = director && typeof modules.createDirectorUi === 'function'
+      ? modules.createDirectorUi(env, kit, director, deps.jobs || null, { $: $, esc: esc, icon: icon, card: card }) : null;
     var guideSpyHold = 0;
     function guideScroll() { return $('[data-pane="guide"] .ra-scroll'); }
     function markGuideToc(id) {
@@ -1191,6 +1198,7 @@
         + safeSettingsSection('ra-connections-card', '模型连接', modelUi.connectionsHtml)
         + safeSettingsSection('ra-model-card', '主模型', modelCardHtml)
         + safeSettingsSection('ra-delegation-card', '子代理', modelUi.delegationHtml)
+        + (typeof modelUi.directorHtml === 'function' ? safeSettingsSection('ra-director-model-card', '导演模型', modelUi.directorHtml) : '')
         + safeSettingsSection('ra-media-card', '媒体工具', modelUi.mediaHtml)
         + safeSettingsSection('ra-conn-card', '插件对接', connectorUi.cardHtml)
         + (netUi ? safeSettingsSection('ra-mcp-card', 'MCP 工具服务', function () { return card('ra-mcp-card', 'MCP 工具服务', '<div id="ra-mcp">' + netUi.mcpHtml() + '</div>', '立即生效'); }) : '')
@@ -1288,11 +1296,24 @@
     }
 
     /* ---------- 面板 ---------- */
+    /* 后台任务的状态浮窗：窗口开关、换页之后让它重新决定停在哪（窗口里还是酒馆页面上）。 */
+    function syncFloat() {
+      var jobFloat = deps && typeof deps.float === 'function' ? deps.float() : null;
+      if (jobFloat && typeof jobFloat.sync === 'function') { try { jobFloat.sync(); } catch (error) { /* 浮窗出错不影响窗口 */ } }
+    }
+
     function showTab(next) {
-      tab = next === 'memory' || next === 'settings' || next === 'guide' ? next : 'chat';
+      tab = TABS.indexOf(next) >= 0 ? next : 'chat';
       if (!overlay) return;
       overlay.querySelectorAll('.ra-tab').forEach(function (button) { button.setAttribute('aria-selected', String(button.getAttribute('data-tab') === tab)); });
       overlay.querySelectorAll('.ra-pane').forEach(function (pane) { pane.classList.toggle('is-on', pane.getAttribute('data-pane') === tab); });
+      if (directorUi) { try { if (tab === 'director') directorUi.show(); else directorUi.hide(); } catch (error) { env.console.error('[ReaderII] 导演页渲染失败', error); } }
+      else if (tab === 'director') {
+        var directorPane = $('[data-pane="director"] .ra-scroll');
+        if (directorPane) directorPane.innerHTML = card('rd-status-card', '导演', '<p class="ra-note">分卷导演还没有就绪。</p>');
+      }
+      syncFloat();
+      if (tab === 'director') return;
       if (tab === 'memory') renderMemory();
       else if (tab === 'guide') renderGuide();
       else if (tab === 'settings') {
@@ -1345,7 +1366,7 @@
       overlay.innerHTML = '<div class="ra-shell" tabindex="-1" autofocus><header class="ra-head">'
         + '<button type="button" class="ra-back" data-act="back-lobby" title="回到彩蛋服务台" hidden>' + icon('back') + '<span>服务台</span></button>'
         + '<div class="ra-id"><span class="ra-seal" aria-hidden="true"><i>夜</i><i>梦</i></span><div class="ra-name"><b>九十九夜梦</b><i id="ra-persona">READER AGENT</i></div></div>'
-        + '<nav class="ra-tabs" role="tablist"><button type="button" class="ra-tab" role="tab" data-tab="chat">对话</button><button type="button" class="ra-tab" role="tab" data-tab="memory">记忆</button><button type="button" class="ra-tab" role="tab" data-tab="settings">设置</button><button type="button" class="ra-tab" role="tab" data-tab="guide">说明</button></nav>'
+        + '<nav class="ra-tabs" role="tablist"><button type="button" class="ra-tab" role="tab" data-tab="chat">对话</button><button type="button" class="ra-tab" role="tab" data-tab="director">导演</button><button type="button" class="ra-tab" role="tab" data-tab="memory">记忆</button><button type="button" class="ra-tab" role="tab" data-tab="settings">设置</button><button type="button" class="ra-tab" role="tab" data-tab="guide">说明</button></nav>'
         + '<button type="button" class="ra-close" data-act="close" aria-label="关闭，回到聊天" title="关闭，回到聊天">' + icon('close') + '</button></header>'
         + '<section class="ra-pane" data-pane="chat"><div class="ra-threads"><label for="ra-thread-select">对话</label><select id="ra-thread-select" aria-label="按所属卡切换对话"></select>'
         + '<button type="button" class="ra-btn is-small" data-act="thread-new">新建</button><button type="button" class="ra-btn is-small" data-act="thread-delete">删除</button></div>'
@@ -1354,6 +1375,7 @@
         + '<div class="ra-input"><textarea id="ra-text" rows="1" aria-label="对夜梦说的话" placeholder="' + (touch ? '想问什么、想让我做什么，直接说。' : '想问什么、想让我做什么，直接说。Enter 发送，Shift+Enter 换行') + '"></textarea><button type="button" class="ra-btn is-main" id="ra-send">发送</button></div>'
         + '<div class="ra-foot"><div class="ra-tags"><span id="ra-foot-text"></span><button type="button" class="ra-tag" id="ra-tool-mode" data-act="goto-tools" data-mode="none">工具：不可用</button></div>'
         + '<button type="button" class="ra-btn is-small is-ghost" data-act="clear">清空对话</button></div></section>'
+        + '<section class="ra-pane" data-pane="director"><div class="ra-scroll"></div><div class="rd-bar" hidden><span class="ra-status" data-ra-status="director" role="status"></span></div></section>'
         + '<section class="ra-pane" data-pane="memory"><div class="ra-scroll"></div></section>'
         + '<section class="ra-pane" data-pane="settings"><div class="ra-set"><nav class="ra-toc" aria-label="设置目录"></nav><div class="ra-scroll"></div></div>'
         + '<div class="ra-savebar"><span class="ra-status" data-ra-status="settings" role="status"></span><span class="ra-dirty" hidden>有改动还没保存</span>'
@@ -1391,6 +1413,7 @@
         }
         else if (action === 'goto-tools') { showTab('settings'); gotoSection('ra-tools-card', false); }
         else if (action === 'save-settings') saveSettingsFromForm();
+        else if (action.indexOf('dir-') === 0) { if (directorUi) directorUi.action(action, actor); }
         else if (action === 'card-toggle') cardToggle(actor);
         else if (action === 'probe-tools') probeTools(actor);
         else if (action.indexOf('models-') === 0) modelUi.action(action, actor);
@@ -1405,6 +1428,8 @@
       });
       overlay.addEventListener('change', function (event) {
         if (event.target.id === 'ra-thread-select') { threadAction('select', event.target.value); return; }
+        /* 导演页的控件自成一套（data-d），不走设置页的「有改动还没保存」。 */
+        if (directorUi && directorUi.change(event.target)) return;
         modelUi.change(event.target);
         if (event.target.closest('#ra-model-fields')) $('#ra-model-fields').dataset.edited = '1';
         if (event.target.closest && event.target.closest('[data-s],[data-r]')) setDirty(true);
@@ -1419,6 +1444,7 @@
       overlay.addEventListener('input', function (event) {
         if (netUi && event.target.id === 'ra-net-token') { netUi.tokenInput(event); return; }
         if (event.target.id === 'ra-text') { fitInput(); return; }
+        if (directorUi && event.target.closest && event.target.closest('[data-pane="director"]')) { directorUi.input(event.target); return; }
         modelUi.input(event.target);
         if (event.target.closest('#ra-model-fields')) $('#ra-model-fields').dataset.edited = '1';
         if (event.target.closest && event.target.closest('[data-s],[data-r],[data-editor="role"]')) { setDirty(true); return; }
@@ -1440,6 +1466,8 @@
         event.stopPropagation();
       });
       overlay.addEventListener('cancel', function (event) { event.preventDefault(); close(); });
+      /* 不管是怎么关掉的（按钮、Esc、点遮罩），状态浮窗都要搬回酒馆页面上。 */
+      overlay.addEventListener('close', function () { if (directorUi) directorUi.hide(); syncFloat(); });
       /* scroll 事件不冒泡，直接挂在设置页与说明页的滚动容器上。 */
       var scroller = settingsScroll();
       if (scroller) scroller.addEventListener('scroll', function () { spy(false); }, { passive: true });
@@ -1461,6 +1489,7 @@
       }
       if (!running) refreshThreads(true);
       showTab(target || tab);
+      syncFloat();
       /* <dialog> 打开时会把焦点给第一枚按钮（「服务台」），上面就多出一圈焦点框。对话页的焦点已经在输入框里；
          别的页（以及触屏，不该弹键盘）把焦点放在外框上，按 Tab 再进到第一个控件。 */
       if (tab !== 'chat' || touchInput()) {
@@ -1496,19 +1525,29 @@
       if (!overlay) return;
       if (permissionReview) permissionReview(false);
       try { if (overlay.open && typeof overlay.close === 'function') overlay.close(); else overlay.removeAttribute('open'); } catch (error) { overlay.removeAttribute('open'); }
+      if (directorUi) directorUi.hide();
+      syncFloat();
     }
 
     function dispose() {
       pendingConfirms.slice().forEach(function (finish) { finish('deny'); });
       unsubscribe.forEach(function (stop) { try { stop(); } catch (error) { /* ignore */ } });
       unsubscribe = [];
+      if (directorUi) { try { directorUi.dispose(); } catch (error) { /* ignore */ } }
       close();
       if (overlay) overlay.remove();
       overlay = null;
       if (theme) theme.remove(doc);
     }
 
-    return { open: open, close: close, dispose: dispose, requestMoreRounds: requestMoreRounds, refreshThreads: refreshThreads, isOpen: function () { return !!(overlay && overlay.open); } };
+    return {
+      open: open, close: close, dispose: dispose, requestMoreRounds: requestMoreRounds, refreshThreads: refreshThreads,
+      isOpen: function () { return !!(overlay && overlay.open); },
+      /* 状态浮窗要知道的三件事：窗口的外框（开着时它停靠在里面）、当前在哪一页、用的哪套主题。 */
+      shell: function () { return overlay && overlay.open ? $('.ra-shell') : null; },
+      currentTab: function () { return tab; },
+      theme: themeName
+    };
   }
 
   modules.createAgentUi = createAgentUi;

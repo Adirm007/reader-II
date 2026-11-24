@@ -109,13 +109,20 @@
     return coexisting;
   }
 
+  /* 读者让位时只撤掉自己的三段提示词：导演（助手的子能力）在这个聊天里执导的话，它的简报不受影响。 */
+  function yieldPrompt() {
+    if (!prompt) return;
+    try {
+      if (typeof prompt.yieldStory === 'function') prompt.yieldStory();
+      else prompt.clear();
+    } catch (error) { /* ignore */ }
+  }
+
   function syncCoexistState() {
     var now = syncHostReaderCoreBinding();
     if (now === lastCoexistState) return now;
     lastCoexistState = now;
-    if (now && prompt) {
-      try { prompt.clear(); } catch (error) { /* ignore */ }
-    }
+    if (now) yieldPrompt();
     notify('enabled_changed', null);
     return now;
   }
@@ -175,7 +182,7 @@
       if (typeof ctx.saveMetadata === 'function') await ctx.saveMetadata();
     } else throw new Error('当前宿主无法保存角色卡开关');
     if (enabled) ready = ensureNamespace();
-    else if (prompt) prompt.clear();
+    else yieldPrompt();
     notify('enabled_changed', null);
     try { await ready; } catch (error) { /* 调用方看 isEnabled */ }
     return isEnabled();

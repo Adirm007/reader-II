@@ -3,7 +3,7 @@
  * node tools/smoke/run.mjs                 扩展助手，有/无酒馆助手
  * node tools/smoke/run.mjs card            按卡启用，有插件/无酒馆助手且无 MVU
  * node tools/smoke/run.mjs [card] --shots <目录>
- *   第一种模式存三主题 × 桌面/手机 × 大厅/对话/记忆/设置顶部/语义适配，共 30 张 PNG。
+ *   第一种模式存三主题 × 桌面/手机 × 大厅/对话/导演/记忆/设置顶部/说明/语义适配/状态浮窗（页面上、窗口里），共 54 张 PNG。
  * CHROME=/usr/bin/google-chrome 可指定浏览器。外网只给图片占位，其余请求拦下。
  */
 import http from 'node:http';
@@ -102,7 +102,7 @@ async function captureShots(cdp, sessionId, evaluate) {
         ['desktop', 1280, 800, 1, false], ['mobile', 375, 812, 2, true],
       ]) {
         await cdp.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor, mobile }, sessionId);
-        for (const page of ['lobby', 'chat', 'memory', 'settings', 'guide', 'panel']) {
+        for (const page of ['lobby', 'chat', 'director', 'memory', 'settings', 'guide', 'panel', 'float', 'float-dock']) {
           await evaluate(`window.__smokeView(${JSON.stringify(theme)}, ${JSON.stringify(page)})`);
           const { data } = await cdp.send('Page.captureScreenshot', { format: 'png', fromSurface: true, captureBeyondViewport: false }, sessionId);
           await writeFile(join(SHOTS, `${theme}-${viewport}-${page}.png`), Buffer.from(data, 'base64'));

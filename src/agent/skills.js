@@ -35,8 +35,17 @@
     { name: 'reader-ii', summary: 'Reader-II 自身结构：FP、七槽语义适配、轻信、大厅、抽卡与排错入口' },
     { name: 'web-github', summary: '联网与 GitHub：抓网页、读仓库（gh:/）、搜代码、把工作区成果推送到仓库' },
     { name: 'mcp', summary: 'MCP 服务器：接入、使用工具箱与连接排查' },
-    { name: 'device', summary: '通过后端伴侣在本地设备工作：dev:/ 文件、命令与后台任务、无头浏览器与酒馆扩展开发' }
+    { name: 'device', summary: '通过后端伴侣在本地设备工作：dev:/ 文件、命令与后台任务、无头浏览器与酒馆扩展开发' },
+    { name: 'volume-director', summary: '单卷群像导演的方法论：勘察定性、十条红线、分卷动态大纲、每轮导演简报、三级偏移判定与跨卷钩子（「导演」页的后台子功能读的就是它，可在那里编辑）' }
   ];
+  var NAME = /^[a-z0-9][a-z0-9-]{1,47}$/;
+
+  /* 随包内联的内置正文（构建时生成，见 build.mjs 的 defaultsModule）：有它就不必联网，离线、单文件加载时也读得到。 */
+  function inlineSkill(name) {
+    var table = modules.READER_BUILTIN_SKILLS;
+    var text = table && typeof table[name] === 'string' ? table[name] : '';
+    return text.trim() ? text : '';
+  }
 
   function parseFrontmatter(text) {
     var source = String(text || '');
@@ -70,12 +79,21 @@
       return text;
     }
 
-    BUILTIN.forEach(function (item) {
+    function registerBuiltin(item) {
       registry.registerSkill({
         name: item.name, summary: item.summary, files: item.files || null, source: 'builtin',
-        load: async function () { return parseFrontmatter(await fetchText(base() + 'knowledge/' + item.name + '/SKILL.md')).body; }
+        load: async function () {
+          var inline = inlineSkill(item.name);
+          return parseFrontmatter(inline || await fetchText(base() + 'knowledge/' + item.name + '/SKILL.md')).body;
+        }
       });
-    });
+    }
+    BUILTIN.forEach(registerBuiltin);
+
+    function registerUser(name, text) {
+      var parsed = parseFrontmatter(text);
+      registry.registerSkill({ name: name, summary: parsed.meta.description || parsed.body.trim().split('\n')[0].slice(0, 120), body: parsed.body, source: 'user' });
+    }
 
     /* 工作区里的知识：ws:/skills/<名>/SKILL.md，frontmatter 里的 description 作为一句话说明。 */
     async function loadUserSkills() {
@@ -84,14 +102,36 @@
       var count = 0;
       for (var index = 0; index < listing.items.length; index += 1) {
         var name = listing.items[index].name;
-        if (!listing.items[index].dir || !/^[a-z0-9][a-z0-9-]{1,47}$/.test(name)) continue;
+        if (!listing.items[index].dir || !NAME.test(name)) continue;
         var text = await vfs.readText('ws:/skills/' + name + '/SKILL.md').catch(function () { return null; });
         if (text === null) continue;
-        var parsed = parseFrontmatter(text);
-        registry.registerSkill({ name: name, summary: parsed.meta.description || parsed.body.trim().split('\n')[0].slice(0, 120), body: parsed.body, source: 'user' });
+        registerUser(name, text);
         count += 1;
       }
       return count;
+    }
+
+    /*
+     * 按名字重新登记一份知识，返回现在生效的是哪一份：user（工作区里的）/ builtin（内置的）/ none。
+     * 工作区里的同名文件覆盖内置；文件被删掉或清空后回到内置（没有内置的就从目录里去掉）。
+     * 启动时只扫一次工作区是不够的：她自己写了一份新知识、用户在面板里改了导演 Skill 或点了「恢复内置默认」，都要当场生效。
+     */
+    async function reload(name) {
+      var key = String(name || '');
+      if (!NAME.test(key)) return 'none';
+      var text = await vfs.readText('ws:/skills/' + key + '/SKILL.md').catch(function () { return null; });
+      if (typeof text === 'string' && text.trim()) { registerUser(key, text); return 'user'; }
+      var builtin = BUILTIN.filter(function (item) { return item.name === key; })[0];
+      if (builtin) { registerBuiltin(builtin); return 'builtin'; }
+      registry.unregisterSkill(key);
+      return 'none';
+    }
+
+    if (typeof vfs.onWrite === 'function') {
+      vfs.onWrite(function (event) {
+        if (event.mount !== 'ws' || event.segs.length !== 3 || event.segs[0] !== 'skills' || event.segs[2] !== 'SKILL.md') return;
+        reload(event.segs[1]).catch(function () { /* 下次启动时会再扫一遍 */ });
+      });
     }
 
     vfs.mount({
@@ -113,9 +153,17 @@
       }
     });
 
-    return { loadUserSkills: loadUserSkills, builtin: BUILTIN.map(function (item) { return item.name; }) };
+    return {
+      loadUserSkills: loadUserSkills, reload: reload, builtin: BUILTIN.map(function (item) { return item.name; }),
+      /* 内置正文的原文（带 frontmatter）：先用随包内联的，没有再去扩展目录取。 */
+      builtinText: async function (name) {
+        if (!BUILTIN.some(function (item) { return item.name === name; })) return null;
+        return inlineSkill(name) || fetchText(base() + 'knowledge/' + name + '/SKILL.md');
+      }
+    };
   }
 
   modules.parseSkillFrontmatter = parseFrontmatter;
+  modules.inlineBuiltinSkill = inlineSkill;
   modules.installSkills = installSkills;
 })(typeof globalThis !== 'undefined' ? globalThis : window);

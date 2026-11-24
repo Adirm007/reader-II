@@ -69,6 +69,10 @@ test('reader-ui.js：彩蛋页入口换成夜梦助手 / 助手设置 / 语义�
     ['sea:"夜梦助手"', 3], ['{text:"请读者写一则旁观札记"}', 3], ['name:"旁观札记"', 3],
   ]) assert.equal(countExact(s, token), n, token);
   for (const token of ['eggbooksea', 'eggwb', '检查更新', '书海', '普罗泰利西翁', '更新新闻', '新闻更新']) assert.ok(!s.includes(token), token);
+  /* 三行新入口沿用上游那个「一行入口」函数（压缩后的名字每版会变，构建用捕获组取）：产物里不能留下没展开的 $1。 */
+  const rows = /([A-Za-z_$][\w$]*)\(i\("eggagentset"\),"助手设置",[^)]*\)\+([A-Za-z_$][\w$]*)\(i\("eggpanel"\),"语义适配",[^)]*\)\+([A-Za-z_$][\w$]*)\(i\("eggmemory"\),"记忆",/.exec(s);
+  assert.ok(rows && rows[1] === rows[2] && rows[2] === rows[3] && rows[1] !== '$1', rows && rows.slice(1).join(' '));
+  assert.ok(s.includes(rows[1] + '(i("eggapi"),"独立 API"'), '与相邻的上游入口是同一个函数');
   /* 新版前端只渲染 data-dlb，动作由 legacy 的处理函数接；新动作在那边都有。 */
   for (const act of ['eggagent', 'eggagentset', 'eggmemory', 'eggpanel']) assert.ok(legacy().includes(`act==='${act}'`), act);
 });

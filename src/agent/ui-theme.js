@@ -23,6 +23,8 @@
   var STYLE_ID = 'reader-ii-theme-style';
   var AGENT_ID = 'reader-agent-overlay';
   var PANEL_ID = 'reader-core-panel';
+  /* 后台任务的状态浮窗（ui-float.js）。它有自己的根：平时挂在酒馆页面上，不带遮罩，所以不能并进上面两个界面共用的根规则里。 */
+  var FLOAT_ID = 'reader-agent-float';
 
   var FONT = '"PingFang SC","HarmonyOS Sans SC","MiSans","Microsoft YaHei UI","Microsoft YaHei","Noto Sans CJK SC",sans-serif';
   var KAI = '"LXGW WenKai","Kaiti SC","STKaiti","KaiTi",' + FONT;
@@ -105,7 +107,8 @@
   };
 
   /*
-   * 记号（展开见 expand）：{R} 两个界面的根，{A} 助手窗口，{P} 语义适配面板，{C} {S} {I} 三套主题下的根。
+   * 记号（展开见 expand）：{R} 两个界面的根，{A} 助手窗口，{P} 语义适配面板，{C} {S} {I} 三套主题下的根，
+   * {F} 状态浮窗的根（{FS} {FI} 是它在盛夏、水墨主题下；咖啡馆是默认）。
    * 根用 :is(#a,#b) 写，优先级按 id 算，压得过酒馆的全局规则，也不必到处写 !important。
    */
   var RULES = [
@@ -509,8 +512,110 @@
     /* 出错的状态行：放在面板这几条之后，才压得过它们各自的字色。 */
     '{P} .is-error{color:var(--rt-bad)}',
 
+    /* ---------- 导演页（ui-director.js）：沿用上面的卡片、按钮、折叠面板，这里只有它自己的几样东西 ---------- */
+    '{A} .ra-badge.is-ok{border-color:currentColor;color:var(--rt-ok)}',
+    '{A} .ra-badge.is-warn{border-color:currentColor;color:var(--rt-warn)}',
+    '{A} .ra-badge.is-bad{border-color:currentColor;color:var(--rt-bad)}',
+    '{A} .rd-top{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px}',
+    '{A} .rd-title{flex:1 1 200px;min-width:0;font:700 17px/1.4 var(--rt-title);letter-spacing:.06em;overflow-wrap:anywhere}',
+    '{A} .rd-switches{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,250px),1fr));gap:0 18px;margin:2px 0}',
+    '{A} .rd-meta{display:flex;flex-wrap:wrap;gap:2px 14px;margin:8px 0 0;color:var(--rt-ink2);font-size:12.5px;line-height:1.7}',
+    /* 步骤与阶段的进度条：一排小签，走过的打勾色，当前的用主题的点缀色。 */
+    '{A} .rd-track{display:flex;flex-wrap:wrap;gap:6px;margin:12px 0 2px;padding:0;list-style:none}',
+    '{A} .rd-track li{display:inline-flex;align-items:center;gap:6px;max-width:100%;min-height:28px;padding:2px 11px 2px 4px;border:1px solid var(--rt-line2);border-radius:var(--rt-pill);color:var(--rt-ink3);font-size:12.5px;line-height:1.3}',
+    '{A} .rd-track li>i{flex:none;display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:var(--rt-pill);background:var(--rt-sunk);color:var(--rt-ink2);font:700 11px/1 var(--rt-mono)}',
+    '{A} .rd-track li>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+    '{A} .rd-track li[data-on="done"]{color:var(--rt-ink2)}',
+    '{A} .rd-track li[data-on="done"]>i{background:var(--rt-ok);color:#fff}',
+    '{A} .rd-track li[data-on="now"]{border-color:var(--rt-mark);background:var(--rt-card);color:var(--rt-ink);font-weight:700}',
+    '{A} .rd-track li[data-on="now"]>i{background:var(--rt-mark);color:#fff}',
+    '{A} .rd-acts{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:12px}',
+    '{A} .rd-progress{margin:10px 0 0;padding:9px 12px;border-radius:var(--rt-r);background:var(--rt-sunk);font-size:13px;line-height:1.7;overflow-wrap:anywhere}',
+    '{A} .rd-progress b{margin-right:6px}',
+    '{A} .rd-banner{margin:12px 0 0;padding:11px 14px;border:1px solid var(--rt-warn);border-left-width:4px;border-radius:var(--rt-r);background:var(--rt-card)}',
+    '{A} .rd-banner.is-bad{border-color:var(--rt-bad)}',
+    '{A} .rd-banner h4{margin:0 0 4px;font-size:14.5px;font-weight:700}',
+    '{A} .rd-banner p{color:var(--rt-ink2);font-size:13px;line-height:1.65;overflow-wrap:anywhere}',
+    '{A} .rd-keep{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,220px),1fr));gap:0 14px;margin:6px 0 0}',
+    '{A} .rd-live{margin:10px 0 0;padding:8px 11px;max-height:150px;overflow:auto;border-radius:min(var(--rt-r),6px);background:var(--rt-sunk);color:var(--rt-ink2);font:12.5px/1.65 var(--rt-font);white-space:pre-wrap;word-break:break-word}',
+    '{A} .rd-live:empty{display:none}',
+    '{A} .rd-pre{max-height:320px;overflow:auto;padding:10px 12px;border-radius:min(var(--rt-r),6px);background:var(--rt-sunk);font:13px/1.7 var(--rt-font);white-space:pre-wrap;word-break:break-word}',
+    '{A} .rd-say{display:flex;flex-direction:column;gap:8px;margin-top:14px}',
+    '{A} .rd-say>label{color:var(--rt-ink);font-size:13.5px;font-weight:600;line-height:1.4}',
+    '{A} .rd-say textarea{min-height:68px}',
+    '{A} .rd-entry{display:flex;flex-wrap:wrap;align-items:flex-start;justify-content:space-between;gap:8px 12px;padding:10px 0;border-top:1px solid var(--rt-line)}',
+    '{A} .rd-entry-main{flex:1 1 240px;min-width:0;font-size:13.5px}',
+    '{A} .rd-entry-main p{margin-top:2px;color:var(--rt-ink2);font-size:12.5px;line-height:1.6;overflow-wrap:anywhere}',
+    '{A} .rd-snap{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;padding:8px 0;border-top:1px solid var(--rt-line);font-size:13px;line-height:1.6}',
+    '{A} .rd-snap:first-child{border-top:0}',
+    '{A} .rd-snap>div{flex:1;min-width:0;overflow-wrap:anywhere}',
+    '{A} .rd-snap[data-match="0"]>div{color:var(--rt-ink3)}',
+    '{A} .rd-snap small{display:block;color:var(--rt-ink3);font-size:12px;line-height:1.5}',
+    '{A} .rd-vol{padding:10px 0;border-top:1px solid var(--rt-line);font-size:13.5px;line-height:1.7;overflow-wrap:anywhere}',
+    '{A} .rd-vol:first-child{border-top:0}',
+    '{A} .rd-vol h4{margin:0 0 2px;font-size:14px;font-weight:700}',
+    '{A} textarea.rd-editor{min-height:210px}',
+    '{A} textarea.rd-skill{min-height:300px}',
+    /* 标签里带的说明文字不跟着标签加粗。 */
+    '{A} [data-pane="director"] .ra-field-stack>label .ra-hint{margin-top:2px;font-weight:400}',
+    '{A} .rd-bar{flex:none;padding:8px 22px;border-top:1px solid var(--rt-line);background:var(--rt-card)}',
+
+    /*
+     * ---------- 后台任务的状态浮窗（ui-float.js） ----------
+     * 两个停靠位：助手窗口关着时浮在酒馆页面上（page：桌面在右上角、顶栏下面，手机在顶部居中——都避开底部的输入栏）；
+     * 助手窗口开着时收进窗口里，变成标题栏下面的一条状态带（dialog）：模态对话框之外的东西点不到，所以必须搬进去。
+     * 浮在页面上时周围全是酒馆的样式，重置要自己带；收进窗口后上面的 {R} 规则也管得到它，这里的规则多带一个类名，优先级更高。
+     */
+    '{F}{' + VARS.cafe.join(';') + ';--rt-font:' + FONT + ';--rt-mono:' + MONO + ';box-sizing:border-box;margin:0;padding:0;color:var(--rt-ink);font:13.5px/1.5 var(--rt-font);letter-spacing:normal;text-align:left;text-shadow:none;color-scheme:light;-webkit-text-size-adjust:100%}',
+    '{FS}{' + VARS.summer.join(';') + '}',
+    '{FI}{' + VARS.ink.join(';') + '}',
+    '{F}[hidden],{F} [hidden]{display:none!important}',
+    '{F} *,{F} *::before,{F} *::after{box-sizing:border-box;text-shadow:none;scrollbar-width:thin;scrollbar-color:var(--rt-line2) transparent}',
+    '{F} button{appearance:none;-webkit-appearance:none;margin:0;padding:0;border:0;border-radius:0;background:none;box-shadow:none;color:inherit;font:inherit;letter-spacing:inherit;text-transform:none;cursor:pointer;opacity:1;filter:none;-webkit-tap-highlight-color:transparent}',
+    '{F} b{font-weight:700}',
+    '{F} i{font-style:normal}',
+    '{F} svg.ra-ico{flex:none;width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;pointer-events:none}',
+    '{F} :focus-visible{outline:2px solid var(--rt-focus);outline-offset:-2px}',
+    /* 宽度用「固定值 + 相对包含块的上限」，不用 vw：宿主页面被浏览器整体缩放（内容横向溢出）时，vw 与固定定位的参照宽度对不上。 */
+    '{F}[data-dock="page"]{position:fixed;z-index:2147483645;top:calc(var(--topBarBlockSize,35px) + env(safe-area-inset-top,0px) + 10px);right:12px;left:auto;bottom:auto;width:340px;max-width:calc(100% - 24px);max-height:min(70vh,480px);overflow:hidden auto;overscroll-behavior:contain}',
+    '{F}[data-dock="dialog"]{position:relative;flex:none;width:100%;max-height:38%;overflow:hidden auto;border-bottom:1px solid var(--rt-line);background:var(--rt-card)}',
+    /* 咖啡馆：一张夹在木框里的小纸条；盛夏：顶上一道航空信斜纹；水墨：宣纸加朱砂细框。 */
+    '{F}[data-dock="page"]{border:2px solid #6b4429;border-radius:6px;background:' + CAFE_GRAIN + ',var(--rt-paper);box-shadow:0 0 0 1px #2a170c,0 10px 26px rgba(0,0,0,.5)}',
+    '{FS}[data-dock="page"]{border:0 solid transparent;border-top-width:5px;border-radius:12px;background:linear-gradient(var(--rt-paper),var(--rt-paper)) padding-box,' + AIRMAIL + ' border-box;box-shadow:0 0 0 1.5px rgba(31,111,154,.55),0 10px 26px rgba(21,78,110,.32)}',
+    '{FI}[data-dock="page"]{padding:5px;border:1px solid #b8322a;border-radius:0;background:' + INK_FIBER + ',linear-gradient(180deg,#f6f0e2,#efe6d2);box-shadow:inset 0 0 0 3px #f6f0e2,inset 0 0 0 4px rgba(184,50,42,.55),0 10px 26px rgba(10,6,4,.5)}',
+    '{F} .rf-job{position:relative;border-top:1px solid var(--rt-line)}',
+    '{F} .rf-job:first-child{border-top:0}',
+    '{F} .rf-head{display:flex;align-items:center;gap:8px;min-height:42px;padding:0 6px 0 0}',
+    '{F} .rf-main{flex:1;min-width:0;display:flex;align-items:center;gap:9px;min-height:42px;padding:6px 4px 6px 12px;text-align:left}',
+    '{F} .rf-state{flex:none;display:inline-flex;width:16px;height:16px;color:var(--rt-warn)}',
+    '{F} .rf-job[data-state="running"] .rf-state{animation:ra-spin 1.1s linear infinite}',
+    '{F} .rf-job[data-state="done"] .rf-state{color:var(--rt-ok)}',
+    '{F} .rf-job[data-state="failed"] .rf-state{color:var(--rt-bad)}',
+    '{F} .rf-job[data-state="cancelled"] .rf-state{color:var(--rt-ink3)}',
+    '{F} .rf-text{flex:1;min-width:0;display:flex;flex-direction:column;line-height:1.35}',
+    '{F} .rf-title{font:700 13.5px/1.35 var(--rt-title);letter-spacing:.04em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+    '{F} .rf-stage{color:var(--rt-ink2);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+    '{F} .rf-job[data-state="failed"] .rf-stage{color:var(--rt-bad)}',
+    '{F} .rf-step{flex:none;color:var(--rt-ink3);font:12px/1 var(--rt-mono)}',
+    '{F} .rf-chev{flex:none;display:inline-flex;color:var(--rt-ink3);transition:transform .16s}',
+    '{F} .rf-job[data-open="1"] .rf-chev{transform:rotate(180deg)}',
+    '{F} .rf-x{flex:none;display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:var(--rt-r);color:var(--rt-ink3)}',
+    '{F} .rf-x:hover{background:var(--rt-sunk);color:var(--rt-ink)}',
+    '{F} .rf-bar{height:3px;background:var(--rt-line);overflow:hidden}',
+    '{F} .rf-bar>i{display:block;height:100%;background:var(--rt-mark);transition:width .3s}',
+    '{F} .rf-bar.is-loop>i{width:34%;animation:rf-slide 1.5s ease-in-out infinite}',
+    '{F} .rf-more{padding:8px 12px 10px}',
+    '{F} .rf-lines{margin:0 0 8px;padding:6px 9px;max-height:112px;overflow:auto;border-radius:min(var(--rt-r),6px);background:var(--rt-sunk);color:var(--rt-ink2);font:12px/1.6 var(--rt-font);white-space:pre-wrap;word-break:break-word}',
+    '{F} .rf-acts{display:flex;flex-wrap:wrap;gap:8px}',
+    '{F} .rf-btn{display:inline-flex;align-items:center;justify-content:center;min-height:30px;padding:3px 12px;border:1px solid var(--rt-btn-edge);border-radius:var(--rt-r);background:var(--rt-btn);color:var(--rt-btn-ink);font-size:12.5px;line-height:1.25;white-space:nowrap;transition:border-color .15s,background .15s,color .15s}',
+    '{F} .rf-btn:hover{border-color:var(--rt-ink)}',
+    '{F} .rf-btn.is-bad{background:transparent;border-color:var(--rt-bad);color:var(--rt-bad)}',
+    '{F} .rf-btn.is-bad:hover{background:var(--rt-bad);color:#fff}',
+    '{F} .rf-rest{padding:5px 12px 7px;border-top:1px solid var(--rt-line);color:var(--rt-ink3);font-size:12px}',
+
     '@keyframes ra-blink{0%,80%,100%{opacity:.2}40%{opacity:1}}',
     '@keyframes ra-spin{to{transform:rotate(360deg)}}',
+    '@keyframes rf-slide{0%{transform:translateX(-110%)}100%{transform:translateX(300%)}}',
 
     /* ---------- 窄屏：面板里的侧栏先收到上面 ---------- */
     '@media (max-width:760px){'
@@ -576,17 +681,26 @@
       + '{P} .reader-ui-tree-pick{grid-template-columns:minmax(90px,1fr) minmax(0,1fr);gap:8px}'
       + '{P} .reader-ui-tree-preview{display:none}'
       + '{P} .rp-actions .is-bad{margin-left:0}'
+      + '{A} .rd-bar{padding:8px 12px}'
+      + '{A} .rd-track li{min-height:32px}'
+      /* 浮窗在手机上是顶部居中的一枚胶囊：底部留给酒馆的输入栏。左右各留 10px、限宽后用自动外边距居中，不靠 transform。 */
+      + '{F}[data-dock="page"]{top:calc(var(--topBarBlockSize,35px) + env(safe-area-inset-top,0px) + 6px);left:10px;right:10px;width:auto;max-width:360px;margin:0 auto;max-height:56vh}'
+      + '{F} .rf-head,{F} .rf-main{min-height:44px}'
+      + '{F} .rf-x{width:40px;height:40px}'
+      + '{F} .rf-btn{min-height:38px;padding:6px 14px;font-size:13px}'
       + '}',
-    '@media (prefers-reduced-motion:reduce){{R} *,{R} *::before,{R} *::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}'
+    '@media (prefers-reduced-motion:reduce){{R} *,{R} *::before,{R} *::after,{F} *,{F} *::before,{F} *::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}'
   ];
 
   function expand(css) {
     var both = ':is(#' + AGENT_ID + ',#' + PANEL_ID + ')';
     var themed = { C: 'cafe', S: 'summer', I: 'ink' };
-    return css.replace(/\{([RAPCSI])\}/g, function (all, key) {
+    return css.replace(/\{(FS|FI|[RAPCSIF])\}/g, function (all, key) {
       if (key === 'R') return both;
       if (key === 'A') return '#' + AGENT_ID;
       if (key === 'P') return '#' + PANEL_ID;
+      if (key === 'F') return '#' + FLOAT_ID;
+      if (key === 'FS' || key === 'FI') return '#' + FLOAT_ID + '[data-theme="' + themed[key.charAt(1)] + '"]';
       return both + '[data-theme="' + themed[key] + '"]';
     });
   }
@@ -605,7 +719,8 @@
     cross: '<path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/>',
     ban: '<circle cx="8" cy="8" r="5.2"/><path d="M4.4 11.6 11.6 4.4"/>',
     spin: '<path d="M8 2.8a5.2 5.2 0 1 0 5.2 5.2"/>',
-    info: '<circle cx="8" cy="8" r="5.5"/><path d="M8 7.3v3.5M8 5.1v.3"/>'
+    info: '<circle cx="8" cy="8" r="5.5"/><path d="M8 7.3v3.5M8 5.1v.3"/>',
+    clap: '<path d="M2.5 6.5h11v6.5h-11zM2.5 6.5l10.6-2.4-.5-2-10.6 2.4zM5.4 3.8l1.4 2.4M8.6 3.1 10 5.5"/>'
   };
 
   function icon(name) {
@@ -648,5 +763,5 @@
   }
 
   modules.READER_THEMES = THEMES;
-  modules.readerTheme = { name: themeName, ensure: ensure, remove: remove, icon: icon, css: CSS, AGENT_ID: AGENT_ID, PANEL_ID: PANEL_ID };
+  modules.readerTheme = { name: themeName, ensure: ensure, remove: remove, icon: icon, css: CSS, AGENT_ID: AGENT_ID, PANEL_ID: PANEL_ID, FLOAT_ID: FLOAT_ID };
 })(typeof globalThis !== 'undefined' ? globalThis : window);

@@ -12,6 +12,7 @@
    *     target(args) → 字符串      没有 VFS 路径的工具给权限规则匹配用（网址、cmd:命令 等）
    *     sessionKey(args) → 字符串  「本次对话都允许」按它记（默认按 工具名 + 范围）；alwaysLabel(args) 是那个按钮上的字
    *     irreversible: true         无法自动撤销（斜杠命令、页面脚本等），会记进运行日志
+   *     parallel: true 或 (args, ctx) => 布尔   只读、可重入：同一批里全是这样的调用时并行执行（默认不并行）
    *     describe(args) → 给用户看的一句话, run(args, ctx) → 结果（字符串或可序列化对象） }
    *
    * 核心工具常驻提示词；其余工具属于某个「工具箱」，打开工具箱后它的说明才进入提示词。
@@ -189,7 +190,7 @@
     var tool = function (def) { registry.registerTool(Object.assign({ toolset: 'core', source: 'builtin' }, def)); };
 
     tool({
-      name: 'ls', effect: 'read', scope: readScope,
+      name: 'ls', effect: 'read', scope: readScope, parallel: true,
       summary: '列出一个路径下有什么。不带 path 时列出所有挂载点。',
       params: [{ name: 'path', type: 'string', desc: '如 wb:/ 或 wb:/某本书' }, { name: 'offset', type: 'number', desc: '从第几项开始，默认 0' }, { name: 'limit', type: 'number', desc: '最多列几项，默认 100' }],
       run: async function (args) {
@@ -199,7 +200,7 @@
     });
 
     tool({
-      name: 'read', effect: 'read', scope: readScope,
+      name: 'read', effect: 'read', scope: readScope, parallel: true,
       summary: '读一个文件，返回带行号的内容（行号后是制表符，不属于原文）。长文件分段读；不知道在哪就先 grep。',
       params: [{ name: 'path', type: 'string', required: true }, { name: 'offset', type: 'number', desc: '起始行，默认 1' }, { name: 'limit', type: 'number', desc: '行数，默认 200' }, { name: 'column', type: 'number', desc: '起始行很长时，从该行第几个字符读起' }],
       run: async function (args, ctx) {
@@ -209,7 +210,7 @@
     });
 
     tool({
-      name: 'grep', effect: 'read', scope: readScope,
+      name: 'grep', effect: 'read', scope: readScope, parallel: true,
       summary: '在一个文件或整个目录里按正则检索，返回「路径:行号: 内容」。排查大脚本、找某个设定出自哪里，先用它定位再 read。',
       params: [{ name: 'pattern', type: 'string', required: true, desc: '正则表达式' }, { name: 'path', type: 'string', required: true, desc: '文件或目录，如 script:/ 、wb:/某本书 、chat:/' },
         { name: 'flags', type: 'string', desc: '默认 i（忽略大小写）' }, { name: 'context', type: 'number', desc: '每处命中带几行上下文，0–5' }, { name: 'limit', type: 'number', desc: '最多返回几处，默认 40' }],
@@ -288,7 +289,7 @@
     });
 
     tool({
-      name: 'skill', effect: 'read', scope: 'workspace',
+      name: 'skill', effect: 'read', scope: 'workspace', parallel: true,
       summary: '读取一份知识（见【知识】目录）。碰到相关任务先读，再动手。',
       params: [{ name: 'name', type: 'string', required: true }],
       run: async function (args) {

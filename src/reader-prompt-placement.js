@@ -8,6 +8,15 @@
     { key: 'rules', label: '变量更新规则', uid: 1, position: 4, depth: 4, order: 100 },
     { key: 'list', label: '变量列表', uid: 3, position: 4, depth: 1, order: 200 }
   ];
+  /*
+   * sections 是读者核心的三段模板，随「这张卡」的开关走。slots 是全部注入槽：再加上可选的导演简报
+   * （分卷导演子功能，见 agent/director.js）——它不看「这张卡」的开关，只在导演在这个聊天里执导、且手里有简报时才出现。
+   * 默认 @D 深度 1、系统角色、排在变量列表之后：离最新一楼最近，正文模型不容易忘。
+   */
+  var optional = [
+    { key: 'director', label: '导演简报（分卷导演）', uid: 4, position: 4, depth: 1, order: 300, optional: true }
+  ];
+  var slots = sections.concat(optional);
   var positions = [
     [0, '角色定义之前'], [1, '角色定义之后'], [5, '示例消息之前'], [6, '示例消息之后'],
     [2, '作者注释之前'], [3, '作者注释之后'], [4, '聊天内指定深度'], [7, '宏出口（Outlet）']
@@ -21,7 +30,7 @@
 
   function normalize(values) {
     var result = {};
-    sections.forEach(function (section) {
+    slots.forEach(function (section) {
       var v = values && values[section.key] || {};
       result[section.key] = {
         enabled: v.enabled !== false,
@@ -59,10 +68,10 @@
 
   function entries(config, output) {
     var result = [];
-    sections.forEach(function (section) {
+    slots.forEach(function (section) {
       var v = config[section.key];
       var content = output[section.key];
-      if (!v.enabled || !content || (v.position === 7 && !validOutlet(v.outletName))) return;
+      if (!v || !v.enabled || !content || (v.position === 7 && !validOutlet(v.outletName))) return;
       result.push({
         world: world, uid: section.uid, comment: section.label, content: content,
         constant: true, disable: false, key: [], keysecondary: [], triggers: [],
@@ -74,6 +83,6 @@
   }
 
   modules.readerPromptPlacement = {
-    world: world, sections: sections, positions: positions, placements: placements, save: save, entries: entries, validOutlet: validOutlet
+    world: world, sections: sections, slots: slots, positions: positions, placements: placements, save: save, entries: entries, validOutlet: validOutlet
   };
 })(globalThis);

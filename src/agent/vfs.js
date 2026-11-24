@@ -77,6 +77,14 @@
     var journal = deps && deps.journal;
     var mounts = new Map();
     var pauseAt = 0;
+    var watchers = [];
+
+    /* 写入、删除成功之后通知订阅者（知识库据此重新登记工作区里的知识）。订阅者出错不影响写入。 */
+    function notify(parsed, removed) {
+      if (!watchers.length) return;
+      var event = { mount: parsed.mount, segs: parsed.segs.slice(), path: parsed.mount + ':/' + parsed.segs.map(enc).join('/'), removed: removed === true };
+      watchers.slice().forEach(function (listener) { try { listener(event); } catch (error) { /* ignore */ } });
+    }
 
     /* 长循环里隔一阵让出主线程，别让酒馆卡住。 */
     function breathe() {
@@ -177,6 +185,7 @@
       if (checkContext) checkContext();
       await target.write(parsed.segs, next);
       if (journal && run) await journal.settle(run, basePath, typeof target.read === 'function' ? await target.read(parsed.segs) : next);
+      notify(parsed, false);
       return { path: parsed.canonical, created: before === null || before === undefined, chars: String(text).length };
     }
 
@@ -197,6 +206,7 @@
         if (checkContext) checkContext();
         await target.write(parsed.segs, JSON.stringify(doc, null, 1));
         if (journal && run) await journal.settle(run, basePath, await target.read(parsed.segs));
+        notify(parsed, false);
         return { path: parsed.canonical, removed: true };
       }
       if (target.readonly || typeof target.remove !== 'function') throw new Error(parsed.mount + ': 这里不能删除');
@@ -206,6 +216,7 @@
       if (checkContext) checkContext();
       await target.remove(parsed.segs);
       if (journal && run) await journal.settle(run, parsed.canonical, null);
+      notify(parsed, true);
       return { path: parsed.canonical, removed: true };
     }
 
@@ -304,6 +315,11 @@
       unmount: function (id) { return mounts.delete(id); },
       mounts: function () { return Array.from(mounts.values()); },
       has: function (id) { return mounts.has(id); },
+      /* onWrite(listener) → 取消订阅的函数；listener({ mount, segs, path, removed }) 在写入或删除成功之后调用。 */
+      onWrite: function (listener) {
+        watchers.push(listener);
+        return function () { watchers = watchers.filter(function (item) { return item !== listener; }); };
+      },
       parse: parsePath, scope: scope, list: list, readText: readText, read: read, write: write, remove: remove, edit: edit, grep: grep
     };
   }

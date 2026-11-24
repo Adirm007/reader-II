@@ -50,15 +50,26 @@
       return publicPreset(preset);
     }
 
+    /*
+     * 用途：agent 主助手 ｜ delegate[/id] 子代理 ｜ image、video 媒体工具
+     *      ｜ director 总导演（首次编纲与结构重构，整卷只跑一两次，适合配旗舰推理模型）
+     *      ｜ director_judge 场记（每轮偏移判定、预生成简报与局部微调，高频调用，适合配高性价比的模型）。
+     * 两个导演用途的升档由 agent/director.js 的状态机决定，模型之间互不派发。
+     */
+    var DIRECTOR_KINDS = { director: '总导演', director_judge: '场记' };
+    function directorKind(kind) { return Object.prototype.hasOwnProperty.call(DIRECTOR_KINDS, kind); }
     function validKind(kind) {
-      if (!/^(agent|delegate(?:\/[\w-]{1,64})?|image|video)$/.test(kind)) throw new Error('未知的模型用途');
+      if (!/^(agent|delegate(?:\/[\w-]{1,64})?|image|video|director|director_judge)$/.test(kind)) throw new Error('未知的模型用途');
     }
+    function taskEffort(raw) { return EFFORTS.indexOf(raw) >= 0 ? raw : 'auto'; }
     function getConnection(kind) {
       validKind(kind);
       var stored = (d.read(TASK_KEY) || {})[kind] || {}, media = kind === 'image' || kind === 'video';
-      var selected = String(stored.selected || 'agent'), dedicatedId = String(stored.dedicatedId || '');
+      /* 场记默认跟随总导演的连接；总导演默认跟随主助手。 */
+      var selected = String(stored.selected || (kind === 'director_judge' ? 'director' : 'agent')), dedicatedId = String(stored.dedicatedId || '');
+      if (selected === 'director' && kind !== 'director_judge') selected = 'agent';
       var enabled = media ? stored.enabled === true : true;
-      return { selected: selected, model: String(stored.model || ''), enabled: enabled, configured: enabled, dedicatedId: dedicatedId,
+      return { selected: selected, model: String(stored.model || ''), enabled: enabled, configured: enabled, dedicatedId: dedicatedId, effort: taskEffort(stored.effort),
         dedicated: dedicatedId ? publicPreset(getPreset(dedicatedId)) : null, presets: gateway.getAgentConnection().presets };
     }
     function saveConnection(kind, input) {
@@ -67,15 +78,18 @@
       var table = d.read(TASK_KEY) || {}, old = getConnection(kind), config = input || {};
       var selected = config.selected || old.selected, dedicatedId = old.dedicatedId;
       if (config.dedicated) {
-        var preset = savePreset(Object.assign({}, config.dedicated, { id: old.dedicated && dedicatedId || '', name: config.dedicated.name || (kind === 'image' ? '图片生成' : kind === 'video' ? '视频生成' : '子代理') }));
+        var preset = savePreset(Object.assign({}, config.dedicated, { id: old.dedicated && dedicatedId || '', name: config.dedicated.name || DIRECTOR_KINDS[kind] || (kind === 'image' ? '图片生成' : kind === 'video' ? '视频生成' : '子代理') }));
         selected = dedicatedId = preset.id;
       }
       var enabled = selected !== 'off' && config.enabled !== false;
       if (selected === 'off') selected = old.selected;
-      if (enabled && selected !== 'agent' && !d.usablePreset(getPreset(selected))) throw new Error('所选独立方案已不存在或配置不完整');
+      /* 导演用途还可以选酒馆当前连接、默认方案；场记另可跟随总导演。 */
+      var builtin = selected === 'agent' || (directorKind(kind) && (selected === 'tavern' || selected === 'default' || (selected === 'director' && kind === 'director_judge')));
+      if (enabled && !builtin && !d.usablePreset(getPreset(selected))) throw new Error('所选独立方案已不存在或配置不完整');
       var model = String(config.model === undefined ? old.model : config.model).trim();
       if (model.length > 200) throw new Error('模型名过长');
-      table[kind] = { selected: selected, model: model, enabled: enabled, dedicatedId: dedicatedId };
+      table[kind] = { selected: selected, model: model, enabled: directorKind(kind) ? true : enabled, dedicatedId: dedicatedId };
+      if (directorKind(kind)) table[kind].effort = taskEffort(config.effort === undefined ? old.effort : config.effort);
       if (!d.write(TASK_KEY, table)) throw new Error('无法保存模型连接');
       return getConnection(kind);
     }
@@ -83,6 +97,13 @@
     function target(kind, options) {
       options = options || {};
       var config = getConnection(kind), selected = options.presetId || options.selected || config.selected;
+      var inherited = '';
+      if (selected === 'director') {
+        /* 跟随总导演：连接与模型都取它的；场记自己填了模型时仍用自己的。 */
+        var parent = getConnection('director');
+        selected = parent.selected;
+        inherited = parent.model;
+      }
       var ctx = d.context() || {}, settings = ctx.chatCompletionSettings || {};
       var current = gateway.resolveApi('agent'), main = gateway.getModelCapabilities('agent'), api;
       if (options.dedicated) {
@@ -106,7 +127,7 @@
       var source = api ? api.source : textCompletion ? settings.type || ctx.mainApi : settings.chat_completion_source || main.source;
       var mainModel = textCompletion && textModule && textModule.getTextGenModel ? textModule.getTextGenModel(settings)
         : settings[(source === 'makersuite' ? 'google' : source === 'ooba' ? 'custom' : source) + '_model'] || (!current ? main.model : '');
-      var model = String(options.model || config.model || (api ? api.model : mainModel) || '').trim();
+      var model = String(options.model || config.model || inherited || (api ? api.model : mainModel) || '').trim();
       if (model.length > 200) throw new Error('模型名过长');
       var endpoint = api ? api.apiurl : source === 'custom' ? settings.custom_url || '' : settings.reverse_proxy || '';
       if (textCompletion) {
@@ -233,10 +254,16 @@
         await gateway.resolveModelCapabilities('agent', { signal: options.signal });
         t = target(kind, options);
       }
-      var cached = cache.get(t.cacheKey), records = options.models || (cached && Date.now() - cached.at < 30000 && cached.records) || [];
-      if (!records.length) {
+      /* cacheMs：模型信息可以缓存多久。每轮都要调用的用途（场记）给一个长的：模型列表不必每轮重拉，拉不到也不必每轮重试。 */
+      var keep = Number(options.cacheMs) > 0 ? Number(options.cacheMs) : 0;
+      var cached = cache.get(t.cacheKey), fresh = !!cached && Date.now() - cached.at < (keep || 30000);
+      var records = options.models || (fresh && cached.records) || [];
+      if (!records.length && !(keep && fresh)) {
         try { records = await listModels(kind, options); }
-        catch (error) { if (options.signal && options.signal.aborted || error.name === 'AbortError') throw error; }
+        catch (error) {
+          if (options.signal && options.signal.aborted || error.name === 'AbortError') throw error;
+          if (keep) cache.set(t.cacheKey, { records: [], at: Date.now() });
+        }
       }
       var record = records.find(function (item) { return item.id === t.model; }) || describe(t.model) || {};
       var main = gateway.getModelCapabilities('agent');
@@ -247,11 +274,13 @@
       var kind = options.kind || 'delegate', t = await taskTarget(kind, options);
       var info = await resolveModel(kind, options), live = target(kind, options);
       if (live.cacheKey !== t.cacheKey || live.model !== t.model) throw Object.assign(new Error('派发时模型连接已更换，请重试'), { code:'model_changed' });
-      if (!info.supportsTextChat || d.imageModel(info.model) || d.imageChatModel(info.model)) throw new Error('所选子代理模型不支持文本回复');
+      if (!info.supportsTextChat || d.imageModel(info.model) || d.imageChatModel(info.model)) throw new Error('所选' + (directorKind(kind) ? '导演' : '子代理') + '模型不支持文本回复');
+      /* 思考档位：调用方没指定时用这个用途自己保存的（导演两档各存各的）。 */
+      var wanted = options.reasoningEffort === undefined && directorKind(kind) ? getConnection(kind).effort : options.reasoningEffort;
       return gateway.chat({ api:t.api, route:'agent', modelOverride:info.model, messages:options.messages, temperature:options.temperature,
-        maxTokens:options.maxTokens, contextWindow:info.contextWindow, signal:options.signal, retries:0, timeoutMs:options.timeoutMs,
+        maxTokens:options.maxTokens, contextWindow:info.contextWindow, signal:options.signal, retries:options.retries === undefined ? 0 : options.retries, timeoutMs:options.timeoutMs,
         generationId:options.generationId || 'reader-child', checkProviderStop:true,
-        reasoningEffort:info.reasoningEfforts.includes(options.reasoningEffort) ? options.reasoningEffort : 'auto' });
+        reasoningEffort:info.reasoningEfforts.includes(wanted) ? wanted : 'auto' });
     }
     return { getConnectionPreset:function (id) { return publicPreset(getPreset(id)); }, saveConnectionPreset:savePreset, getTaskConnection:getConnection,
       saveTaskConnection:saveConnection, listTaskModels:listModels, resolveTaskModel:resolveModel, chatTask:chatTask,

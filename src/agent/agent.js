@@ -12,6 +12,7 @@
    */
   var modules = root.__ReaderIIModules = root.__ReaderIIModules || {};
   var protocol = modules.agentProtocol;
+  var kernel = modules.agentKernel;
   var PERSONAS = modules.AGENT_PERSONAS;
   /* 构建时由 manifest.json 写进 BUILD_VERSION（build.mjs 的 versionModule）；直接跑源码（测试）时是 4.0.0。 */
   var VERSION = modules.BUILD_VERSION || '4.0.0';
@@ -54,48 +55,15 @@
     return typeof normalize === 'function' ? normalize(value) : {};
   }
 
-  function clampInt(value, minimum, maximum, fallback) {
-    var number = Math.trunc(Number(value));
-    return Number.isFinite(number) ? Math.max(minimum, Math.min(maximum, number)) : fallback;
-  }
-
-  /* 本地估算覆盖原生工具描述、调用参数和消息边界。不同模型的分词器不同，
-     对 CJK 和符号单独计数，发送前留余量；上游实际报满时再按更紧预算压缩。 */
-  function tokenEstimate(value) {
-    var text = typeof value === 'string' ? value : JSON.stringify(value || '');
-    var total = 0;
-    for (var i = 0; i < text.length; i++) {
-      var code = text.charCodeAt(i);
-      total += code > 127 ? 1.4 : code < 33 ? 0.32 : /[a-zA-Z0-9]/.test(text.charAt(i)) ? 0.31 : 0.6;
-    }
-    return Math.ceil(total);
-  }
-
-  function messageSize(message) {
-    return 8 + tokenEstimate(message.content || '') + (message.tool_calls ? tokenEstimate(message.tool_calls) : 0)
-      + (message.reasoning_content ? tokenEstimate(message.reasoning_content) : 0) + (message.tool_call_id ? tokenEstimate(message.tool_call_id) : 0);
-  }
-
-  function reportedWindow(error) {
-    var match = /(?:maximum context length(?: is| of|:)?|context (?:window|limit)(?: size)?(?: is| of|:)?|maximum number of tokens allowed\s*\(?)\s*([\d,]{3,})\b/i.exec(error)
-      || /tokens?\s*>\s*([\d,]{3,})\s*(?:maximum|max|tokens?)/i.exec(error);
-    var value = match ? Number(match[1].replace(/,/g, '')) : 0;
-    return value >= 512 && value <= 100000000 ? value : 0;
-  }
-
-  function applyWindow(route, windowSize, origin, maxOutput) {
-    var output = Math.min(maxOutput, Math.max(1, Math.floor(windowSize / 3)));
-    route.window = windowSize;
-    route.source = origin;
-    route.input = Math.max(1, windowSize - output - Math.max(64, Math.ceil(windowSize * 0.04)));
-    route.options.contextWindow = windowSize;
-    route.options.maxTokens = output;
-    return route;
-  }
-
-  function effortLevel(raw) {
-    return ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(raw) ? raw : 'auto';
-  }
+  /* token 估算、窗口预算这些与后台运行器（director.js）共用，都在 kernel.js。 */
+  var clampInt = kernel.clampInt;
+  var tokenEstimate = kernel.tokenEstimate;
+  var reportedWindow = kernel.reportedWindow;
+  var applyWindow = kernel.applyWindow;
+  var effortLevel = kernel.effortLevel;
+  var prefixLength = kernel.prefixLength;
+  /* 同一批里全是可并行的只读调用时，最多同时跑这么多个（见主循环）。 */
+  var PARALLEL_TOOLS = 4;
 
   function normalizeSubagents(source) {
     source = source || {};
@@ -218,6 +186,8 @@
     /* 自动模式下试过、确认不认原生函数调用的后端（按 地址|模型 记，只在本次页面会话里有效；改设置或自检后清掉）。 */
     var textOnly = Object.create(null);
     var observedWindows = new Map();
+    /* 请求体积估算的记忆：消息只增不改，量过的不重量（kernel.js 的 createSizer）。 */
+    var sizer = kernel.createSizer();
 
     function getSettings() { return modules.clone(settings); }
 
@@ -244,7 +214,9 @@
       var next = Object.assign({}, settings, modules.isObject(patch) ? patch : {});
       if (patch && modules.isObject(patch.subagents)) next.subagents = Object.assign({}, settings.subagents, patch.subagents);
       settings = normalizeSettings(next);
-      if (!settings.subagents.enabled && current && current.delegateController) current.delegateController.abort();
+      if (!settings.subagents.enabled && current && current.delegateControllers) {
+        Array.from(current.delegateControllers).forEach(function (controller) { controller.abort(); });
+      }
       io.write(modules.clone(settings));
       if (patch && (patch.connectors || patch.connectorChoices)) connectors.refresh();
       textOnly = Object.create(null);
@@ -474,6 +446,8 @@
 
     registry.registerTool({
       name: 'delegate_task', toolset: 'core', source: 'builtin', effect: 'read', scope: 'workspace', volatile: true,
+      /* 同一批派发的子代理并行执行；智能模式要先取一次模型清单、再带着选定的模型重发，仍按顺序来。 */
+      parallel: function () { return settings.subagents.mode !== 'smart'; },
       summary: '把独立的分析、创作、校对或方案比较交给子代理。它只收到 task 和 material。按任务匹配已配置的倾向；智能模式按返回的模型清单选模型。',
       describe: function (args) { return '派发子代理：' + shorten(args.task, 60); },
       params: [{ name: 'task', type: 'string', required: true, desc: '具体子任务及预期返回格式' },
@@ -488,7 +462,7 @@
     ['image', 'video'].forEach(function (kind) {
       var label = kind === 'image' ? '图片' : '视频';
       registry.registerTool({
-        name: 'generate_' + kind, toolset: 'core', source: 'builtin', effect: 'read', scope: 'workspace', volatile: true,
+        name: 'generate_' + kind, toolset: 'core', source: 'builtin', effect: 'read', scope: 'workspace', volatile: true, parallel: true,
         summary: '调用用户配置的' + label + '模型制作' + label + '并附到本次最终回复。返回附件编号以供主助手引用。',
         params: [{ name: 'prompt', type: 'string', required: true, desc: '独立完整的生成提示，包含题材、风格和构图等用户要求' },
           { name: 'include_self', type: 'boolean', desc: '画面包含你本人时填 true，如用户要你发自拍。工具会自动带上你当前的外貌' }],
@@ -498,7 +472,7 @@
     });
 
     registry.registerTool({
-      name: 'capabilities', toolset: 'core', source: 'builtin', effect: 'read', scope: 'workspace', volatile: true,
+      name: 'capabilities', toolset: 'core', source: 'builtin', effect: 'read', scope: 'workspace', volatile: true, parallel: true,
       summary: '按名称或关键词查当前宿主的工具、工具箱、资源路径和知识。指定 tool 和拟用 args 可预检参数和本次调用的权限，全程只读。',
       params: [
         { name: 'query', type: 'string', desc: '例如 世界书、记忆、变量、工作区，或插件/工具名。留空显示当前目录' },
@@ -619,21 +593,8 @@
     }
 
     function estimateRequest(messages, lite, proto) {
-      var tools = !lite && proto.mode === 'native' ? availableTools().map(protocol.toolSchema) : [];
-      return messages.reduce(function (sum, message) { return sum + messageSize(message); }, tools.length ? tokenEstimate(tools) + 16 : 8);
-    }
-
-    function prefixLength(text, tokens) {
-      var upper = Math.min(text.length, Math.max(0, Math.ceil(tokens / 0.3) + 1));
-      if (tokenEstimate(text.slice(0, upper)) <= tokens) return upper;
-      var left = 0, right = upper;
-      while (left + 1 < right) {
-        var middle = Math.floor((left + right) / 2);
-        if (tokenEstimate(text.slice(0, middle)) <= tokens) left = middle;
-        else right = middle;
-      }
-      if (left && /[\uD800-\uDBFF]/.test(text.charAt(left - 1))) left--;
-      return left;
+      var toolSize = !lite && proto.mode === 'native' ? sizer.tools(availableTools(), protocol.toolSchema) : 0;
+      return sizer.messages(messages, toolSize ? toolSize + 16 : 8);
     }
 
     var SUMMARY_PROMPT = '你是任务交接摘要整理器。仅依据提供的对话、工具输出与既有摘要，整理一份紧凑、可直接接续工作的交接单：'
@@ -746,6 +707,35 @@
       var sessionKey = modules.resolveToolField(def.sessionKey, args, '');
       if (sessionKey) request.key = String(sessionKey);
       return { request: request, paths: canon };
+    }
+
+    /*
+     * 同一批调用能不能并行执行。条件很窄：每一个都是声明了 parallel 的只读工具、参数合法、当前权限下不必询问，且彼此不重复。
+     * 只要有一个不满足就返回 null，整批照旧按顺序执行——有写入时先后顺序是语义的一部分，前一个调用也可能改变后一个调用
+     * 能用的工具（连上 MCP 之后才有的工具），重复的只读调用要复用前一个的结果。
+     * 没有声明 parallel 的工具一律不并行：第三方插件的接口未必可重入。
+     */
+    function parallelPlan(calls, round, state) {
+      if (!Array.isArray(calls) || calls.length < 2) return null;
+      var seen = Object.create(null), plan = [];
+      for (var index = 0; index < calls.length; index += 1) {
+        var call = calls[index];
+        var def = call.malformed ? null : findTool(call.name);
+        if (!def) return null;
+        var coerced = protocol.coerce(def, call.args);
+        if (coerced.error) return null;
+        var flag = def.parallel;
+        if (typeof flag === 'function') { try { flag = flag(coerced.args, state.toolCtx); } catch (error) { flag = false; } }
+        if (flag !== true) return null;
+        var request = toolAccess(def, coerced.args, state.toolCtx).request;
+        if (request.effect !== 'read' || permissions.evaluate(request).decision !== 'allow') return null;
+        if (unbound() && (request.scope === 'chat' || request.scope === 'card')) return null;
+        var signature = def.name + ':' + JSON.stringify(coerced.args);
+        if (seen[signature]) return null;
+        seen[signature] = true;
+        plan.push({ def: def, args: coerced.args, id: round + '-' + index });
+      }
+      return plan;
     }
 
     /* 执行一次工具调用，返回 { status: ok | error | denied, body: 交还给模型的结果正文, step: 给界面的记录 } */
@@ -950,7 +940,9 @@
         var childSignal = controller ? controller.signal : signal;
         var cancel = function () { if (controller) controller.abort(); };
         if (signal) signal.addEventListener('abort', cancel, { once: true });
-        job.delegateController = controller;
+        /* 同一批里可以并行派发几个子代理：各有各的取消器，关掉子代理开关时一起取消。 */
+        if (!job.delegateControllers) job.delegateControllers = new Set();
+        if (controller) job.delegateControllers.add(controller);
         var main, candidate, models, attempted = false, fallback = '';
         var rule = config.mode === 'rules' && config.rules.find(function (item) { return item.id === args.profile; });
         var wanted = rule ? rule.model : '', presetId = rule ? rule.presetId : '';
@@ -1029,7 +1021,7 @@
           throw error;
         } finally {
           if (signal) signal.removeEventListener('abort', cancel);
-          job.delegateController = null;
+          if (controller) job.delegateControllers.delete(controller);
         }
       };
     }
@@ -1170,16 +1162,20 @@
         if (sessionChat !== JSON.stringify([job.key, job.thread])) resetThreadState();
         await connectors.prepare(signal);
         checkActive();
-        var firstRoute = await modelRoute(signal);
+        /* 模型探测、记忆召回、剧情摘要互不依赖，一起等：冷启动时各自都可能卡上几秒（模型元数据、插件的摘要接口）。 */
+        var wantRecall = !unbound() && settings.recall && memory && memory.getSettings().enabled;
+        var wantPlot = !unbound() && settings.plotContext && opts.plotContext !== false;
+        var warm = await Promise.all([
+          modelRoute(signal),
+          wantRecall ? Promise.resolve().then(function () { return memory.search(input, { limit: 5 }); }).catch(function () { return []; }) : [],
+          wantPlot ? connectors.brief(settings.plotSources, settings.plotBudget, signal) : ''
+        ]);
+        var firstRoute = warm[0];
         checkActive();
         var lite = firstRoute.imageOnly || firstRoute.imageChat || opts.lite === true || (opts.lite === undefined && settings.lite);
         var persona = personaContext(opts.persona);
-        var recalled = [];
-        if (!unbound() && settings.recall && memory && memory.getSettings().enabled) {
-          try { recalled = await memory.search(input, { limit: 5 }); } catch (error) { recalled = []; }
-        }
-        var plot = !unbound() && settings.plotContext && opts.plotContext !== false
-          ? await connectors.brief(settings.plotSources, settings.plotBudget, signal) : '';
+        var recalled = warm[1] || [];
+        var plot = warm[2] || '';
         var proto = lite ? { mode: 'text', via: '', key: '', reason: '轻聊' } : pickProtocol();
         var messages = [{ role: 'system', content: '' }];
         var history = readHistory();
@@ -1440,7 +1436,30 @@
           var feedback = [];
           var lastTool = null;
           var batchStart = steps.length;
-          for (var index = 0; index < turn.calls.length; index += 1) {
+          /* 把一个调用的结果交还给模型：原生调用用 role: tool 的消息，文本协议攒成一条结果。 */
+          var settle = function (call, status, body) {
+            if (native) {
+              lastTool = {
+                role: 'tool', tool_call_id: call.id, toolResult: true, toolName: call.name || '?', toolStatus: status,
+                content: (status === 'ok' ? '' : status === 'denied' ? '［未执行］' : '［失败］') + body
+              };
+              messages.push(lastTool);
+            } else feedback.push(protocol.resultBlock(call.name || '?', status, body));
+          };
+          var fanout = parallelPlan(turn.calls, rounds - 1, state);
+          if (fanout) {
+            /* 整批都是可并行的只读调用（分段读文件、检索、同批派发的子代理）：一起跑，结果仍按调用的顺序交还。 */
+            checkActive();
+            var outcomes = await kernel.mapLimit(fanout, PARALLEL_TOOLS, function (item) {
+              checkActive();
+              return execute(item.def, item.args, item.id, state);
+            });
+            for (var at = 0; at < outcomes.length; at += 1) {
+              steps.push(outcomes[at].step);
+              if (outcomes[at].step.ok && usedTools.indexOf(fanout[at].def.name) < 0) usedTools.push(fanout[at].def.name);
+              settle(turn.calls[at], outcomes[at].status, outcomes[at].body);
+            }
+          } else for (var index = 0; index < turn.calls.length; index += 1) {
             checkActive();
             var call = turn.calls[index];
             var id = (rounds - 1) + '-' + index;
@@ -1461,13 +1480,7 @@
               steps.push(outcome.step);
               if (outcome.step.ok && usedTools.indexOf(def.name) < 0) usedTools.push(def.name);
             }
-            if (native) {
-              lastTool = {
-                role: 'tool', tool_call_id: call.id, toolResult: true, toolName: call.name || '?', toolStatus: status,
-                content: (status === 'ok' ? '' : status === 'denied' ? '［未执行］' : '［失败］') + body
-              };
-              messages.push(lastTool);
-            } else feedback.push(protocol.resultBlock(call.name || '?', status, body));
+            settle(call, status, body);
           }
           var tail = '';
           var batch = steps.slice(batchStart);
