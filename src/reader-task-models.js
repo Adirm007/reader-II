@@ -270,20 +270,44 @@
       return { model:t.model, source:t.source, contextWindow: record.contextWindow || (t.isCurrent && main.contextWindow) || 32768,
         reasoningEfforts: t.textCompletion ? [] : record.reasoningEfforts || [], supportsTextChat: record.supportsTextChat !== false, outputModalities: record.outputModalities || [], isCurrent: t.isCurrent };
     }
-    async function chatTask(options) {
+    async function prepareTask(options) {
       var kind = options.kind || 'delegate', t = await taskTarget(kind, options);
       var info = await resolveModel(kind, options), live = target(kind, options);
       if (live.cacheKey !== t.cacheKey || live.model !== t.model) throw Object.assign(new Error('派发时模型连接已更换，请重试'), { code:'model_changed' });
       if (!info.supportsTextChat || d.imageModel(info.model) || d.imageChatModel(info.model)) throw new Error('所选' + (directorKind(kind) ? '导演' : '子代理') + '模型不支持文本回复');
       /* 思考档位：调用方没指定时用这个用途自己保存的（导演两档各存各的）。 */
       var wanted = options.reasoningEffort === undefined && directorKind(kind) ? getConnection(kind).effort : options.reasoningEffort;
-      return gateway.chat({ api:t.api, route:'agent', modelOverride:info.model, messages:options.messages, temperature:options.temperature,
-        maxTokens:options.maxTokens, contextWindow:info.contextWindow, signal:options.signal, retries:options.retries === undefined ? 0 : options.retries, timeoutMs:options.timeoutMs,
+      return { t: t, info: info, effort: info.reasoningEfforts.includes(wanted) ? wanted : 'auto' };
+    }
+    function taskToolSupport(kind, options) {
+      var t = target(kind || 'delegate', options);
+      if (t.textCompletion) return { native: false, via: '', model: t.model, key: t.cacheKey + '|' + t.model, reason: '酒馆主 API 是文本补全类型（' + t.source + '），没有原生函数调用' };
+      var support = typeof gateway.toolSupport === 'function'
+        ? gateway.toolSupport('agent', { api: t.api, modelOverride: t.model })
+        : { native: false, via: '', reason: '当前的模型网关没有原生函数调用' };
+      return Object.assign({}, support, { model: support.model || t.model, key: t.cacheKey + '|' + t.model });
+    }
+    async function chatTask(options) {
+      var p = await prepareTask(options);
+      return gateway.chat({ api:p.t.api, route:'agent', modelOverride:p.info.model, messages:options.messages, temperature:options.temperature,
+        maxTokens:options.maxTokens, contextWindow:p.info.contextWindow, signal:options.signal, retries:options.retries === undefined ? 0 : options.retries, timeoutMs:options.timeoutMs,
         generationId:options.generationId || 'reader-child', checkProviderStop:true,
-        reasoningEffort:info.reasoningEfforts.includes(wanted) ? wanted : 'auto' });
+        reasoningEffort:p.effort });
+    }
+    async function chatTaskTools(options) {
+      var p = await prepareTask(options);
+      if (p.t.textCompletion) throw Object.assign(new Error('酒馆主 API 是文本补全类型（' + p.t.source + '），没有原生函数调用'), { code: 'no_native_tools' });
+      if (typeof gateway.chatTools !== 'function') throw Object.assign(new Error('当前的模型网关没有原生函数调用'), { code: 'no_native_tools' });
+      return gateway.chatTools({ api:p.t.api, route:'agent', modelOverride:p.info.model, messages:options.messages,
+        tools:options.tools, toolChoice:options.toolChoice, textOnly:options.textOnly !== false,
+        temperature:options.temperature, maxTokens:options.maxTokens, contextWindow:p.info.contextWindow, signal:options.signal,
+        retries:options.retries === undefined ? 0 : options.retries, timeoutMs:options.timeoutMs,
+        generationId:options.generationId || 'reader-child', checkProviderStop:true,
+        reasoningEffort:p.effort });
     }
     return { getConnectionPreset:function (id) { return publicPreset(getPreset(id)); }, saveConnectionPreset:savePreset, getTaskConnection:getConnection,
-      saveTaskConnection:saveConnection, listTaskModels:listModels, resolveTaskModel:resolveModel, chatTask:chatTask,
+      saveTaskConnection:saveConnection, listTaskModels:listModels, resolveTaskModel:resolveModel, taskToolSupport:taskToolSupport,
+      chatTask:chatTask, chatTaskTools:chatTaskTools,
       generateMedia: modules.createMediaGenerator(Object.assign({}, d, { target:target, baseUrl:baseUrl })) };
   };
 })(typeof globalThis !== 'undefined' ? globalThis : window);

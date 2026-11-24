@@ -43,6 +43,9 @@ test('文本补全沿用连接和采样，生成助手回复和记忆时不运�
     assert.equal(body.num_ctx, 8192);
     assert.ok(body.prompt.includes('{{literal}}'));
     assert.doesNotMatch(JSON.stringify(body), /STORY|setvar|negative_prompt|stopping_strings|dry_sequence_breakers|grammar|json_schema/);
+    /* 只用固定的轮次边界当停止词：模型写完这一轮就停，不替 user / system 往下编 */
+    assert.deepEqual(body.stop, ['\n\nuser:', '\n\nsystem:']);
+    assert.equal(body.stop_sequence, undefined, 'koboldcpp 以外不带 stop_sequence');
   }
   const schema = { name: 'result', value: { properties: { result: { type: 'string' } } } };
   await local.generate({ route: 'adapt', userInput: '返回 JSON', jsonSchema: schema });

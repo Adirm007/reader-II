@@ -27,24 +27,28 @@
     return { items: items.slice(offset, offset + limit), total: items.length };
   }
 
-  /* 同名条目加 #标识 区分；段里带 #标识 时按标识找。 */
+  /* 同名、空名、名字含 # 或末尾带空白的条目一律加 #标识 区分，确保 ls/grep/read 路径口径一致。 */
   function uniqueNames(items, nameOf, idOf) {
     var count = {};
     items.forEach(function (item) { var name = nameOf(item) || ''; count[name] = (count[name] || 0) + 1; });
     return items.map(function (item) {
       var name = nameOf(item) || '';
-      return !name || count[name] > 1 ? (name || '') + '#' + idOf(item) : name;
+      var needId = !name || count[name] > 1 || name.indexOf('#') >= 0 || /\s$/.test(name);
+      return needId ? (name || '') + '#' + idOf(item) : name;
     });
   }
 
   function pick(items, segment, nameOf, idOf) {
+    /* 先尝试唯一的全名精确匹配，避免名字本身带 #数字（如「设定#7」）时被误按 uid=7 解析。 */
+    var exact = [];
+    for (var i = 0; i < items.length; i += 1) if (nameOf(items[i]) === segment) exact.push(items[i]);
+    if (exact.length === 1) return exact[0];
     var hash = segment.lastIndexOf('#');
     if (hash >= 0) {
       var id = segment.slice(hash + 1);
       for (var index = 0; index < items.length; index += 1) if (String(idOf(items[index])) === id) return items[index];
     }
-    for (var i = 0; i < items.length; i += 1) if (nameOf(items[i]) === segment) return items[i];
-    return null;
+    return exact.length ? exact[0] : null;
   }
 
   function need(kit, name, what) {

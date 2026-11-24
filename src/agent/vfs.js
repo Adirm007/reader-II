@@ -250,9 +250,11 @@
       var output = [];
       var queue = [parsed.canonical];
       while (queue.length && output.length < budget.files) {
+        if (budget.signal && budget.signal.aborted) break;
         var dir = queue.shift();
         var listing = await list(dir, { offset: 0, limit: 2000 }).catch(function () { return { items: [] }; });
         for (var index = 0; index < listing.items.length && output.length < budget.files; index += 1) {
+          if (budget.signal && budget.signal.aborted) break;
           var item = listing.items[index];
           var child = dir.replace(/\/$/, '') + '/' + enc(item.name);
           if (item.dir) { queue.push(child); continue; }
@@ -279,11 +281,12 @@
         var delegated = await owner.grep(where.segs, String(pattern), { flags: flags, context: context, limit: limit, signal: opts.signal, canonical: where.canonical });
         if (delegated) return delegated;
       }
-      var files = await collect(path, { files: Math.max(1, Number(opts.maxFiles) || 600) });
-      var hits = [], total = 0, matchedFiles = 0;
+      var files = await collect(path, { files: Math.max(1, Number(opts.maxFiles) || 600), signal: opts.signal });
+      var hits = [], total = 0, matchedFiles = 0, scanned = 0, aborted = false;
       for (var index = 0; index < files.length; index += 1) {
         var file = files[index];
-        if (opts.signal && opts.signal.aborted) break;
+        if (opts.signal && opts.signal.aborted) { aborted = true; break; }
+        scanned += 1;
         if (!expression.test(file.text)) continue;
         matchedFiles += 1;
         var lines = file.text.split('\n');
@@ -307,7 +310,8 @@
         var pause = breathe();
         if (pause) await pause;
       }
-      return { hits: hits, total: total, files: matchedFiles, scanned: files.length };
+      if (opts.signal && opts.signal.aborted) aborted = true;
+      return { hits: hits, total: total, files: matchedFiles, scanned: scanned, totalFiles: files.length, aborted: aborted };
     }
 
     return {

@@ -249,3 +249,94 @@ test('子代理模型列表识别 Gemini 2.5 / 3 / 4 各代的思考档位与上
   assert.deepEqual(plain(byId['gemini-2.5-flash'].reasoningEfforts), ['none','minimal','low','medium','high']);
   assert.deepEqual(plain(byId['gemini-2.5-flash-image'].reasoningEfforts), []);
 });
+
+test('gateway.chatTools 与 chatTaskTools 支持独立 api 与 modelOverride 路由，文本补全或显式主连接均正确分流', async () => {
+  const { gateway: g, calls, add } = fixture((url, init, body) => {
+    if (url.endsWith('/models')) {
+      return Response.json({ data: [
+        { id: 'main-a', context_length: 32000 },
+        { id: 'director-pro', context_length: 200000, supported_reasoning_efforts: ['low', 'high'] },
+      ] });
+    }
+    return Response.json({
+      choices: [{
+        finish_reason: 'tool_calls',
+        message: {
+          role: 'assistant', content: '',
+          tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'read', arguments: JSON.stringify({ path: 'wb:/设定集/旧港' }) } }],
+        },
+      }],
+    });
+  });
+  const a = add('main-a');
+  const b = add('director-base');
+  g.saveAgentConnection({ selected: a.id });
+  g.saveTaskConnection('director', { selected: b.id, model: 'director-pro', effort: 'high' });
+
+  const tools = [{ type: 'function', function: { name: 'read', description: '读取文件', parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } } }];
+
+  /* 1. 直接调 gateway.toolSupport / gateway.chatTools 传独立 api 与 modelOverride，不改原对象 */
+  const customApi = { apiurl: 'https://custom-dir.test/v1', key: 'custom-key', model: 'orig-model', source: 'openai' };
+  const sup = g.toolSupport('agent', { api: customApi, modelOverride: 'override-model' });
+  assert.deepEqual(plain(sup), { native: true, via: 'direct', model: 'override-model' });
+  const directReply = await g.chatTools({ api: customApi, modelOverride: 'override-model', route: 'agent', messages, tools, toolChoice: 'auto', textOnly: true });
+  assert.equal(customApi.model, 'orig-model', '不篡改调用方传入的 api 对象');
+  assert.equal(calls.at(-1).url, 'https://custom-dir.test/v1/chat/completions');
+  assert.equal(calls.at(-1).init.headers.Authorization, 'Bearer custom-key');
+  assert.equal(calls.at(-1).body.model, 'override-model');
+  assert.equal(calls.at(-1).body.tools[0].function.name, 'read');
+  assert.equal(directReply.toolCalls[0].name, 'read');
+
+  /* 2. chatTaskTools('director') 走总导演自己的独立方案、覆盖模型与思考档位，而不是主助手方案 a */
+  const taskSup = g.taskToolSupport('director');
+  assert.equal(taskSup.native, true);
+  assert.equal(taskSup.model, 'director-pro');
+  const taskReply = await g.chatTaskTools({ kind: 'director', messages, tools, toolChoice: 'auto' });
+  assert.equal(calls.at(-1).url, 'https://director-base.test/v1/chat/completions');
+  assert.equal(calls.at(-1).init.headers.Authorization, 'Bearer director-base-key');
+  assert.equal(calls.at(-1).body.model, 'director-pro');
+  assert.equal(calls.at(-1).body.reasoning_effort, 'high');
+  assert.equal(calls.at(-1).body.tools[0].function.name, 'read');
+  assert.equal(taskReply.toolCalls[0].name, 'read');
+
+  /* 3. 酒馆主连接是文本补全时，即使主助手配了独立方案，总导演切到 tavern 也必须抛 no_native_tools 供回退 */
+  const textCtx = { mainApi: 'textgenerationwebui', textCompletionSettings: { type: 'ollama', ollama_model: 'local-text', server_urls: { ollama: 'http://localhost:11434' } } };
+  const textEnv = fixture((url) => url.endsWith('/status') ? Response.json({ data: [{ id: 'local-text' }] }) : Response.json({ choices: [{ text: 'ok' }] }), textCtx);
+  const p = textEnv.add('agent-only');
+  textEnv.gateway.saveAgentConnection({ selected: p.id });
+  textEnv.gateway.saveTaskConnection('director', { selected: 'tavern' });
+  assert.equal(textEnv.gateway.toolSupport('agent', { api: null }).native, false);
+  assert.equal(textEnv.gateway.taskToolSupport('director').native, false);
+  await assert.rejects(textEnv.gateway.chatTaskTools({ kind: 'director', messages, tools }), { code: 'no_native_tools' });
+
+  /* 4. P1-4 反例：上下文超限（含 "in the functions"）、工具序列错误、内容风控 400 绝不能被误判为 no_native_tools */
+  const falsePositives = [
+    "This model's maximum context length is 8192 tokens (7500 in the messages, 700 in the functions).",
+    'messages.2: tool_use ids were found without tool_result blocks immediately after',
+    "Invalid parameter: messages with role 'tool' must be a response to a preceeding message with 'tool_calls'.",
+    'Please ensure that function call turn comes immediately after a user turn or after a function response turn.',
+    'Request rejected due to content_filter safety policy',
+  ];
+  for (const errText of falsePositives) {
+    const errEnv = fixture(() => new Response(JSON.stringify({ error: { message: errText } }), { status: 400, headers: { 'Content-Type': 'application/json' } }));
+    const pr = errEnv.add('err-preset');
+    errEnv.gateway.saveTaskConnection('director', { selected: pr.id });
+    let caught = null;
+    try { await errEnv.gateway.chatTaskTools({ kind: 'director', messages, tools, retries: 0 }); } catch (e) { caught = e; }
+    assert.ok(caught, '应抛出错误：' + errText);
+    assert.notEqual(caught.code, 'no_native_tools', '绝不能将此错误误判为 no_native_tools：' + errText);
+  }
+  /* 而明确不支持 tools 的 400（含 Gemma not enabled、Pydantic Extra inputs are not permitted 等）应准确抛 no_native_tools */
+  const trueUnsup = [
+    'Unrecognized request argument supplied: tools',
+    'Function calling is not enabled for models/gemma-3-27b-it',
+    'tools: Extra inputs are not permitted',
+    'Function calling is disabled for this model',
+  ];
+  for (const errText of trueUnsup) {
+    const realUnsup = fixture(() => new Response(JSON.stringify({ error: { message: errText } }), { status: 400, headers: { 'Content-Type': 'application/json' } }));
+    const rp = realUnsup.add('unsup-preset');
+    realUnsup.gateway.saveTaskConnection('director', { selected: rp.id });
+    await assert.rejects(realUnsup.gateway.chatTaskTools({ kind: 'director', messages, tools, retries: 0 }), { code: 'no_native_tools' }, '应识别为 no_native_tools：' + errText);
+  }
+});

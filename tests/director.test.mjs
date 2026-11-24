@@ -94,11 +94,7 @@ const ARCHIVE = JSON.stringify({ title: '雨季的钟', summary: '账本的去�
 function scriptedModel(replies = {}) {
   const calls = [];
   const table = {
-    plan1: '《勘察卡》土壤够肥，关系尚浅，主角是外来的手艺人。',
-    plan2: '卷核：一本账与一座钟。关系网：艾琳、莫师傅、新看守。',
-    plan3: OUTLINE,
-    plan4: delivery(OUTLINE, INDEX, brief('Phase 1 · 雨夜')),
-    revise: '（修订版）卷核：只写日常，不写阴谋。',
+    plan: delivery(OUTLINE, INDEX, brief('Phase 1 · 雨夜')),
     judge: judge(),
     restructure: delivery(OUTLINE_V2, { title: '雨季的钟', phases: [{ n: 1, title: '渡口改道' }, { n: 2, title: '对岸的钟' }], new_characters: [] }, brief('重构后的 Phase 1'), '玩家提前渡河，原定的钟楼冲突不再成立'),
     archive: ARCHIVE,
@@ -108,13 +104,13 @@ function scriptedModel(replies = {}) {
   };
   function classify(prompts) {
     const system = String(prompts[0].content), last = String(prompts.at(-1).content);
+    const allUser = prompts.slice(1).map((m) => String(m.content || '')).join('\n');
     if (system.includes('分卷导演 · 场记')) return 'judge';
     if (system.includes('正在给刚刚落幕的这一卷归档')) return 'archive';
     if (system.includes('通用世界书条目编写器')) return last.includes('一次性的龙套') ? 'entry_temp' : 'entry_npc';
-    if (last.includes('## 结构重构')) return 'restructure';
-    if (last.includes('【修订这一步】')) return 'revise';
-    const step = /【步骤 (\d)\/4/.exec(last);
-    return step ? 'plan' + step[1] : 'other';
+    if (allUser.includes('## 结构重构')) return 'restructure';
+    if (allUser.includes('## 编纲与交付任务')) return 'plan';
+    return 'other';
   }
   async function handler(config) {
     const prompts = plain(config.ordered_prompts);
@@ -286,16 +282,27 @@ test('Skill 按用途切片：编纲、运行期、归档、建档各取所需',
 
 test('Skill 的标题缺失时平滑降级；用户自己加的段进编纲，不进运行期', () => {
   const noStage4 = SKILL.replace('## 阶段四：单卷动态大纲产出规范', '## 大纲规范（我改了标题）');
-  const planner = core.sliceDirectorSkillDetailed(noStage4, 'planner');
-  assert.equal(planner.degraded, true);
-  assert.deepEqual(plain(planner.missing), ['阶段四']);
-  assert.ok(planner.text.includes('## 阶段五') && planner.text.includes('## 大纲规范（我改了标题）'), '降级 = 整篇照发');
-  assert.equal(core.sliceDirectorSkillDetailed(noStage4, 'runtime').degraded, false, '运行期用不到阶段四');
-
   const noStage5 = SKILL.replace('## 阶段五：后台运行期执导协议（适用于多轮互动实时导演）', '## 运行期');
-  const runtime = core.sliceDirectorSkillDetailed(noStage5, 'runtime');
-  assert.deepEqual(plain([runtime.degraded, runtime.missing]), [true, ['阶段五']]);
-  assert.ok(runtime.text.includes('## 阶段一'), '运行期降级 = 整篇照发');
+  /* 拿不到内置正文（单独加载 director-core 的环境）时才退回整篇照发。 */
+  const bare = core.sliceDirectorSkillDetailed(noStage4, 'planner');
+  assert.deepEqual(plain([bare.degraded, bare.missing, bare.filled]), [true, ['阶段四'], []]);
+  assert.ok(bare.text.includes('## 阶段五'), '没有内置正文可补时整篇照发');
+  /* 扩展包里有内置 Skill：缺的段用内置的同名段补上。 */
+  M.READER_BUILTIN_SKILLS = { 'volume-director': SKILL };
+  try {
+    const planner = core.sliceDirectorSkillDetailed(noStage4, 'planner');
+    assert.equal(planner.degraded, true);
+    assert.deepEqual(plain([planner.missing, planner.filled]), [['阶段四'], ['阶段四']]);
+    assert.ok(planner.text.includes('## 阶段四：单卷动态大纲产出规范'), '缺的段用内置 Skill 的同名段补上');
+    assert.ok(planner.text.includes('## 大纲规范（我改了标题）'), '改了标题认不出的那段仍作为自定义段带上');
+    assert.ok(!planner.text.includes('## 阶段五') && !planner.text.includes('三级偏移判定'), '降级也不把运行期协议塞给总导演');
+    assert.equal(core.sliceDirectorSkillDetailed(noStage4, 'runtime').degraded, false, '运行期用不到阶段四');
+
+    const runtime = core.sliceDirectorSkillDetailed(noStage5, 'runtime');
+    assert.deepEqual(plain([runtime.degraded, runtime.missing, runtime.filled]), [true, ['阶段五'], ['阶段五']]);
+    assert.ok(runtime.text.includes('## 阶段五') && runtime.text.includes('三级偏移判定'), '运行期缺阶段五时用内置的补上');
+    assert.ok(!runtime.text.includes('## 阶段一') && !runtime.text.includes('## 阶段四'), '降级也不把编纲阶段塞给场记');
+  } finally { delete M.READER_BUILTIN_SKILLS; }
   const archive = core.sliceDirectorSkillDetailed(noStage5, 'archive');
   assert.equal(archive.degraded, true);
   assert.ok(archive.text.length < 700 && !archive.text.includes('## 阶段一') && archive.text.includes('已完结卷档案'), '归档绝不回退全文');
@@ -466,36 +473,35 @@ test('快照环留最近 20 条；大纲按版本留存，删楼越过重构时�
   assert.equal(two.versions[picked.entry.outlineVersion].outline, OUTLINE);
 });
 
-test('导演的活互斥：编纲在跑时不能再开卷、巡检或重构；停下之后草稿留着，可以接着编', async () => {
+test('导演的活互斥：编纲在跑时不能再开卷、巡检或重构；停下之后断点草稿留着，可以续编', async () => {
   let release;
   const gate = new Promise((resolve) => { release = resolve; });
-  const h = makeHost({ replies: { plan2: async () => { await gate; return '卷核：一本账与一座钟。'; } } });
+  const h = makeHost({ replies: { plan: async () => { await gate; return delivery(OUTLINE, INDEX, brief('Phase 1 · 雨夜')); } } });
   try {
     await h.director.ready();
     const running = h.director.activate();
-    await until(() => h.model.of('plan2').length === 1, '编纲走到第 2 步');
+    await until(() => h.model.of('plan').length === 1, '编纲开始请求模型');
     assert.deepEqual([h.director.getStatus().state, h.director.getStatus().work.kind], ['planning', 'plan']);
     await assert.rejects(() => h.director.activate(), /正在编纲/);
     await assert.rejects(() => h.director.patrolNow(), /没有正在执导的分卷/);
     assert.equal(h.api.jobs.list().filter((job) => job.owner === 'director' && job.state === 'running').length, 1, '看板上只有一张牌子');
     assert.equal(h.agent.isBusy(), false, '导演有自己的锁，不占助手主循环的');
 
-    /* 暂停：立刻掐掉当前请求，草稿存盘。 */
+    /* 暂停：立刻掐掉当前请求，断点草稿存盘。 */
     assert.equal(await h.director.pause(), 'plan');
     release();
     assert.deepEqual(plain(await running), { paused: true });
     const draft = await h.readJson(h.dir() + '/draft.json');
-    assert.deepEqual([draft.state, draft.step, draft.outputs.length], ['paused', 1, 1]);
-    assert.ok(draft.materials.includes('近期正文') && draft.materials.includes('旧港'), '勘察资料存在草稿里，续接时不必重来');
-    assert.deepEqual([h.director.getStatus().state, h.director.getStatus().plan.state], ['draft', 'paused']);
+    assert.deepEqual([draft.v, draft.mode, draft.state, draft.messages.length], [2, 'auto', 'paused', 1]);
+    assert.ok(draft.materials.includes('近期正文') && draft.materials.includes('旧港'), '勘察地图存在草稿里，续接时不必重来');
+    assert.deepEqual([h.director.getStatus().state, h.director.getStatus().plan.state, h.director.getStatus().plan.hasCheckpoint], ['draft', 'paused', true]);
     assert.equal(await h.readJson(h.dir() + '/active.json'), null, '没定稿就没有活跃卷');
 
-    /* 接着编：从第 2 步继续，前面的产出不重跑。 */
-    h.model.table.plan2 = '卷核：一本账与一座钟。';
+    /* 接着编：直接沿断点继续，完成定稿并清理草稿。 */
+    h.model.table.plan = delivery(OUTLINE, INDEX, brief('Phase 1 · 雨夜'));
     assert.deepEqual(plain(await h.director.resume()), { done: true });
-    assert.equal(h.model.of('plan1').length, 1);
     assert.equal(h.director.getStatus().state, 'running');
-    assert.equal(await h.readJson(h.dir() + '/draft.json'), null, '定稿之后草稿删掉');
+    assert.equal(await h.readJson(h.dir() + '/draft.json'), null, '定稿之后草稿与探索会话立刻清空');
   } finally { h.dispose(); }
 });
 
@@ -539,40 +545,68 @@ test('判定解析与状态迁移：L0 只推进，L1 留补丁不动大纲，L2
   assert.equal(core.applyVerdict(l2.state, verdict2, index, { turn: 8, l2Cooldown: 2 }).restructure, true, '过了冷却期');
 });
 
-test('场记的 System 是静态前缀：状态、补丁、正文怎么变都逐字节不变；编纲四步的请求一步接一步', () => {
+test('场记与总导演 Skill 严格隔离且前缀静态；单会话编纲消息、插话与自动质检校验完备', () => {
+  assert.equal(core.normalizeSettings({ planMode: 'review' }).planMode, 'auto', '编纲模式只保留 auto');
   const base = { skillRaw: SKILL, preferences: '日常多一些', userName: '林渡', profile: '主角「林渡」：修表匠', outline: OUTLINE, index: core.normalizeIndex(INDEX, OUTLINE) };
   const first = core.buildJudgeMessages({ ...base, state: core.initialState(), brief: '简报一', turn: 3, recent: [{ floor: 4, role: 'assistant', name: '艾琳', text: '她递来毛巾。' }] });
   const state = { ...core.initialState(), phaseCursor: 2, progress: '上了钟楼', facts: ['林渡没接毛巾'], patches: [{ phase: 2, turn: 5, text: '艾琳改从后门送他上钟楼' }], turn: 5 };
   const second = core.buildJudgeMessages({ ...base, state, brief: '简报二', turn: 6, recent: [{ floor: 6, role: 'user', name: '林渡', text: '我绕到后门。' }, { floor: 7, role: 'assistant', name: '艾琳', text: '后门没有锁。' }] });
-  assert.equal(first[0].content, second[0].content, 'System 逐字节相同');
-  assert.ok(first[0].content.includes(OUTLINE) && first[0].content.includes('## 阶段五') && first[0].content.includes('日常多一些') && first[0].content.includes('输出契约'));
+  assert.equal(first[0].content, second[0].content, '场记 System 逐字节相同');
+  assert.ok(first[0].content.includes(OUTLINE) && first[0].content.includes('## 阶段五') && !first[0].content.includes('## 阶段四') && !first[0].content.includes('## 阶段六'), '场记只读运行期协议，不串大纲编撰段');
+  assert.ok(first[0].content.includes('日常多一些') && first[0].content.includes('输出契约'));
   assert.ok(!first[0].content.includes('{{user}}') && first[0].content.includes('林渡'), 'Skill 里的主角占位已经换成实名');
   assert.ok(!second[0].content.includes('艾琳改从后门送他上钟楼'), 'L1 的补丁不进静态前缀');
   assert.ok(second[1].content.includes('艾琳改从后门送他上钟楼') && second[1].content.includes('林渡没接毛巾') && second[1].content.includes('[#7 艾琳]') && second[1].content.includes('游标：Phase 2 / 3（钟楼的夹层）'));
   assert.notEqual(core.buildJudgeSystem({ ...base, outline: OUTLINE_V2 }), first[0].content, '只有大纲换了版本，前缀才变');
 
   const system = core.buildPlannerSystem(SKILL, '日常多一些', '林渡');
-  assert.ok(system.includes('## 阶段四') && !system.includes('## 阶段五') && system.includes('用户长期偏好') && system.includes('日常多一些') && system.includes('主角实名：「林渡」'));
+  assert.ok(system.includes('## 阶段一') && system.includes('## 阶段四') && system.includes('## 阶段六') && !system.includes('## 阶段五'), '总导演只读大纲创作与自检切片，不串场记协议');
+  assert.ok(system.includes('用户长期偏好') && system.includes('日常多一些') && system.includes('主角实名：「林渡」'));
   assert.match(system, /角色卡的标题、世界书的书名只是资料的出处，不是人物/);
-  const ctx = { system, materials: '### 近期正文\n……', outputs: ['勘察卡', '立意', '大纲'], feedback: [{ step: 2, text: '少一点阴谋' }] };
-  const steps = [1, 2, 3, 4].map((n) => core.buildPlannerStepMessages(n, ctx));
-  assert.deepEqual(steps.map((messages) => messages.length), [2, 4, 6, 8]);
-  for (let n = 1; n < 4; n += 1) assert.deepEqual(plain(steps[n].slice(0, steps[n - 1].length)), plain(steps[n - 1]), `第 ${n + 1} 步以第 ${n} 步为前缀`);
-  assert.ok(steps[0][1].content.includes('### 近期正文') && steps[0][1].content.includes('【步骤 1/4'));
-  assert.ok(steps[3][3].content.includes('少一点阴谋') && !steps[3][1].content.includes('少一点阴谋'), '意见跟在提出它的那一步后面');
-  assert.ok(steps[3][7].content.includes('<volume_outline>') && steps[3][7].content.includes('<volume_index>') && steps[3][7].content.includes('<first_brief>') && steps[3][7].content.includes('【本轮防 AI 味忌口】'));
-  const revise = core.buildPlannerStepMessages(2, { ...ctx, outputs: ['勘察卡'], revise: { previous: '旧的立意', text: '只写日常' } });
-  assert.deepEqual([revise.length, revise[4].content, /只写日常/.test(revise[5].content)], [6, '旧的立意', true]);
 
-  /* 交付物解析：截断、缺标签、索引缺失时从 Phase 标题回推。 */
-  const final = core.parseFinalOutline(delivery(OUTLINE, INDEX, brief('Phase 1')));
+  const planMsgs = core.buildPlannerMessages({ system, materials: '### 近期正文\n……', feedback: [{ text: '少一点阴谋' }] });
+  assert.equal(planMsgs.length, 2);
+  assert.ok(planMsgs[1].content.includes('### 近期正文') && planMsgs[1].content.includes('## 编纲与交付任务（单会话连贯完成）') && planMsgs[1].content.includes('少一点阴谋'));
+  assert.ok(planMsgs[1].content.includes('<self_check>') && planMsgs[1].content.includes('<volume_outline>') && planMsgs[1].content.includes('<volume_index>') && planMsgs[1].content.includes('<first_brief>') && planMsgs[1].content.includes('【本轮防 AI 味忌口】'));
+  assert.match(core.buildInterjectionMessage('先查一下银币数量'), /用户实时插话.*先查一下银币数量/s);
+
+  /* 交付物解析与自动质检闭环：完整交付通过；截断、坏索引、缺简报、自检未通过均触发打回。 */
+  const valid = delivery(OUTLINE, INDEX, brief('Phase 1'));
+  const final = core.parseFinalOutline(valid);
   assert.deepEqual([final.ok, final.index.totalPhases, final.index.title, final.index.newCharacters.length, final.index.inferred], [true, 3, '雨季的钟', 2, false]);
   assert.deepEqual(plain(final.index.newCharacters.map((item) => item.kind)), ['npc', 'temp_event']);
+  assert.equal(core.validateFinalDelivery(valid, { userName: '林渡' }).ok, true);
+
   const cut = core.parseFinalOutline('<self_check>ok</self_check>\n<volume_outline>\n' + OUTLINE.slice(0, 200));
   assert.deepEqual([cut.ok, cut.truncated, /调大/.test(cut.error)], [false, true, true]);
-  const inferred = core.parseFinalOutline('<volume_outline>\n' + OUTLINE + '\n</volume_outline>\n<volume_index>\n{坏的 JSON\n</volume_index>');
-  assert.deepEqual([inferred.ok, inferred.index.inferred, plain(inferred.index.phases.map((phase) => phase.title)), inferred.firstBrief], [true, true, ['雨夜来客', '钟楼的夹层', '清点之日'], '']);
-  assert.equal(core.parseFinalOutline(OUTLINE).lenient, true, '忘了套标签但确实是一份大纲：收下');
+  const badJson = '<volume_outline>\n' + OUTLINE + '\n</volume_outline>\n<volume_index>\n{坏的 JSON\n</volume_index>';
+  const inferred = core.parseFinalOutline(badJson);
+  assert.deepEqual([inferred.ok, inferred.indexOk, inferred.index.inferred, plain(inferred.index.phases.map((phase) => phase.title)), inferred.firstBrief], [true, false, true, ['雨夜来客', '钟楼的夹层', '清点之日'], '']);
+  const vBadJson = core.validateFinalDelivery(badJson, { userName: '林渡' });
+  assert.equal(vBadJson.ok, false);
+  assert.ok(vBadJson.issues.some((s) => s.includes('<volume_index>')) && vBadJson.issues.some((s) => s.includes('<first_brief>')));
+
+  const unfixedSelfCheck = '<self_check>\n1. 通过\n2. 命名嗅探：未通过，存在罐头人名\n</self_check>\n' + `<volume_outline>\n${OUTLINE}\n</volume_outline>\n<volume_index>\n${JSON.stringify(INDEX)}\n</volume_index>\n<first_brief>\n${brief('Phase 1')}\n</first_brief>`;
+  const vCheck = core.validateFinalDelivery(unfixedSelfCheck, { userName: '林渡' });
+  assert.equal(vCheck.ok, false);
+  assert.equal(vCheck.hardFailure, false, '仅自检未通过属于软失败，允许一键忽略自检定稿');
+  assert.match(vCheck.issues[0], /尚未修正/);
+  assert.match(core.buildRevisionPrompt(vCheck.issues), /自动质检打回/);
+
+  /* P1-6 反例：否定语境和括号讨论里的「失败 / 无需修改 / 不存在问题」绝不能误杀合格稿件；全角板块Ａ/Ｄ也放行 */
+  const trickyPass = '<self_check>\n'
+    + '1. 去塑料件：通过，无需修改\n'
+    + '2. 命名嗅探：通过，不存在问题\n'
+    + '3. 转场检验：通过，无需重写\n'
+    + '8. 互动自由度：通过（玩家强攻失败、提前撤退或掀桌均已接住）\n'
+    + '</self_check>\n'
+    + `<volume_outline>\n${OUTLINE.replace('板块 A', '板块Ａ').replace('板块 D', '板块Ｄ')}\n</volume_outline>\n<volume_index>\n${JSON.stringify(INDEX)}\n</volume_index>\n<first_brief>\n${brief('Phase 1')}\n</first_brief>`;
+  assert.equal(core.validateFinalDelivery(trickyPass, { userName: '林渡' }).ok, true, '正向通过+否定语境/括号含「失败」与全角板块号均放行');
+
+  const fixedSelfCheck = '<self_check>\n1. 通过\n2. 命名嗅探：原先未通过，已修正为旧港本土地名\n</self_check>\n' + `<volume_outline>\n${OUTLINE}\n</volume_outline>\n<volume_index>\n${JSON.stringify(INDEX)}\n</volume_index>\n<first_brief>\n${brief('Phase 1')}\n</first_brief>`;
+  assert.equal(core.validateFinalDelivery(fixedSelfCheck, { userName: '林渡' }).ok, true, '标明已修正的自检行放行');
+  assert.equal(core.parseFinalOutline(OUTLINE).lenient, true, '忘了套标签但确实是一份大纲：parseFinalOutline 宽容收下');
+  assert.equal(core.validateFinalDelivery(OUTLINE).ok, false, '缺少 volume_index 与 first_brief 仍判不合格');
   assert.equal(core.parseFinalOutline('抱歉，我不能完成这个请求。').ok, false);
 });
 
@@ -580,7 +614,7 @@ test('后台巡检：L0 / L1 更新快照与简报，大纲文件与静态前缀
   const h = await activated();
   try {
     const dir = h.dir();
-    assert.deepEqual(h.model.calls.map((call) => call.kind), ['plan1', 'plan2', 'plan3', 'plan4']);
+    assert.deepEqual(h.model.calls.map((call) => call.kind), ['plan']);
     assert.equal(await h.vfs.readText(dir + '/outline.md'), OUTLINE);
     const status = h.director.getStatus();
     assert.deepEqual([status.state, status.volume.no, status.volume.title, status.volume.totalPhases, status.volume.version], ['running', 1, '雨季的钟', 3, 1]);
@@ -622,7 +656,7 @@ test('后台巡检：L0 / L1 更新快照与简报，大纲文件与静态前缀
     const kinds = h.model.calls.map((call) => call.kind);
     assert.deepEqual(kinds.slice(-2), ['judge', 'restructure']);
     const restructure = h.model.of('restructure')[0];
-    assert.equal(restructure.system, h.model.of('plan1')[0].system, '重构复用编纲的 System');
+    assert.equal(restructure.system, h.model.of('plan')[0].system, '重构复用编纲的 System');
     assert.equal(restructure.prompts.length, 2, '无状态：不带之前的对话');
     assert.ok(restructure.last.includes('林渡连夜渡河离开了旧港') && restructure.last.includes('林渡没走正门') && restructure.last.includes(OUTLINE) && restructure.last.includes('渡船离了岸'));
     assert.equal(await h.vfs.readText(dir + '/outline.md'), OUTLINE_V2);
@@ -796,7 +830,7 @@ test('完结归档：进入待完结 → 沉淀档案 → 一次性条目只关�
     /* 下一卷开卷时，上一卷的档案与钩子进了勘察资料，卷号接着排。 */
     g.model.table.archive = ARCHIVE;
     await g.director.activate();
-    assert.ok(g.model.of('plan1').at(-1).last.includes('已完结各卷的档案与跨卷钩子') && g.model.of('plan1').at(-1).last.includes('清点结束，雨停了'));
+    assert.ok(g.model.of('plan').at(-1).last.includes('已完结各卷的档案与跨卷钩子') && g.model.of('plan').at(-1).last.includes('清点结束，雨停了'));
     assert.equal(g.director.getStatus().volume.no, 2);
   } finally { g.dispose(); }
 });
@@ -942,10 +976,10 @@ test('导演独立运行：卡没启用 Reader-II 时照样执导；按楼层与
     /* 开卷顺手把这个聊天的开关打开；总开关不动。 */
     await h.director.activate({ feedback: '这一卷不要阴谋' });
     assert.deepEqual([h.director.isEnabled(), h.director.getSettings().enabled, h.director.getStatus().chatSwitch], [true, false, true]);
-    assert.ok(h.model.of('plan1')[0].last.includes('【用户意见（最高优先级') && h.model.of('plan1')[0].last.includes('这一卷不要阴谋'));
-    /* 勘察资料：主角实名与人设、角色卡、世界书、近期正文都带上了；System 里明确了主角实名。 */
-    const first = h.model.of('plan1')[0];
-    for (const part of ['实名：林渡', '走街串巷的修表匠', '旧港酒馆的老板娘', '旧港在北岸', '[#2 艾琳]', '[#1 用户 · 林渡]']) assert.ok(first.last.includes(part), part);
+    assert.ok(h.model.of('plan')[0].last.includes('【用户意见（最高优先级') && h.model.of('plan')[0].last.includes('这一卷不要阴谋'));
+    /* 勘察资料：主角实名与人设、角色卡、世界书全量目录路径、近期正文都带上了；System 里明确了主角实名。 */
+    const first = h.model.of('plan')[0];
+    for (const part of ['实名：林渡', '走街串巷的修表匠', '旧港酒馆的老板娘', 'wb:/设定集/旧港', '常驻', '[#2 艾琳]', '[#1 用户 · 林渡]']) assert.ok(first.last.includes(part), part);
     assert.ok(first.system.includes('主角实名：「林渡」') && !first.system.includes('{{user}}'));
 
     assert.equal(h.director.injectable(), true);
@@ -1193,36 +1227,24 @@ test('建档走助手的权限体系：只读档位与禁止规则拦得住；�
  * 其余：编纲的插话与过目、手动修订、看板与设置
  * ====================================================================================================== */
 
-test('编纲可以过目与插话：第 2 步后停下，提意见则按意见修订这一步；交付被截断时退回第 3 步之后', async () => {
-  const h = makeHost({ directorSettings: { enabled: true, planMode: 'review', plannerMaxTokens: 4096 } });
+test('自动质检与自查打回重写：发现未过关项或截断时在同一会话自动重写，全通过后才定稿清对话；超限保留断点', async () => {
+  /* 场景 A：第 1 稿 <self_check> 残留未通过项 → 自动打回；第 2 稿大纲被截断 → 再打回；第 3 稿通过 → 定稿清草稿。 */
+  const unfixed = '<self_check>\n1. 通过\n2. 命名嗅探：未通过，有罐头名\n</self_check>\n'
+    + `<volume_outline>\n${OUTLINE}\n</volume_outline>\n<volume_index>\n${JSON.stringify(INDEX)}\n</volume_index>\n<first_brief>\n${brief('Phase 1')}\n</first_brief>`;
+  const truncated = '<self_check>\n1. 通过\n</self_check>\n<volume_outline>\n' + OUTLINE.slice(0, 150);
+  const okDelivery = delivery(OUTLINE, INDEX, brief('Phase 1 · 雨夜'));
+  const h = makeHost({ replies: { plan: [unfixed, truncated, okDelivery] } });
   try {
     await h.director.ready();
-    assert.deepEqual(plain(await h.director.activate()), { review: true });
-    assert.deepEqual(h.model.calls.map((call) => call.kind), ['plan1', 'plan2']);
-    let status = h.director.getStatus();
-    assert.deepEqual([status.state, status.plan.state, status.plan.step, status.plan.outputs.length], ['draft', 'review', 2, 2]);
-
-    /* 提意见：按意见重出第 2 步，再停下给用户看。 */
-    assert.deepEqual(plain(await h.director.submitFeedback('只写日常，不写阴谋')), { review: true });
-    const revise = h.model.of('revise')[0];
-    assert.ok(revise.last.includes('只写日常，不写阴谋') && revise.prompts.at(-2).content.includes('卷核：一本账与一座钟'));
-    status = h.director.getStatus();
-    assert.deepEqual([status.plan.state, status.plan.outputs[1]], ['review', '（修订版）卷核：只写日常，不写阴谋。']);
-
-    /* 过目通过：接着编。第 4 步的交付被截断 → 报错并退回第 3 步之后，草稿还在。 */
-    h.model.table.plan4 = '<self_check>ok</self_check>\n<volume_outline>\n' + OUTLINE.slice(0, 150);
-    await assert.rejects(() => h.director.resume(), /大纲没有写完就断了/);
-    assert.ok(h.model.of('plan3')[0].prompts[3].content.includes('只写日常，不写阴谋'), '意见留在第 2 步的要求里，后面各步都看得到');
-    assert.equal(h.model.of('plan3')[0].prompts[4].content, '（修订版）卷核：只写日常，不写阴谋。');
-    status = h.director.getStatus();
-    assert.deepEqual([status.state, status.plan.state, status.plan.step, /调大/.test(status.plan.error)], ['draft', 'failed', 3, true]);
-    assert.equal(h.model.of('plan4')[0].prompts.length, 8);
-
-    /* 调好之后接着来：只重跑第 4 步。 */
-    h.model.table.plan4 = delivery(OUTLINE, INDEX, brief('Phase 1 · 雨夜'));
-    assert.deepEqual(plain(await h.director.resume()), { done: true });
-    assert.deepEqual([h.model.of('plan1').length, h.model.of('plan3').length, h.model.of('plan4').length], [1, 1, 2]);
+    assert.deepEqual(plain(await h.director.activate()), { done: true });
+    const plans = h.model.of('plan');
+    assert.equal(plans.length, 3, '两次自动打回 + 最终通过共 3 次请求');
+    assert.match(plans[1].last, /自动质检打回.*尚未修正/s);
+    assert.equal(plans[1].prompts.length, 4, '第 1 次打回在同一会话内追加 assistant + user');
+    assert.match(plans[2].last, /自动质检打回.*大纲没有写完就断了/s);
+    assert.equal(plans[2].prompts.length, 6, '第 2 次打回继续沿原会话追加');
     assert.equal(h.director.getStatus().state, 'running');
+    assert.equal(await h.readJson(h.dir() + '/draft.json'), null, '全通过后立刻清理草稿对话');
 
     /* 分卷在执导时提意见：按意见重构后续大纲。 */
     const restructured = await h.director.submitFeedback('让莫师傅早点出场');
@@ -1230,16 +1252,30 @@ test('编纲可以过目与插话：第 2 步后停下，提意见则按意见�
     assert.ok(h.model.of('restructure')[0].last.includes('让莫师傅早点出场') && h.model.of('restructure')[0].last.includes('用户的修订意见（最高优先级）'));
     await assert.rejects(() => h.director.submitFeedback('  '), /先写下你的意见/);
   } finally { h.dispose(); }
+
+  /* 场景 B：连续 3 次都坏（超过 MAX_SELF_REVISIONS = 2）→ 停止并保留断点；修好后点 resume() 沿断点一次定稿。 */
+  const hCap = makeHost({ replies: { plan: [truncated, truncated, truncated] } });
+  try {
+    await hCap.director.ready();
+    await assert.rejects(() => hCap.director.activate(), /自动修订 2 次后仍未通过质检/);
+    const status = hCap.director.getStatus();
+    assert.deepEqual([status.state, status.plan.state, status.plan.revisions, status.plan.hasCheckpoint], ['draft', 'failed', 2, true]);
+    assert.equal(await hCap.readJson(hCap.dir() + '/active.json'), null, '质检未过绝不落盘提交');
+    hCap.model.table.plan = okDelivery;
+    assert.deepEqual(plain(await hCap.director.resume()), { done: true });
+    assert.equal(hCap.director.getStatus().state, 'running');
+    assert.equal(await hCap.readJson(hCap.dir() + '/draft.json'), null, '续跑通过后清空断点');
+  } finally { hCap.dispose(); }
 });
 
-test('切走聊天时在途的编纲存成草稿并标为中断；回来可以接着编，也可以放弃', async () => {
+test('切走聊天时在途的编纲存成断点草稿并标为中断；回来可以沿断点续编，也可以放弃', async () => {
   let release;
   const gate = new Promise((resolve) => { release = resolve; });
-  const h = makeHost({ replies: { plan3: async () => { await gate; return OUTLINE; } } });
+  const h = makeHost({ replies: { plan: async () => { await gate; return delivery(OUTLINE, INDEX, brief('Phase 1 · 雨夜')); } } });
   try {
     await h.director.ready();
     const running = h.director.activate();
-    await until(() => h.model.of('plan3').length === 1, '编纲走到第 3 步');
+    await until(() => h.model.of('plan').length === 1, '编纲开始执行');
     const dir = h.dir();
     const metadataA = h.ctx.chatMetadata, chatA = h.chat.slice();
     h.ctx.chatId = 'chat-2';
@@ -1249,7 +1285,7 @@ test('切走聊天时在途的编纲存成草稿并标为中断；回来可以�
     release();
     assert.deepEqual(plain(await running), { paused: true });
     const draft = await h.readJson(dir + '/draft.json');
-    assert.deepEqual([draft.state, draft.step], ['interrupted', 2]);
+    assert.deepEqual([draft.v, draft.state, draft.messages.length], [2, 'interrupted', 1]);
     assert.equal(await h.readJson(dir + '/active.json'), null, '没有把半截大纲提交到任何聊天上');
     await h.director.ready();
     assert.equal(h.director.getStatus().state, 'idle', '新聊天不受影响');
@@ -1260,10 +1296,9 @@ test('切走聊天时在途的编纲存成草稿并标为中断；回来可以�
     await h.emit('CHAT_CHANGED');
     await h.director.ready();
     const status = h.director.getStatus();
-    assert.deepEqual([status.state, status.plan.state, status.plan.step], ['draft', 'interrupted', 2]);
-    h.model.table.plan3 = OUTLINE;
+    assert.deepEqual([status.state, status.plan.state, status.plan.hasCheckpoint], ['draft', 'interrupted', true]);
+    h.model.table.plan = delivery(OUTLINE, INDEX, brief('Phase 1 · 雨夜'));
     assert.deepEqual(plain(await h.director.resume()), { done: true });
-    assert.equal(h.model.of('plan1').length, 1);
 
     /* 放弃这一卷：不归档，点错了还能恢复。 */
     await h.director.discardVolume();
@@ -1415,7 +1450,7 @@ test('后台任务看板、设置与偏好：牌子的生命周期、按级别�
     assert.equal(await h.vfs.readText('ws:/director/preferences.md'), '不要为了深刻硬凑代价');
     assert.equal(await h.vfs.readText('ws:/director/cards/' + core.hashId('card:ailin.png') + '/preferences.md'), '她和主角已经是过命的交情');
     await h.director.activate();
-    const system = h.model.of('plan1')[0].system;
+    const system = h.model.of('plan')[0].system;
     assert.ok(system.includes('【全局偏好】\n不要为了深刻硬凑代价') && system.includes('【这张卡的偏好（与全局冲突时以这里为准）】\n她和主角已经是过命的交情'));
     /* 偏好跟卡走：换一个聊天还在；巡检也带着。 */
     await h.turn('我接过毛巾。', '她朝窗外抬了抬下巴。');
@@ -1438,4 +1473,1027 @@ test('后台任务看板、设置与偏好：牌子的生命周期、按级别�
     const placement = h.modules.readerPromptPlacement.placements(h.ctx);
     assert.deepEqual([placement.director.enabled, placement.director.position, placement.director.depth, placement.director.order], [true, 4, 1, 300]);
   } finally { h.dispose(); }
+});
+
+/* ========================================================================================================
+ * 7. 总导演真 Agent（只读 VFS 工具探索、全量轻索引、白名单隔离、协议回退与防空转）
+ * ====================================================================================================== */
+
+test('世界书全量目录索引不遗漏末尾绿灯条目；变量全景探测同时覆盖 MVU 与小白X并过滤内部噪点键', () => {
+  /* 构造 1 条常驻 + 20 条绿灯关键词条目（末尾为关键人物「格温」且正文很长），另有同名条目与关闭条目。 */
+  const entries = [
+    { uid: 0, name: '世界概览', enabled: true, content: '长背景'.repeat(400), strategy: { type: 'constant', keys: [] }, position: { order: 100 } },
+    { uid: 1, name: '关闭的条目', enabled: false, content: '不应该出现', strategy: { type: 'selective', keys: ['隐藏'] }, position: { order: 99 } },
+  ];
+  for (let i = 1; i <= 18; i += 1) {
+    entries.push({ uid: i + 1, name: '绿灯设定' + i, enabled: true, content: '内容'.repeat(300), strategy: { type: 'selective', keys: ['关键词' + i] }, position: { order: 50 - i } });
+  }
+  entries.push({ uid: 90, name: '重复名', enabled: true, content: '第一份正文', strategy: { type: 'selective', keys: ['甲'] }, position: { order: 10 } });
+  entries.push({ uid: 91, name: '重复名', enabled: true, content: '第二份正文', strategy: { type: 'selective', keys: ['乙'] }, position: { order: 9 } });
+  entries.push({ uid: 99, name: '格温', enabled: true, content: '前段公开信息。' + '铺垫'.repeat(400) + '中后段隐秘设定：格温藏着半枚银徽章。', strategy: { type: 'selective', keys: ['格温', '银发'] }, position: { order: 1 } });
+
+  const map = core.indexWorldbook('命定之诗', entries, { tag: '[角色主书]' });
+  assert.ok(map.includes('【命定之诗】 [角色主书]（启用 22 条）'));
+  assert.ok(map.includes('wb:/命定之诗/世界概览 ｜ 世界概览 ｜ 常驻 ｜ 1200 字'));
+  assert.ok(map.includes('wb:/命定之诗/格温 ｜ 格温 ｜ 关键词（格温、银发） ｜ '));
+  assert.ok(map.includes('wb:/命定之诗/重复名%2390') && map.includes('wb:/命定之诗/重复名%2391'), '同名条目按 uid 区分并编码');
+  assert.ok(!map.includes('关闭的条目'), '未启用条目不列入');
+  assert.ok(!map.includes('中后段隐秘设定'), '轻索引目录不截正文塞入，由导演按路径 read 全文');
+  for (let i = 1; i <= 18; i += 1) assert.ok(map.includes('wb:/命定之诗/绿灯设定' + i), '不遗漏绿灯设定 ' + i);
+
+  /* composeMaterials 的 preserve 保护：即使近期正文非常长，全量目录与变量探测也不会被截丢末尾绿灯条目。 */
+  const composed = core.composeMaterials([
+    { key: 'persona', title: '主角', text: '实名：林渡', weight: 8, preserve: true },
+    { key: 'books', title: '世界书全量目录地图', text: map, weight: 24, preserve: true },
+    { key: 'floors', title: '近期正文', text: '旧楼层正文。'.repeat(6000), weight: 40, tail: true },
+  ], 5000);
+  assert.ok(composed.text.includes('wb:/命定之诗/格温'), 'preserve 保全末尾绿灯条目不被正文挤掉');
+
+  /* 变量全景探测：同时覆盖 mvu.json、chat.json（含小白X变量）与 character.json，彻底过滤 reader_ii_* 等内部噪点。 */
+  const varIndex = core.indexVariableSources([
+    { path: 'var:/mvu.json', label: 'MVU / 最新楼层变量', data: { stat_data: { 时间: '雨季第三日', 角色: { 艾琳: { 信任: 82 } } }, display_data: { 金币: '37枚' }, 楼层临时标记: '暴雨' } },
+    { path: 'var:/chat.json', label: '聊天变量（含小白X等）', data: {
+      reader_ii_director: { enabled: true }, reader_ii_director_ref: { chatHash: 'abc' }, reader_ii_agent: { turns: [] }, dream_persona: 'reader',
+      小白X角色状态: { 格温: { 好感: 74, 秘密进度: 2 } }, 随身铜币: 19,
+    } },
+    { path: 'var:/character.json', label: '角色卡变量', data: { 阵营声望: { 旧港商会: 12 }, reader_ii_internal: 1 } },
+  ]);
+  assert.ok(varIndex.includes('var:/mvu.json#/stat_data/时间') && varIndex.includes('var:/mvu.json#/stat_data/角色'));
+  assert.ok(varIndex.includes('var:/message/latest.json#/楼层临时标记'));
+  assert.ok(varIndex.includes('var:/chat.json#/小白X角色状态') && varIndex.includes('var:/chat.json#/随身铜币'));
+  assert.ok(varIndex.includes('var:/character.json#/阵营声望'));
+  for (const noise of ['reader_ii_director', 'reader_ii_agent', 'reader_ii_internal', 'dream_persona']) {
+    assert.ok(!varIndex.includes(noise), '过滤内部噪点键：' + noise);
+  }
+
+  /* 人类可读工具轨迹文案 */
+  assert.equal(core.describeToolCall('read', { path: 'wb:/命定之诗/格温' }), '查阅世界书 wb:/命定之诗/格温');
+  assert.equal(core.describeToolCall('read', { path: 'var:/chat.json#/人物状态' }), '查看变量 var:/chat.json#/人物状态');
+  assert.equal(core.describeToolCall('grep', { path: 'chat:/', pattern: '铜币' }), '搜索历史 chat:/ 关键词「铜币」');
+});
+
+/* 为真 Agent 测试构建带独立 API 原生工具后端、多源变量与多条目世界书的宿主。 */
+function makeNativeDirectorHost(options = {}) {
+  const backendCalls = [];
+  const chat = options.chat || [
+    { name: '艾琳', is_user: false, mes: '开场：柜台下压着一枚刻字的旧铜币。' },
+    { name: '林渡', is_user: true, mes: '我推开酒馆门。' },
+    { name: '艾琳', is_user: false, mes: '她擦着杯子说雨还没停。' },
+  ];
+  const worldbooks = options.worldbooks || {
+    命定之诗: [
+      { uid: 0, name: '旧港规矩', enabled: true, content: '旧港宵禁从子时开始。', strategy: { type: 'constant', keys: [] }, position: { order: 100 } },
+      { uid: 1, name: '格温', enabled: true, content: '表层：钟表铺学徒。\n' + '日常。'.repeat(120) + '\n中后段隐秘设定：格温其实保管着旧港渡船的备用舵钥匙。', strategy: { type: 'selective', keys: ['格温', '学徒'] }, position: { order: 10 } },
+    ],
+  };
+  const variables = {
+    chat: {
+      reader_ii_director: { enabled: true },
+      reader_ii_agent: { v: 2, turns: [] },
+      人物状态: { 格温: { 好感度: 68, 戒心: '低', 携带物: ['备用舵钥匙', '磨损怀表'] } },
+      ...(options.chatVars || {}),
+    },
+    mvu: {
+      stat_data: { 天气: '大雨', 资金: { 铜币: 24 } },
+      ...(options.mvuVars || {}),
+    },
+    character: { 初始阵营: '旧港修表行', ...(options.charVars || {}) },
+    global: {},
+  };
+  const preset = { id: 'dir-preset', name: '总导演专用', apiurl: 'https://dir.test/v1', key: 'dir-secret', model: 'director-flagship', source: 'openai' };
+  const storage = {
+    reader_ii_independent_api_v2: { version: 2, presets: [preset], defaultId: preset.id, routes: {} },
+    reader_ii_task_connections_v1: { director: { selected: preset.id, model: 'director-flagship', enabled: true, effort: 'high' } },
+    ...(options.storage || {}),
+  };
+
+  const fetch = async (url, init = {}) => {
+    const body = init.body ? JSON.parse(init.body) : null;
+    if (url.endsWith('/status') || url.endsWith('/models')) {
+      return Response.json({ data: [{ id: 'director-flagship', context_length: 128000, supported_reasoning_efforts: ['low', 'high'] }] });
+    }
+    if (url === '/api/backends/chat-completions/generate' || url.endsWith('/chat/completions')) {
+      backendCalls.push({ url, body: plain(body), headers: plain(init.headers) });
+      const res = await options.backend(body, backendCalls.length, init.signal);
+      const status = res && res.status ? res.status : 200;
+      const payload = res && res.status ? res.body : res;
+      return { ok: status < 400, status, headers: { get: () => 'application/json' }, text: async () => JSON.stringify(payload), json: async () => plain(payload) };
+    }
+    throw new Error('unexpected fetch: ' + url);
+  };
+
+  const h = makeHost({ chat, storage, fetch, agentSettings: options.agentSettings, directorSettings: options.directorSettings });
+  /* 覆盖世界书与变量读取接口，模拟真实酒馆中的多源变量（MVU + 小白X聊天变量 + 角色卡变量） */
+  Object.keys(h.worldbooks).forEach((k) => delete h.worldbooks[k]);
+  Object.assign(h.worldbooks, worldbooks);
+  h.host.TavernHelper.getCharWorldbookNames = () => ({ primary: Object.keys(worldbooks)[0], additional: [] });
+  h.ctx.chatMetadata.variables = variables.chat;
+  h.host.TavernHelper.getVariables = (opt) => {
+    if (!opt || opt.type === 'chat') return plain(variables.chat);
+    if (opt.type === 'character') return plain(variables.character);
+    if (opt.type === 'global') return plain(variables.global);
+    if (opt.type === 'message') return plain(variables.mvu);
+    return {};
+  };
+  return { ...h, backendCalls, variables };
+}
+
+const nativeReply = (message, finish = 'stop') => ({ choices: [{ index: 0, finish_reason: finish, message: { role: 'assistant', ...message } }] });
+const toolCall = (name, args, id = 'c_' + name) => ({ id, type: 'function', function: { name, arguments: JSON.stringify(args) } });
+
+test('总导演真 Agent 单会话原生工具循环：并行查阅世界书与小白X变量、白名单拒写、一轮成稿定稿清史、实时可观测日志', async () => {
+  const jobSnapshots = [];
+  const h = makeNativeDirectorHost({
+    backend: (body, seq) => {
+      const sys = String(body.messages[0].content);
+      if (sys.includes('分卷导演 · 场记')) return nativeReply({ content: judge() });
+      if (body.messages.some((m) => String(m.content || '').includes('## 结构重构'))) {
+        /* 定稿后插话触发 L2 重构：总导演同样可在重构里调只读工具查变量！ */
+        if (!body.messages.some((m) => m.role === 'tool')) {
+          return nativeReply({ tool_calls: [toolCall('read', { path: 'var:/mvu.json#/stat_data/资金' }, 'c_mvu')] }, 'tool_calls');
+        }
+        assert.ok(body.messages.at(-1).content.includes('"铜币": 24'));
+        return nativeReply({ content: delivery(OUTLINE_V2, { title: '雨季的钟', phases: [{ n: 1, title: '渡口改道' }, { n: 2, title: '对岸的钟' }], new_characters: [] }, brief('重构 Phase 1'), '核实资金变量后重构') });
+      }
+      /* 单会话开卷：第 1 轮并行查世界书绿灯条目全文 + 小白X变量深层结构 + 搜历史楼层，并顺手试探写工具 write（应被拦截） */
+      if (seq === 1) {
+        return nativeReply({
+          content: '',
+          tool_calls: [
+            toolCall('read', { path: 'wb:/命定之诗/格温' }, 'c_wb'),
+            toolCall('read', { path: 'var:/chat.json#/人物状态/格温' }, 'c_var'),
+            toolCall('grep', { path: 'chat:/', pattern: '旧铜币' }, 'c_grep'),
+            toolCall('write', { path: 'wb:/命定之诗/格温', content: '非法篡改' }, 'c_bad_write'),
+          ],
+        }, 'tool_calls');
+      }
+      if (seq === 2) {
+        /* 验证工具返回里拿到了世界书后段隐秘设定、小白X变量完整结构、历史命中，且 write 被拦截拒绝；一轮直接交付完整四段成果 */
+        const toolMsgs = body.messages.filter((m) => m.role === 'tool');
+        assert.equal(toolMsgs.length, 4);
+        assert.ok(toolMsgs[0].content.includes('中后段隐秘设定：格温其实保管着旧港渡船的备用舵钥匙'));
+        assert.ok(toolMsgs[1].content.includes('"好感度": 68') && toolMsgs[1].content.includes('备用舵钥匙'));
+        assert.ok(toolMsgs[2].content.includes('chat:/0:1:') && toolMsgs[2].content.includes('旧铜币'));
+        assert.match(toolMsgs[3].content, /未执行.*禁止调用「write」/);
+        return nativeReply({ content: delivery(OUTLINE, INDEX, brief('Phase 1 · 雨夜')) });
+      }
+      return nativeReply({ content: 'ok' });
+    },
+  });
+  try {
+    await h.director.ready();
+    /* 验证白名单列表：只含只读工具，严禁出现写/删/脚本/联网工具 */
+    const listed = h.director.listReadonlyTools().map((t) => t.name);
+    for (const okTool of ['ls', 'read', 'grep']) assert.ok(listed.includes(okTool), '缺少核心只读工具 ' + okTool);
+    for (const badTool of ['write', 'edit', 'remove', 'run_js', 'slash_run', 'web_fetch', 'device_exec', 'delegate_task', 'toolbox']) {
+      assert.ok(!listed.includes(badTool), '禁止向总导演暴露 ' + badTool);
+    }
+
+    const off = h.api.jobs.onChange((job) => {
+      if (job.owner === 'director') jobSnapshots.push({ stage: job.stage, lines: job.lines.slice() });
+    });
+
+    const result = await h.director.activate();
+    assert.deepEqual(plain(result), { done: true });
+
+    /* 1. 验证原世界书未被非法篡改，且不占主助手锁、不写夜梦历史、不带夜梦人格 */
+    assert.ok(h.worldbooks.命定之诗[1].content.includes('中后段隐秘设定') && !h.worldbooks.命定之诗[1].content.includes('非法篡改'));
+    assert.equal(h.agent.isBusy(), false);
+    assert.equal(h.agent.getHistory().length, 0);
+    assert.ok(!h.backendCalls[0].body.messages[0].content.includes('九十九夜梦'));
+
+    /* 2. 验证声明给模型的 tools 白名单只含只读工具，且整轮只发 2 次请求（1 轮工具探索 + 1 轮一气呵成定稿） */
+    const declared = h.backendCalls[0].body.tools.map((t) => t.function.name);
+    assert.ok(declared.includes('ls') && declared.includes('read') && declared.includes('grep'));
+    assert.ok(!declared.some((n) => ['write', 'edit', 'remove', 'run_js', 'toolbox', 'delegate_task'].includes(n)));
+    assert.equal(h.backendCalls.length, 2, '单会话两轮（工具查阅 + 完整交付）直接定稿，不拆四步');
+
+    /* 3. 验证 append-only 前缀缓存：第 2 轮请求严格保留第 1 轮的 System 与初始 User 前缀 */
+    assert.deepEqual(plain(h.backendCalls[1].body.messages.slice(0, 2)), plain(h.backendCalls[0].body.messages.slice(0, 2)));
+
+    /* 4. 验证实时可观测性：jobs 看板实时记录人类可读探索轨迹 */
+    const allLogs = jobSnapshots.flatMap((s) => s.lines).join('\n');
+    assert.ok(allLogs.includes('查阅世界书 wb:/命定之诗/格温'), '实时日志包含世界书路径');
+    assert.ok(allLogs.includes('查看变量 var:/chat.json#/人物状态/格温'), '实时日志包含变量路径');
+    assert.ok(allLogs.includes('搜索历史 chat:/ 关键词「旧铜币」'), '实时日志包含历史检索');
+    assert.ok(allLogs.includes('已拦截未授权工具：write'), '实时日志记录非法写工具拦截');
+
+    /* 5. 定稿清史：草稿删除；随后场记巡检仍是无工具单步（不带 tools，不带探索历史） */
+    assert.equal(await h.readJson(h.dir() + '/draft.json'), null);
+    h.chat.push({ name: '林渡', is_user: true, mes: '我问格温铜币的事。' }, { name: '艾琳', is_user: false, mes: '格温低头拧紧了发条。' });
+    await h.director.patrolNow();
+    const judgeCall = h.backendCalls.find((c) => c.body.messages[0].content.includes('分卷导演 · 场记'));
+    assert.ok(judgeCall, '场记完成巡检');
+    assert.equal(judgeCall.body.tools, undefined, '场记保持无工具轻量架构');
+    assert.equal(judgeCall.body.messages.length, 2, '场记无状态单步，不含编纲探索历史');
+
+    /* 6. 定稿后用户插话修订（L2 重构）：总导演同样能调只读工具核实变量，完成后清空探索记录 */
+    const revised = await h.director.submitFeedback('先查一下 var:/mvu.json 的资金，再把后续改成渡口改道');
+    assert.equal(revised.version, 2);
+    off();
+  } finally { h.dispose(); }
+});
+
+test('上游故障精确断点续传、工作态编纲与重构实时自由插话、连接器静态只读工具过滤', async () => {
+  /* 场景 A：第 1 轮查完世界书落盘断点，第 2 轮上游持续 502 崩溃 → 修好后 resume() 沿原生断点续跑，绝不重复读第 1 轮资料、绝不误降级文本协议 */
+  let upstreamDown = true;
+  const hResume = makeNativeDirectorHost({
+    backend: (body) => {
+      const hasWbTool = body.messages.some((m) => m.role === 'tool' && m.tool_call_id === 'c_wb_once');
+      if (!hasWbTool) {
+        return nativeReply({ tool_calls: [toolCall('read', { path: 'wb:/命定之诗/格温' }, 'c_wb_once')] }, 'tool_calls');
+      }
+      if (upstreamDown) {
+        return { status: 502, body: { error: { message: 'upstream gateway down' } } };
+      }
+      assert.ok(Array.isArray(body.tools) && body.tools.length > 0, '上游 502 不误降级为文本协议，续传仍走原生工具');
+      assert.ok(body.messages.some((m) => m.role === 'tool' && m.content.includes('备用舵钥匙')), '续传时已保留此前查到的世界书结果');
+      return nativeReply({ content: delivery(OUTLINE, INDEX, brief('断点续传成稿')) });
+    },
+  });
+  try {
+    /* 验证宿主已装 MVU 与柏宝书插件：仅暴露静态只读工具，绝不暴露写工具和试算工具 */
+    hResume.host.Mvu = { getMvuData: () => ({ stat_data: { 天气: '大雨' } }), parseMessage: async () => null, replaceMvuData: async () => {} };
+    hResume.host.STBaiBaiBook = { getSnapshot: async () => ({ state: { location: '旧港' } }), query: async () => ({ ok: true }) };
+    hResume.agent.listConnectors();
+    const names = hResume.director.listReadonlyTools().map((t) => t.name);
+    assert.ok(names.includes('mvu_inspect') && names.includes('baibai_query'), '纳入已启用连接器的纯只读查询工具');
+    assert.ok(!names.includes('mvu_apply_update') && !names.includes('mvu_test_update'), '严禁暴露写入与试算工具');
+
+    await hResume.director.ready();
+    await assert.rejects(() => hResume.director.activate(), /502|gateway/);
+    const draft = await hResume.readJson(hResume.dir() + '/draft.json');
+    assert.deepEqual([draft.v, draft.state, draft.protocol, draft.rounds, draft.toolCalls], [2, 'failed', 'native', 1, 1]);
+    assert.ok(draft.messages.some((m) => m.role === 'tool' && m.content.includes('备用舵钥匙')), '工具结果已持久化进 draft.json 断点');
+    assert.equal(await hResume.readJson(hResume.dir() + '/active.json'), null, '失败前绝不提交');
+
+    /* 修好上游后沿断点续编：不再重发 c_wb_once，一次定稿并清空 draft.json */
+    upstreamDown = false;
+    assert.deepEqual(plain(await hResume.director.resume()), { done: true });
+    assert.equal(await hResume.readJson(hResume.dir() + '/draft.json'), null, '续编定稿后清空草稿');
+    assert.equal(hResume.backendCalls.filter((c) => !c.body.messages.some((m) => m.role === 'tool')).length, 1, '绝不重复跑第 1 轮已查工具');
+  } finally { hResume.dispose(); }
+
+  /* 场景 B：工作态自由插话（Inbox 架构）——编纲进行中连点两次插话与重构进行中插话，即时入队零轮询，原任务保留已查资料无缝完成 */
+  let holdPlan = true, holdRestructure = true;
+  const hLive = makeNativeDirectorHost({
+    backend: async (body, seq, signal) => {
+      const waitAbort = () => new Promise((_, reject) => {
+        const abort = () => reject(Object.assign(new Error('Aborted'), { name: 'AbortError' }));
+        if (signal && signal.aborted) abort();
+        else if (signal) signal.addEventListener('abort', abort, { once: true });
+      });
+      const isRestructure = body.messages.some((m) => String(m.content || '').includes('## 结构重构'));
+      if (!isRestructure) {
+        const hasWb = body.messages.some((m) => m.role === 'tool' && m.tool_call_id === 'c_live_wb');
+        const hasInterject1 = body.messages.some((m) => m.role === 'user' && String(m.content).includes('顺手查一下格温的好感度'));
+        const hasInterject2 = body.messages.some((m) => m.role === 'user' && String(m.content).includes('再加一条：雨天不要跳日'));
+        const hasVar = body.messages.some((m) => m.role === 'tool' && m.tool_call_id === 'c_live_var');
+        if (!hasWb) return nativeReply({ tool_calls: [toolCall('read', { path: 'wb:/命定之诗/格温' }, 'c_live_wb')] }, 'tool_calls');
+        if (holdPlan && !hasInterject1) {
+          holdPlan = false;
+          await waitAbort();
+        }
+        assert.ok(hasWb && hasInterject1 && hasInterject2, 'Inbox 连点两次插话全部保留，且不丢此前已查世界书');
+        if (!hasVar) return nativeReply({ tool_calls: [toolCall('read', { path: 'var:/chat.json#/人物状态/格温' }, 'c_live_var')] }, 'tool_calls');
+        assert.ok(body.messages.at(-1).content.includes('"好感度": 68'));
+        return nativeReply({ content: delivery(OUTLINE, { ...INDEX, title: '格温与旧铜币' }, brief('插话后成稿')) });
+      }
+      /* 重构进行中实时插话 */
+      const hasMvu = body.messages.some((m) => m.role === 'tool' && m.tool_call_id === 'c_rs_mvu');
+      const hasRsNote = body.messages.some((m) => m.role === 'user' && String(m.content).includes('把标题改成渡口新局'));
+      if (!hasMvu) return nativeReply({ tool_calls: [toolCall('read', { path: 'var:/mvu.json#/stat_data/资金' }, 'c_rs_mvu')] }, 'tool_calls');
+      if (holdRestructure && !hasRsNote) {
+        holdRestructure = false;
+        await waitAbort();
+      }
+      assert.ok(hasMvu && hasRsNote, '重构中途插话保留已查变量结果并带上新要求');
+      return nativeReply({ content: delivery(OUTLINE_V2, { title: '渡口新局', phases: [{ n: 1, title: '渡口改道' }, { n: 2, title: '对岸的钟' }], new_characters: [] }, brief('重构插话成稿'), '按实时插话改题') });
+    },
+  });
+  try {
+    await hLive.director.ready();
+    const planning = hLive.director.activate();
+    await until(() => !holdPlan, '编纲查完第 1 轮资料并挂起等待第 2 轮');
+    /* 用户连点两次实时插话：全部立即入队不丢单、不换锁、不轮询 */
+    const q1 = await hLive.director.submitFeedback('顺手查一下格温的好感度，把她列为核心人物');
+    const q2 = await hLive.director.submitFeedback('再加一条：雨天不要跳日');
+    assert.deepEqual(plain(q1), { queued: true, kind: 'plan' });
+    assert.deepEqual(plain(q2), { queued: true, kind: 'plan' });
+    assert.deepEqual(plain(await planning), { done: true });
+    assert.equal(hLive.director.getStatus().volume.title, '格温与旧铜币');
+
+    /* 执导中发起重构，中途再实时插话 */
+    const restructuring = hLive.director.restructureNow('手动重构');
+    await until(() => !holdRestructure, '重构查完第 1 轮变量并挂起等待第 2 轮');
+    const qRs = await hLive.director.submitFeedback('把标题改成渡口新局');
+    assert.deepEqual(plain(qRs), { queued: true, kind: 'restructure' });
+    const rsRes = await restructuring;
+    assert.equal(rsRes.version, 2);
+    assert.equal(hLive.director.getStatus().volume.title, '渡口新局');
+    assert.equal(await hLive.readJson(hLive.dir() + '/restructure-draft.json'), null, '重构完成后清理断点');
+  } finally { hLive.dispose(); }
+});
+
+test('对抗审查回归：P1-1/3/4/5/6/7/8/9/10 与 P2-4 边界全覆盖', async () => {
+  /* 1. P1-7 大卡 420 条世界书分级降载 + 超极小预算诚实标注 ls/grep，绝不自相矛盾；P1-8 条目名含 #数字 与尾空格精确对齐 providers.js */
+  const bigEntries = [];
+  for (let i = 0; i < 418; i += 1) {
+    bigEntries.push({ uid: i, name: '常规设定条目_' + i, enabled: true, content: '内容'.repeat(80), strategy: { type: 'selective', keys: ['关键词A_' + i, '关键词B_' + i, '关键词C_' + i, '关键词D_' + i] }, position: { order: 100 } });
+  }
+  bigEntries.push({ uid: 500, name: '末尾关键绿灯角色格温', enabled: true, content: '格温隐秘设定', strategy: { type: 'selective', keys: ['格温'] }, position: { order: 1 } });
+  const booksSpec = [{ name: '超大设定集', tag: '[角色主书]', entries: bigEntries }, { name: '全局规则书', tag: '[全局启用]', entries: [{ uid: 0, name: '全局红线', enabled: true, content: '规则', strategy: { type: 'constant', keys: [] }, position: { order: 50 } }] }];
+  const composedBig = core.composeMaterials([
+    { key: 'books', title: '世界书', text: core.formatWorldbookCatalog(booksSpec).text, weight: 24, preserve: true, render: (cap) => core.formatWorldbookCatalog(booksSpec, cap).text },
+    { key: 'floors', title: '近期正文', text: '正文'.repeat(4000), weight: 40, tail: true },
+  ], 34000);
+  assert.ok(composedBig.text.includes('末尾关键绿灯角色格温') && composedBig.text.includes('全局红线'), '420 条大卡自动切入紧凑/精简分级目录，末尾绿灯与全局书零丢失');
+  const tinyCatalog = core.formatWorldbookCatalog(booksSpec, 1500);
+  assert.equal(tinyCatalog.truncated, true);
+  assert.ok(tinyCatalog.omitted > 0 && tinyCatalog.text.includes('全局规则书') && tinyCatalog.text.includes('ls("wb:/') && !tinyCatalog.text.includes('未截断'), '极端小预算下诚实标注省略条数并给 ls 提示，不把全局书整本吃掉');
+
+  /* P1-8 实测：同名/含 #数字 / 尾空格 的条目路径送进真实 VFS read，100% 命中原条目不撞 uid */
+  const hHash = makeNativeDirectorHost({
+    worldbooks: {
+      测试书: [
+        { uid: 7, name: '旧港规矩', enabled: true, content: '这是 uid=7 的旧港规矩正文', strategy: { type: 'constant', keys: [] }, position: { order: 100 } },
+        { uid: 3, name: '设定#7', enabled: true, content: '这是 uid=3 的设定#7 正文', strategy: { type: 'selective', keys: ['设定7'] }, position: { order: 50 } },
+        { uid: 9, name: '尾空格 ', enabled: true, content: '这是 uid=9 的尾空格正文', strategy: { type: 'selective', keys: ['空格'] }, position: { order: 10 } },
+      ],
+    },
+  });
+  try {
+    const idxText = core.indexWorldbook('测试书', hHash.worldbooks.测试书);
+    const paths = idxText.split('\n').slice(1).map((line) => line.replace(/^- /, '').split(' ｜ ')[0]);
+    const pHash = paths.find((p) => p.includes('%237%233'));
+    const pSpace = paths.find((p) => p.includes('%239'));
+    assert.ok(pHash && pSpace, '含 #数字 与尾空格条目自动追加 #uid：' + paths.join(', '));
+    assert.match((await hHash.vfs.read(pHash)).text, /uid=3 的设定#7 正文/);
+    assert.match((await hHash.vfs.read(pSpace)).text, /uid=9 的尾空格正文/);
+  } finally { hHash.dispose(); }
+
+  /* 2. P1-4：4 类非「不支持 tools」的 400 错误绝不误降级为文本协议破坏原生断点；风控 400 直接失败并保留原生断点 */
+  let overflowOnce = true;
+  const hNoFalseFallback = makeNativeDirectorHost({
+    backend: (body) => {
+      if (overflowOnce) {
+        overflowOnce = false;
+        return { status: 400, body: { error: { message: "This model's maximum context length is 8192 tokens (7500 in the messages, 700 in the functions)." } } };
+      }
+      assert.ok(Array.isArray(body.tools) && body.tools.length > 0, '含 "in the functions" 的上下文超限 400 走窗口压缩重试，绝不误降级文本协议');
+      return nativeReply({ content: delivery(OUTLINE, INDEX, brief('超限重试未降级')) });
+    },
+  });
+  try {
+    await hNoFalseFallback.director.ready();
+    assert.deepEqual(plain(await hNoFalseFallback.director.activate()), { done: true });
+  } finally { hNoFalseFallback.dispose(); }
+
+  const hFilter = makeNativeDirectorHost({
+    backend: () => ({ status: 400, body: { error: { message: 'Request rejected by content_filter safety policy' } } }),
+  });
+  try {
+    await hFilter.director.ready();
+    await assert.rejects(() => hFilter.director.activate(), /content_filter|safety/);
+    assert.equal(hFilter.backendCalls.length, 1, '风控 400 直接失败，绝不尝试降级为文本协议重试');
+  } finally { hFilter.dispose(); }
+
+  /* 3. P1-6 忽略自检一键定稿出口（commitDraftNow） */
+  const badCheck = '<self_check>\n1. 通过\n2. 命名嗅探：未通过，存在罐头名\n</self_check>\n' + `<volume_outline>\n${OUTLINE}\n</volume_outline>\n<volume_index>\n${JSON.stringify(INDEX)}\n</volume_index>\n<first_brief>\n${brief('软失败放行')}\n</first_brief>`;
+  const hForce = makeHost({ replies: { plan: [badCheck, badCheck, badCheck] } });
+  try {
+    await hForce.director.ready();
+    await assert.rejects(() => hForce.director.activate(), /自动修订 2 次后仍未通过质检/);
+    assert.equal(hForce.director.getStatus().plan.canForceCommit, true, '硬结构合法仅自检软失败时开放一键定稿出口');
+    assert.deepEqual(plain(await hForce.director.commitDraftNow()), { done: true, forced: true });
+    assert.equal(hForce.director.getStatus().state, 'running');
+    assert.equal(await hForce.readJson(hForce.dir() + '/draft.json'), null);
+  } finally { hForce.dispose(); }
+
+  /* 4. P1-9 L2 重构持久化断点续传（502 崩溃 → 落盘 restructure-draft.json → 模拟刷新重加载 → resumeRestructure() 不重查第 1 轮变量） */
+  let rsDown = true;
+  const hRsResume = makeNativeDirectorHost({
+    backend: (body) => {
+      const isRs = body.messages.some((m) => String(m.content || '').includes('## 结构重构'));
+      if (!isRs) return nativeReply({ content: delivery(OUTLINE, INDEX, brief('开卷')) });
+      const hasMvu = body.messages.some((m) => m.role === 'tool' && m.tool_call_id === 'c_rs_persist');
+      if (!hasMvu) return nativeReply({ tool_calls: [toolCall('read', { path: 'var:/mvu.json#/stat_data/资金' }, 'c_rs_persist')] }, 'tool_calls');
+      if (rsDown) return { status: 502, body: { error: { message: 'upstream 502' } } };
+      return nativeReply({ content: delivery(OUTLINE_V2, { title: '续传重构卷', phases: [{ n: 1, title: '渡口改道' }, { n: 2, title: '对岸的钟' }], new_characters: [] }, brief('重构续传'), '断点续传完成') });
+    },
+  });
+  try {
+    await hRsResume.director.ready();
+    await hRsResume.director.activate();
+    await assert.rejects(() => hRsResume.director.restructureNow('核心人物退场'), /502/);
+    const rsDraft = await hRsResume.readJson(hRsResume.dir() + '/restructure-draft.json');
+    assert.deepEqual([rsDraft.v, rsDraft.state, rsDraft.rounds, rsDraft.toolCalls, rsDraft.reason], [2, 'failed', 1, 1, '核心人物退场']);
+    assert.ok(hRsResume.director.getStatus().restructureDraft && hRsResume.director.getStatus().restructureDraft.hasCheckpoint);
+
+    rsDown = false;
+    const rsDone = await hRsResume.director.resumeRestructure();
+    assert.equal(rsDone.version, 2);
+    assert.equal(await hRsResume.readJson(hRsResume.dir() + '/restructure-draft.json'), null, '重构续传完成后删除断点文件');
+    const rsNoToolCalls = hRsResume.backendCalls.filter((c) => c.body.messages.some((m) => String(m.content || '').includes('## 结构重构')) && !c.body.messages.some((m) => m.role === 'tool'));
+    assert.equal(rsNoToolCalls.length, 1, '续传沿用已读变量，不重跑第 1 轮工具调用');
+  } finally { hRsResume.dispose(); }
+
+  /* 5. P1-5 压缩后的工具结果落盘进 draft.json 后，续传绝不回填 seen，模型再次 read 能拿回完整全文 */
+  const longText = '开头背景。'.repeat(1200) + '【压缩后必须能重读拿回的终极密钥：旧钟底盖刻字】';
+  let compressTriggered = false, compUpstreamDown = true;
+  const hComp = makeNativeDirectorHost({
+    worldbooks: {
+      命定之诗: [
+        { uid: 0, name: '长设定A', enabled: true, content: longText, strategy: { type: 'selective', keys: ['A'] }, position: { order: 100 } },
+        { uid: 1, name: '长设定B', enabled: true, content: '填充B。'.repeat(40), strategy: { type: 'selective', keys: ['B'] }, position: { order: 90 } },
+        { uid: 2, name: '长设定C', enabled: true, content: '填充C。'.repeat(40), strategy: { type: 'selective', keys: ['C'] }, position: { order: 80 } },
+        { uid: 3, name: '长设定D', enabled: true, content: '填充D。'.repeat(40), strategy: { type: 'selective', keys: ['D'] }, position: { order: 70 } },
+        { uid: 4, name: '长设定E', enabled: true, content: '填充E。'.repeat(40), strategy: { type: 'selective', keys: ['E'] }, position: { order: 60 } },
+      ],
+    },
+    backend: (body) => {
+      const hasA = body.messages.some((m) => m.role === 'tool' && m.tool_call_id === 'c_a');
+      const hasB = body.messages.some((m) => m.role === 'tool' && m.tool_call_id === 'c_b');
+      const hasVar = body.messages.some((m) => m.role === 'tool' && m.tool_call_id === 'c_mvu_cp');
+      const reRead = body.messages.find((m) => m.role === 'tool' && m.tool_call_id === 'c_a_again');
+      if (!hasA) return nativeReply({ tool_calls: [toolCall('read', { path: 'wb:/命定之诗/长设定A' }, 'c_a')] }, 'tool_calls');
+      if (!hasB) return nativeReply({ tool_calls: [toolCall('read', { path: 'wb:/命定之诗/长设定B' }, 'c_b'), toolCall('read', { path: 'wb:/命定之诗/长设定C' }, 'c_c'), toolCall('read', { path: 'wb:/命定之诗/长设定D' }, 'c_d'), toolCall('read', { path: 'wb:/命定之诗/长设定E' }, 'c_e')] }, 'tool_calls');
+      if (!compressTriggered) {
+        compressTriggered = true;
+        /* 收紧到 34000 tokens：刚好让第 1 条长设定 c_a 被截短并打标 compressed:true，保留其余 4 条不折叠 */
+        return { status: 400, body: { error: { message: "This model's maximum context length is 34000 tokens" } } };
+      }
+      if (!hasVar) {
+        const msgA = body.messages.find((m) => m.role === 'tool' && m.tool_call_id === 'c_a');
+        assert.ok(msgA && msgA.content.includes('已压缩以节省上下文'), 'c_a 已在上下文中被截短压缩');
+        /* 再做 1 轮工具调用，将带 compressed:true 的 c_a 真实落盘进 draft.json */
+        return nativeReply({ tool_calls: [toolCall('read', { path: 'var:/mvu.json' }, 'c_mvu_cp')] }, 'tool_calls');
+      }
+      if (compUpstreamDown) {
+        return { status: 502, body: { error: { message: '502 after compressed checkpoint' } } };
+      }
+      if (!reRead) {
+        return nativeReply({ tool_calls: [toolCall('read', { path: 'wb:/命定之诗/长设定A' }, 'c_a_again')] }, 'tool_calls');
+      }
+      assert.ok(reRead.content.includes('旧钟底盖刻字'), '续传后重读被压缩过的条目，拿到完整原文而非 320 字残片');
+      return nativeReply({ content: delivery(OUTLINE, INDEX, brief('重读全文成稿')) });
+    },
+  });
+  try {
+    await hComp.director.ready();
+    await assert.rejects(() => hComp.director.activate(), /502/);
+    const compDraft = await hComp.readJson(hComp.dir() + '/draft.json');
+    const savedA = compDraft.messages.find((m) => m.role === 'tool' && m.tool_call_id === 'c_a');
+    assert.equal(savedA && savedA.compressed, true, 'draft.json 准确保留了 compressed:true 标记');
+    compUpstreamDown = false;
+    assert.deepEqual(plain(await hComp.director.resume()), { done: true });
+  } finally { hComp.dispose(); }
+
+  /* 6. P1-3 跨聊天重构插话绝不串用旧聊天探索会话 */
+  let holdChatARs = true;
+  const hCross = makeNativeDirectorHost({
+    backend: async (body, seq, signal) => {
+      const waitAbort = () => new Promise((_, reject) => {
+        const abort = () => reject(Object.assign(new Error('Aborted'), { name: 'AbortError' }));
+        if (signal && signal.aborted) abort();
+        else if (signal) signal.addEventListener('abort', abort, { once: true });
+      });
+      const isRs = body.messages.some((m) => String(m.content || '').includes('## 结构重构'));
+      if (!isRs) return nativeReply({ content: delivery(OUTLINE, INDEX, brief('开卷')) });
+      const isChatBNote = body.messages.some((m) => String(m.content || '').includes('只给聊天B的重构意见'));
+      if (!isChatBNote) {
+        if (!body.messages.some((m) => m.role === 'tool')) {
+          return nativeReply({ tool_calls: [toolCall('read', { path: 'wb:/命定之诗/格温' }, 'c_chatA_only')] }, 'tool_calls');
+        }
+        holdChatARs = false;
+        await waitAbort();
+      }
+      assert.ok(!body.messages.some((m) => m.role === 'tool' && m.tool_call_id === 'c_chatA_only'), 'P1-3 聊天 B 重构绝不夹带聊天 A 的工具结果');
+      return nativeReply({ content: delivery(OUTLINE_V2, { title: '聊天B纯净重构', phases: [{ n: 1, title: '渡口改道' }, { n: 2, title: '对岸的钟' }], new_characters: [] }, brief('聊天B重构'), '聊天B独立修订') });
+    },
+  });
+  try {
+    await hCross.director.ready();
+    await hCross.director.activate(); /* 聊天 A 开卷 */
+    const chatAMeta = hCross.ctx.chatMetadata;
+    /* 切到聊天 B 并开卷 */
+    hCross.ctx.chatId = 'chat-B';
+    hCross.ctx.chatMetadata = { variables: {}, reader_ii_enabled: false };
+    await hCross.emit('CHAT_CHANGED');
+    await hCross.director.ready();
+    await hCross.director.activate();
+    const chatBMeta = hCross.ctx.chatMetadata;
+    /* 切回聊天 A 发起重构并挂起 */
+    hCross.ctx.chatId = 'chat-1';
+    hCross.ctx.chatMetadata = chatAMeta;
+    await hCross.emit('CHAT_CHANGED');
+    await hCross.director.ready();
+    const rsA = hCross.director.restructureNow('聊天A重构');
+    await until(() => !holdChatARs, '聊天A重构查完工具并挂起');
+    /* 切到聊天 B 立刻提修订意见 */
+    hCross.ctx.chatId = 'chat-B';
+    hCross.ctx.chatMetadata = chatBMeta;
+    await hCross.emit('CHAT_CHANGED');
+    await hCross.director.ready();
+    const rsB = await hCross.director.submitFeedback('只给聊天B的重构意见');
+    assert.equal(await rsA, null);
+    assert.equal(rsB.version, 2);
+    assert.equal(hCross.director.getStatus().volume.title, '聊天B纯净重构');
+  } finally { hCross.dispose(); }
+
+  /* 7. P1-1 定稿写盘窗口期间插话绝不回写 draft.json、绝不报 TypeError，无缝衔接转入重构；P2-4 自定义声明式连接器不暴露给总导演 */
+  const hCommitRace = makeNativeDirectorHost({
+    backend: (body) => {
+      if (body.messages.some((m) => String(m.content || '').includes('## 结构重构'))) {
+        return nativeReply({ content: delivery(OUTLINE_V2, { title: '落盘后接上的重构', phases: [{ n: 1, title: '渡口改道' }, { n: 2, title: '对岸的钟' }], new_characters: [] }, brief('落盘后重构'), '接上插话') });
+      }
+      return nativeReply({ content: delivery(OUTLINE, INDEX, brief('先落盘')) });
+    },
+  });
+  try {
+    /* P2-4：模拟注入一个用户自定义连接器（origin: 'custom'），总导演必须忽略它 */
+    hCommitRace.host.DangerPlugin = { probe: () => true, dump: () => ({ secret: 1 }) };
+    hCommitRace.agent.saveSettings({
+      connectors: [{ id: 'custom_danger', title: '自定义危险插件', detect: 'DangerPlugin.probe', tools: [{ name: 'danger_read', summary: '自定义读', effect: 'read', call: 'DangerPlugin.dump', params: [] }] }],
+      connectorChoices: { custom_danger: true },
+    });
+    hCommitRace.agent.listConnectors();
+    assert.ok(!hCommitRace.director.listReadonlyTools().some((t) => t.name === 'danger_read'), 'P2-4 严禁向总导演暴露用户自定义连接器工具');
+
+    await hCommitRace.director.ready();
+    const rawWrite = hCommitRace.vfs.write.bind(hCommitRace.vfs);
+    let releaseCommit, commitHit = false;
+    const commitGate = new Promise((resolve) => { releaseCommit = resolve; });
+    hCommitRace.vfs.write = async (path, text) => {
+      if (path.endsWith('/active.json') && !commitHit) {
+        commitHit = true;
+        await commitGate;
+      }
+      return rawWrite(path, text);
+    };
+    const actP = hCommitRace.director.activate();
+    await until(() => commitHit, '进入不可逆写 active.json 窗口');
+    const fbP = hCommitRace.director.submitFeedback('定稿瞬间补充：把后续改成渡口');
+    releaseCommit();
+    assert.deepEqual(plain(await actP), { done: true });
+    const fbRes = await fbP;
+    assert.equal(fbRes.version, 2, '定稿瞬间插话自动等落盘完成后平滑转入重构');
+    assert.equal(await hCommitRace.readJson(hCommitRace.dir() + '/draft.json'), null, '绝不把已删的 draft.json 写回磁盘');
+  } finally { hCommitRace.dispose(); }
+});
+
+test('原生工具不支持时自动回退文本协议；重复空转拦截与沿用 agent.maxSteps 预算收尾', async () => {
+  /* 场景 A：原生请求返回 400 不支持 tools → 自动回退文本协议并成功查阅世界书一轮完成编纲 */
+  const textSeen = [];
+  const hFallback = makeNativeDirectorHost({
+    backend: (body) => {
+      if (Array.isArray(body.tools) && body.tools.length) {
+        return { status: 400, body: { error: { message: 'Unrecognized request argument supplied: tools' } } };
+      }
+      textSeen.push(plain(body.messages));
+      const last = String(body.messages.at(-1).content);
+      if (last.includes('<action_result name="read" status="ok">')) {
+        assert.ok(last.includes('备用舵钥匙'));
+        return nativeReply({ content: delivery(OUTLINE, INDEX, brief('文本回退')) });
+      }
+      return nativeReply({ content: '<action name="read">\n<param name="path">wb:/命定之诗/格温</param>\n</action>' });
+    },
+  });
+  try {
+    await hFallback.director.ready();
+    assert.deepEqual(plain(await hFallback.director.activate()), { done: true });
+    assert.equal(hFallback.backendCalls.filter((c) => Array.isArray(c.body.tools) && c.body.tools.length).length, 1, '原生失败被记住，只试一次');
+    assert.ok(textSeen[0][0].content.includes('<action name="工具名">'), '回退后 System 切换为文本协议工具手册');
+  } finally { hFallback.dispose(); }
+
+  /* 场景 B：重复空转拦截（模型反复用相同参数查同一条）+ 越权路径拦截（gh:/ 与 dev:/） */
+  let repeatTurns = 0;
+  const hIdle = makeNativeDirectorHost({
+    backend: (body) => {
+      const last = String(body.messages.at(-1).content);
+      if (body.tool_choice === 'none') {
+        assert.match(last, /拦截空转/);
+        return nativeReply({ content: delivery(OUTLINE, INDEX, brief('拦截后交付')) });
+      }
+      repeatTurns += 1;
+      if (repeatTurns === 1) return nativeReply({ tool_calls: [toolCall('read', { path: 'gh:/owner/repo/README.md' }, 'c_gh')] }, 'tool_calls');
+      /* 连续两次重复读取同一条，触发空转拦截 */
+      return nativeReply({ tool_calls: [toolCall('read', { path: 'wb:/命定之诗/旧港规矩' }, 'c_dup_' + repeatTurns)] }, 'tool_calls');
+    },
+  });
+  try {
+    await hIdle.director.ready();
+    assert.deepEqual(plain(await hIdle.director.activate()), { done: true });
+    assert.match(hIdle.backendCalls[1].body.messages.at(-1).content, /禁止访问 gh:\//);
+    assert.equal(hIdle.backendCalls.at(-1).body.tool_choice, 'none', '连续重复调用触发 tool_choice=none 强制收尾');
+    assert.ok(repeatTurns <= 4, '防死循环及时拦截');
+  } finally { hIdle.dispose(); }
+
+  /* 场景 C：直接沿用 agent.getSettings().maxSteps（设为 2 轮），耗尽预算后提示收尾交付 */
+  let budgetCalls = 0;
+  const hBudget = makeNativeDirectorHost({
+    agentSettings: { maxSteps: 2 },
+    backend: (body) => {
+      const last = String(body.messages.at(-1).content);
+      if (body.tool_choice === 'none') {
+        assert.match(last, /工具轮数预算上限（2 轮）/);
+        return nativeReply({ content: delivery(OUTLINE, INDEX, brief('预算收尾')) });
+      }
+      budgetCalls += 1;
+      if (budgetCalls === 1) return nativeReply({ tool_calls: [toolCall('read', { path: 'wb:/命定之诗/旧港规矩' }, 'c_b1')] }, 'tool_calls');
+      if (budgetCalls === 2) return nativeReply({ tool_calls: [toolCall('read', { path: 'wb:/命定之诗/格温' }, 'c_b2')] }, 'tool_calls');
+      throw new Error('不应在 maxSteps=2 耗尽后再发起工具调用');
+    },
+  });
+  try {
+    await hBudget.director.ready();
+    assert.deepEqual(plain(await hBudget.director.activate()), { done: true });
+    assert.equal(budgetCalls, 2, '精确执行 agent.maxSteps=2 轮工具后收尾');
+  } finally { hBudget.dispose(); }
+});
+
+test('第二轮对抗审查回归：P1-1~4 与 P2-1~6 全覆盖', async () => {
+  /* 1. P2-2 inspectSelfCheck：捕获中文「失败」与「通过，但…仍有硬伤，待修改」，绝不误杀正常句 */
+  assert.equal(core.inspectSelfCheck('2. 活人关系：失败').length, 1, '捕获独立中文「失败」');
+  assert.equal(core.inspectSelfCheck('2. 活人关系：失败，硬造了内讧').length, 1, '捕获「失败，原因」');
+  assert.equal(core.inspectSelfCheck('3. 转场：通过，但 Phase 3 转场仍有硬伤，待修改').length, 1, '捕获「通过，但…待修改」');
+  assert.equal(core.inspectSelfCheck([
+    '1. 命名嗅探检验：通过，无需修改',
+    '8. 活人关系：通过（玩家强攻失败均已接住）',
+    '3. 转场：通过，但此前发现有一处小问题，已修正',
+    '4. 红线核查：通过，但不存在问题',
+  ].join('\n')).length, 0, '不误杀正常通过与已修正条目');
+
+  /* 2. P2-5 超大 40 本书 × 30 条在 4000 字预算下严格 <= 4000 且完整保留诚实附注 */
+  const books40 = [];
+  for (let b = 0; b < 40; b += 1) {
+    const entries = [];
+    for (let e = 0; e < 30; e += 1) {
+      entries.push({ uid: e, name: `卷${b}_设定条目_${e}`, enabled: true, content: '设定正文'.repeat(40), strategy: { type: 'selective', keys: [`词${b}_${e}`] }, position: { order: 100 - e } });
+    }
+    books40.push({ name: `世界书_${String(b + 1).padStart(2, '0')}`, tag: '[全局启用]', entries });
+  }
+  const cat40 = core.formatWorldbookCatalog(books40, 4000);
+  assert.ok(cat40.text.length <= 4000, '40 本 × 30 条输出长度必须严格不超过预算 4000，实际：' + cat40.text.length);
+  assert.equal(cat40.truncated, true);
+  assert.ok(cat40.omitted > 0 && cat40.text.includes('ls("wb:/') && cat40.text.includes('grep("wb:/') && !cat40.text.includes('未截断'), '诚实总附注与补查指令完整保留在末尾');
+
+  /* 3. P1-4 providers.js 的 ls / grep / read 与 indexWorldbook 对带 #数字 和尾空格条目 100% 一致 */
+  const hHash2 = makeNativeDirectorHost({
+    worldbooks: {
+      测试书: [
+        { uid: 7, name: '旧港规矩', enabled: true, content: '这是 uid=7 的旧港规矩正文', strategy: { type: 'constant', keys: [] }, position: { order: 100 } },
+        { uid: 3, name: '设定#7', enabled: true, content: '这是 uid=3 的设定#7 专属内容', strategy: { type: 'selective', keys: ['设定7'] }, position: { order: 50 } },
+        { uid: 9, name: '尾空格 ', enabled: true, content: '这是 uid=9 的尾空格专属内容', strategy: { type: 'selective', keys: ['空格'] }, position: { order: 10 } },
+      ],
+    },
+  });
+  try {
+    const listed = await hHash2.vfs.list('wb:/测试书');
+    const lsNames = listed.items.map((x) => x.name);
+    assert.ok(lsNames.includes('设定#7#3') && lsNames.includes('尾空格 #9'), 'ls 侧与目录一致追加 #uid：' + lsNames.join(', '));
+    const lsHashPath = 'wb:/' + encodeURIComponent('测试书') + '/' + encodeURIComponent('设定#7#3');
+    assert.match((await hHash2.vfs.read(lsHashPath)).text, /uid=3 的设定#7 专属内容/);
+    /* 模型手敲不带 #3 的全名路径，pick 也应优先唯一精确匹配 uid=3 而非误按 #7 找 uid=7 */
+    const rawHashPath = 'wb:/' + encodeURIComponent('测试书') + '/' + encodeURIComponent('设定#7');
+    assert.match((await hHash2.vfs.read(rawHashPath)).text, /uid=3 的设定#7 专属内容/);
+    /* grep 返回路径送回 read 也必须命中 uid=3 */
+    const gr = await hHash2.vfs.grep('wb:/测试书', 'uid=3');
+    assert.equal(gr.total, 1);
+    const grepPath = gr.hits[0].replace(/:\d+:.*$/, '');
+    assert.match((await hHash2.vfs.read(grepPath)).text, /uid=3 的设定#7 专属内容/);
+
+    /* 同时验证 vfs.grep 在任务级中止时如实返回 aborted: true 与实际 scanned，不再谎报扫描完所有文件 */
+    const ac = new AbortController();
+    ac.abort();
+    const abortedGrep = await hHash2.vfs.grep('wb:/测试书', '不存在的词', { signal: ac.signal });
+    assert.deepEqual([abortedGrep.aborted, abortedGrep.scanned, abortedGrep.totalFiles], [true, 0, 3]);
+    const tempReg = hHash2.modules.createRegistry();
+    hHash2.modules.installCoreTools(tempReg, { vfs: hHash2.vfs, env: { host: hHash2.host, document: hHash2.host.document } });
+    const grepToolDef = tempReg.find('grep');
+    const toolOut = await grepToolDef.run({ path: 'wb:/测试书', pattern: '不存在的词' }, { signal: ac.signal });
+    assert.match(toolOut, /检索被中断，结果不完整/);
+  } finally { hHash2.dispose(); }
+
+  /* 4. P1-1 插话落在 grep 工具执行期间：绝不中止本地只读 grep，不截断结果、不锁死 seen，完整结果与插话一起进入下一轮 */
+  let releaseGrep, grepEntered = false, grepSignals = [];
+  const grepGate = new Promise((resolve) => { releaseGrep = resolve; });
+  const hToolRace = makeNativeDirectorHost({
+    backend: (body) => {
+      const toolMsgs = body.messages.filter((m) => m.role === 'tool');
+      if (!toolMsgs.length) {
+        return nativeReply({
+          tool_calls: [
+            toolCall('grep', { path: 'wb:/命定之诗', pattern: '备用舵钥匙' }, 'c_grep_1'),
+            toolCall('grep', { path: 'wb:/命定之诗', pattern: '宵禁' }, 'c_grep_2'),
+          ],
+        }, 'tool_calls');
+      }
+      assert.equal(toolMsgs.length, 2, '两项 grep 均完整执行，不因中途插话被截断');
+      assert.ok(toolMsgs[0].content.includes('备用舵钥匙') && !toolMsgs[0].content.includes('没有命中'), '第 1 项 grep 命中完整');
+      assert.ok(toolMsgs[1].content.includes('宵禁') && !toolMsgs[1].content.includes('没有命中'), '第 2 项 grep 命中完整');
+      assert.ok(body.messages.some((m) => m.role === 'user' && String(m.content).includes('工具执行中插话：加一条暗线')), '插话立即在工具完成后被消费并附在下一轮');
+      return nativeReply({ content: delivery(OUTLINE, { ...INDEX, title: '工具插话零截断' }, brief('完整成稿')) });
+    },
+  });
+  try {
+    await hToolRace.director.ready();
+    const rawGrep = hToolRace.vfs.grep.bind(hToolRace.vfs);
+    hToolRace.vfs.grep = async (p, pat, opts) => {
+      grepSignals.push(opts && opts.signal);
+      if (!grepEntered) {
+        grepEntered = true;
+        await grepGate;
+      }
+      return rawGrep(p, pat, opts);
+    };
+    const actP = hToolRace.director.activate();
+    await until(() => grepEntered, '已进入第一个 grep 执行');
+    const q = await hToolRace.director.submitFeedback('工具执行中插话：加一条暗线');
+    assert.deepEqual(plain(q), { queued: true, kind: 'plan' });
+    assert.equal(grepSignals.every((s) => !s || !s.aborted), true, '插话只打断 LLM 请求，绝不中止本地只读工具信号');
+    releaseGrep();
+    assert.deepEqual(plain(await actP), { done: true });
+    assert.equal(hToolRace.director.getStatus().volume.title, '工具插话零截断');
+  } finally { hToolRace.dispose(); }
+
+  /* 5. P1-2 Gemma "not enabled" 400 与 P2-6 切换导演连接后自动恢复原生工具、且 draft.json 不含死字段 nativeBackup */
+  let modelMode = 'gemma_text_only';
+  const hProtoRecover = makeNativeDirectorHost({
+    backend: (body) => {
+      if (modelMode === 'gemma_text_only') {
+        if (Array.isArray(body.tools) && body.tools.length) {
+          return { status: 400, body: { error: { message: 'Function calling is not enabled for models/gemma-3-27b-it' } } };
+        }
+        const last = String(body.messages.at(-1).content);
+        if (!last.includes('<action_result')) {
+          return nativeReply({ content: '<action name="read">\n<param name="path">wb:/命定之诗/格温</param>\n</action>' });
+        }
+        return { status: 502, body: { error: { message: 'gemma upstream 502 after tool' } } };
+      }
+      /* 切换到新连接后，必须自动恢复原生 tools 而不是被锁死在 text 协议 */
+      assert.ok(Array.isArray(body.tools) && body.tools.length > 0, 'P2-6 切换导演模型后断点续传自动恢复原生 tools 协议');
+      return nativeReply({ content: delivery(OUTLINE, { ...INDEX, title: '换模型恢复原生' }, brief('原生恢复成稿')) });
+    },
+  });
+  try {
+    await hProtoRecover.director.ready();
+    await assert.rejects(() => hProtoRecover.director.activate(), /502/);
+    const savedDraft = await hProtoRecover.readJson(hProtoRecover.dir() + '/draft.json');
+    assert.equal(savedDraft.protocol, 'text', 'Gemma not enabled 400 自动降级为文本协议并落盘');
+    assert.ok(savedDraft.protocolKey, '断点记录了 protocolKey');
+    assert.equal(Object.prototype.hasOwnProperty.call(savedDraft, 'nativeBackup'), false, 'P2-6 draft.json 不再写入无用的 nativeBackup');
+
+    /* 把导演模型切换到另一个支持原生工具的连接 */
+    const nativeConn = hProtoRecover.api.llm.saveConnectionPreset({ name: '原生强模型', apiurl: 'https://director-native-2.test/v1', key: 'k2', model: 'gpt-4o', source: 'openai' });
+    hProtoRecover.api.llm.saveTaskConnection('director', { selected: nativeConn.id, model: 'gpt-4o', enabled: true });
+    modelMode = 'native_capable';
+    assert.deepEqual(plain(await hProtoRecover.director.resume()), { done: true });
+    assert.equal(hProtoRecover.director.getStatus().volume.title, '换模型恢复原生');
+  } finally { hProtoRecover.dispose(); }
+
+  /* 6. P2-1 closing 收尾窗口插话绝不丢失：失败写草稿中途收到插话，等 settled 后自动注入并续跑定稿 */
+  let failLeft = 2, closingHit = false, releaseClosing;
+  const closingGate = new Promise((resolve) => { releaseClosing = resolve; });
+  const hClosing = makeNativeDirectorHost({
+    backend: (body) => {
+      if (failLeft > 0) {
+        failLeft -= 1;
+        return { status: 502, body: { error: { message: 'transient 502' } } };
+      }
+      assert.ok(body.messages.some((m) => m.role === 'user' && String(m.content).includes('收尾窗口插话不能丢')), 'closing 窗口内的插话必须完整送达续跑');
+      return nativeReply({ content: delivery(OUTLINE, { ...INDEX, title: '收尾插话零丢失' }, brief('收尾插话成稿')) });
+    },
+  });
+  try {
+    await hClosing.director.ready();
+    const rawWrite = hClosing.vfs.write.bind(hClosing.vfs);
+    hClosing.vfs.write = async (p, text) => {
+      if (p.endsWith('/draft.json') && !closingHit && text.includes('"state": "failed"')) {
+        closingHit = true;
+        await closingGate;
+      }
+      return rawWrite(p, text);
+    };
+    const pFail = hClosing.director.activate().catch((e) => e);
+    await until(() => closingHit, '进入 catch 写 failed draft.json 的 closing 窗口');
+    const fbPromise = hClosing.director.submitFeedback('收尾窗口插话不能丢');
+    releaseClosing();
+    const err = await pFail;
+    assert.ok(err && /502/.test(String(err.message || err)), '应抛出 502 错误：' + (err && err.message));
+    assert.deepEqual(plain(await fbPromise), { done: true });
+    assert.equal(hClosing.director.getStatus().volume.title, '收尾插话零丢失');
+  } finally { hClosing.dispose(); }
+
+  /* 7. P1-3 + P2-3 + P2-4：已有重构断点不被自动 L2 覆盖；楼层推进后标记 stale 并拒绝续传/强制落盘；saveOutline / rollbackTo 清理旧重构断点 */
+  const softBadRs = '<self_check>\n1. 通过\n2. 活人关系：失败，未改\n</self_check>\n'
+    + `<volume_outline>\n${OUTLINE_V2}\n</volume_outline>\n<volume_index>\n${JSON.stringify({ title: '待定重构', phases: [{ n: 1, title: '渡口改道' }, { n: 2, title: '对岸的钟' }], new_characters: [] })}\n</volume_index>\n<first_brief>\n${brief('待定重构简报')}\n</first_brief>`;
+  let rsSoftFail = true;
+  const hRsGuard = makeNativeDirectorHost({
+    directorSettings: { enabled: true, patrolEvery: 1, l2Cooldown: 0 },
+    backend: (body) => {
+      const sys = String(body.messages[0] && body.messages[0].content || '');
+      if (sys.includes('场记') || sys.includes('运行期')) {
+        return nativeReply({ content: judge({ drift_level: 2, reason: '剧情偏离需要 L2' }) });
+      }
+      if (body.messages.some((m) => String(m.content || '').includes('## 结构重构'))) {
+        if (rsSoftFail) return nativeReply({ content: softBadRs });
+        return nativeReply({ content: delivery(OUTLINE_V2, { title: '正常重构', phases: [{ n: 1, title: '渡口改道' }, { n: 2, title: '对岸的钟' }], new_characters: [] }, brief('正常重构简报'), 'ok') });
+      }
+      return nativeReply({ content: delivery(OUTLINE, INDEX, brief('开卷')) });
+    },
+  });
+  try {
+    await hRsGuard.director.ready();
+    await hRsGuard.director.activate();
+    /* 制造一份含用户意见的重构断点（软失败超限落盘，带 lastOutput 可用于校验强制落盘） */
+    await assert.rejects(() => hRsGuard.director.submitFeedback('用户辛辛苦苦写的重构要求'), /尚未修正/);
+    const savedRs = await hRsGuard.readJson(hRsGuard.dir() + '/restructure-draft.json');
+    assert.ok(savedRs && savedRs.feedback.some((f) => f.text.includes('用户辛辛苦苦写的重构要求')));
+    assert.equal(hRsGuard.director.getStatus().restructureDraft.stale, false);
+    assert.equal(hRsGuard.director.getStatus().restructureDraft.canForceCommit, true);
+
+    /* 自动/手动巡检判 L2：因为已有重构断点，绝不静默覆盖！ */
+    const patrolRes = await hRsGuard.director.patrolNow();
+    assert.deepEqual([patrolRes.level, patrolRes.restructured, patrolRes.restructureSkipped], [2, false, 'existing_draft']);
+    const afterPatrolRs = await hRsGuard.readJson(hRsGuard.dir() + '/restructure-draft.json');
+    assert.equal(afterPatrolRs.epoch, savedRs.epoch, 'P1-3 自动 L2 绝不覆盖已有重构断点');
+
+    /* 聊天推进新楼层后，锚点变化 → stale === true，resumeRestructure 与 commitRestructureDraftNow 均明确报错拒绝 */
+    hRsGuard.chat.push({ name: '林渡', is_user: true, mes: '我推开了钟楼门。' }, { name: '艾琳', is_user: false, mes: '楼上没有人。' });
+    const staleSt = hRsGuard.director.getStatus().restructureDraft;
+    assert.deepEqual([staleSt.stale, staleSt.canForceCommit], [true, false]);
+    await assert.rejects(() => hRsGuard.director.resumeRestructure(), /已失效/);
+    await assert.rejects(() => hRsGuard.director.commitRestructureDraftNow(), /已过期/);
+
+    /* saveOutline 自动清理过期重构断点 */
+    const edited = OUTLINE.replace('#### Phase 3：清点之日', '#### Phase 3：清点之日\n#### Phase 4：余波');
+    await hRsGuard.director.saveOutline(edited);
+    assert.equal(hRsGuard.director.getStatus().restructureDraft, null);
+    assert.equal(await hRsGuard.readJson(hRsGuard.dir() + '/restructure-draft.json'), null, '手动改大纲清理旧重构断点');
+
+    /* 再造一份重构断点，验证 rollbackTo 也清理重构断点 */
+    await assert.rejects(() => hRsGuard.director.restructureNow('回退前断点'), /尚未修正/);
+    assert.ok(hRsGuard.director.getStatus().restructureDraft);
+    const snaps = await hRsGuard.director.listSnapshots();
+    await hRsGuard.director.rollbackTo(snaps.at(-1).id);
+    assert.equal(hRsGuard.director.getStatus().restructureDraft, null);
+    assert.equal(await hRsGuard.readJson(hRsGuard.dir() + '/restructure-draft.json'), null, '回退快照清理旧重构断点');
+  } finally { hRsGuard.dispose(); }
+});
+
+test('第三轮修复回归：过期重构断点不挡自动 L2、自检转折规则、只重交自检、协议选择、残缺参数与编造的工具结果', async () => {
+  /* 1. 自检：「通过，但…」只有真写了没修好的状态才打回；只提到「问题 / 漏洞」这些名词的保留意见放行 */
+  const benign = [
+    '5. 主角站位：通过，但需留意 Phase 2 的节奏问题',
+    '2. 命名嗅探：通过，但原先的罐头名问题已改掉',
+    '7. 反偷懒套路：通过（唯独 Phase 3 稍显平淡，问题不大）',
+    '1. 去塑料件检验：通过，不过此前的漏洞已补上',
+    '6. 活人关系尊重检验：通过，只是关系网里的旧账问题留给下一卷',
+    '3. 连续性与转场检验：通过，无需修改',
+    '2. 命名嗅探：原先未通过，已修正为旧港本土地名',
+  ];
+  for (const line of benign) assert.equal(core.inspectSelfCheck(line).length, 0, '不应打回：' + line);
+  const residual = [
+    '4. 反说教：通过，但 Phase 3 转场仍有硬伤，待修改',
+    '4. 反说教：通过，但还有两处透风',
+    '2. 命名嗅探：通过，但罐头名还没改掉',
+    '6. 活人关系尊重检验：失败，硬造了内讧',
+    '2. 命名嗅探：未通过，罐头名没改掉',
+  ];
+  for (const line of residual) assert.equal(core.inspectSelfCheck(line).length, 1, '应当打回：' + line);
+
+  /* 2. 只重交自检段：识别、合并与软打回提示 */
+  const fullSoft = '<self_check>\n1. 通过\n2. 命名嗅探：未通过，存在罐头人名\n</self_check>\n'
+    + `<volume_outline>\n${OUTLINE}\n</volume_outline>\n<volume_index>\n${JSON.stringify(INDEX)}\n</volume_index>\n<first_brief>\n${brief('Phase 1 · 雨夜')}\n</first_brief>`;
+  const checkOnly = '<self_check>\n1. 通过\n2. 命名嗅探：已修正：换成旧港本土地名\n</self_check>';
+  assert.equal(core.isSelfCheckOnly(checkOnly), true);
+  assert.equal(core.isSelfCheckOnly(fullSoft), false);
+  const merged = core.mergeSelfCheck(fullSoft, checkOnly);
+  assert.ok(merged.includes('已修正：换成旧港本土地名') && !merged.includes('存在罐头人名') && merged.includes('#### Phase 1：雨夜来客'));
+  assert.equal(core.validateFinalDelivery(merged, { userName: '林渡' }).ok, true);
+  assert.match(core.buildRevisionPrompt(['自检未修正'], { softOnly: true }), /只需重新输出一段 <self_check>/);
+  assert.doesNotMatch(core.buildRevisionPrompt(['缺少 <first_brief>']), /只需重新输出一段/);
+
+  /* 3. 端到端：第一稿只有自检软问题 → 模型只重交 <self_check> → 换进上一稿定稿，不整卷重写 */
+  const hSoft = makeHost({ replies: { plan: [fullSoft, checkOnly] } });
+  try {
+    await hSoft.director.ready();
+    assert.deepEqual(plain(await hSoft.director.activate()), { done: true });
+    const plans = hSoft.model.of('plan');
+    assert.equal(plans.length, 2, '只重交了自检段，没有再整卷重写');
+    assert.match(plans[1].last, /只需重新输出一段 <self_check>/);
+    assert.equal(hSoft.director.getStatus().volume.title, INDEX.title);
+    assert.equal(await hSoft.readJson(hSoft.dir() + '/draft.json'), null);
+  } finally { hSoft.dispose(); }
+
+  /* 4. 过期的重构断点：场记判 L2 时照常自动重构，并把旧断点里的用户意见带进去 */
+  const softBadRs = '<self_check>\n1. 通过\n2. 活人关系：失败，未改\n</self_check>\n'
+    + `<volume_outline>\n${OUTLINE_V2}\n</volume_outline>\n<volume_index>\n${JSON.stringify({ title: '待定重构', phases: [{ n: 1, title: '渡口改道' }, { n: 2, title: '对岸的钟' }], new_characters: [] })}\n</volume_index>\n<first_brief>\n${brief('待定重构简报')}\n</first_brief>`;
+  let rsSoftFail = true;
+  const rsPrompts = [];
+  const hStale = makeNativeDirectorHost({
+    directorSettings: { enabled: true, patrolEvery: 1, l2Cooldown: 0 },
+    backend: (body) => {
+      const sys = String(body.messages[0] && body.messages[0].content || '');
+      if (sys.includes('场记') || sys.includes('运行期')) return nativeReply({ content: judge({ drift_level: 2, reason: '剧情偏离需要 L2' }) });
+      if (body.messages.some((m) => String(m.content || '').includes('## 结构重构'))) {
+        rsPrompts.push(String(body.messages[1].content));
+        if (rsSoftFail) return nativeReply({ content: softBadRs });
+        return nativeReply({ content: delivery(OUTLINE_V2, { title: '过期断点后的重构', phases: [{ n: 1, title: '渡口改道' }, { n: 2, title: '对岸的钟' }], new_characters: [] }, brief('自动重构'), '带着旧意见重构') });
+      }
+      return nativeReply({ content: delivery(OUTLINE, INDEX, brief('开卷')) });
+    },
+  });
+  try {
+    await hStale.director.ready();
+    await hStale.director.activate();
+    await assert.rejects(() => hStale.director.submitFeedback('旧断点里用户写的重构要求'), /尚未修正/);
+    assert.ok(hStale.director.getStatus().restructureDraft);
+    hStale.chat.push({ name: '林渡', is_user: true, mes: '我推开了钟楼门。' }, { name: '艾琳', is_user: false, mes: '楼上没有人。' });
+    assert.equal(hStale.director.getStatus().restructureDraft.stale, true);
+    rsSoftFail = false;
+    const res = await hStale.director.patrolNow();
+    assert.equal(res.level, 2);
+    assert.equal(res.restructured, true, '过期的重构断点不再挡住自动 L2');
+    assert.equal(res.restructureSkipped, undefined);
+    assert.ok(rsPrompts.at(-1).includes('旧断点里用户写的重构要求'), '旧断点里的用户意见带进了这次重构');
+    assert.equal(hStale.director.getStatus().volume.title, '过期断点后的重构');
+    assert.equal(hStale.director.getStatus().restructureDraft, null);
+    assert.equal(await hStale.readJson(hStale.dir() + '/restructure-draft.json'), null);
+  } finally { hStale.dispose(); }
+
+  /* 5. 用户手动选的「文本」留下的断点：改回「自动」后同一条连接重新走原生，不被当成降级沿用 */
+  let protoDown = true;
+  const hProto = makeNativeDirectorHost({
+    agentSettings: { toolProtocol: 'text' },
+    backend: (body) => {
+      if (protoDown) {
+        assert.ok(!body.tools, '设为文本时不带 tools');
+        /* System 里的文本协议说明本身就提到 <action_result>，只看对话里有没有真实的工具结果 */
+        if (!body.messages.some((m) => m.role !== 'system' && String(m.content || '').includes('<action_result'))) {
+          return nativeReply({ content: '<action name="read">\n<param name="path">wb:/命定之诗/格温</param>\n</action>' });
+        }
+        return { status: 502, body: { error: { message: 'upstream gateway down' } } };
+      }
+      assert.ok(Array.isArray(body.tools) && body.tools.length > 0, '改回「自动」后同一连接重新走原生');
+      return nativeReply({ content: delivery(OUTLINE, INDEX, brief('改回自动')) });
+    },
+  });
+  try {
+    await hProto.director.ready();
+    await assert.rejects(() => hProto.director.activate(), /502|gateway/);
+    const saved = await hProto.readJson(hProto.dir() + '/draft.json');
+    assert.deepEqual([saved.protocol, saved.protocolFallback], ['text', false]);
+    hProto.agent.saveSettings({ toolProtocol: 'auto' });
+    protoDown = false;
+    assert.deepEqual(plain(await hProto.director.resume()), { done: true });
+  } finally { hProto.dispose(); }
+
+  /* 6. 助手设为「只用原生」而总导演通道不支持原生：改用文本协议跑完，不让编纲直接失败 */
+  const hNativeOnly = makeHost({ agentSettings: { toolProtocol: 'native' } });
+  try {
+    await hNativeOnly.director.ready();
+    const lines = [];
+    const off = hNativeOnly.api.jobs.onChange((job) => { if (job.owner === 'director') lines.push(...job.lines); });
+    assert.deepEqual(plain(await hNativeOnly.director.activate()), { done: true });
+    off();
+    assert.ok(lines.some((line) => /已改用文本协议|已自动切换文本工具协议/.test(line)), '日志说明改用了文本协议');
+  } finally { hNativeOnly.dispose(); }
+
+  /* 7. 残缺的原生参数不原样发回上游：写回历史的 arguments 换成 "{}"，结果里提示模型重发 */
+  const hArgs = makeNativeDirectorHost({
+    backend: (body, seq) => {
+      if (seq === 1) return nativeReply({ tool_calls: [{ id: 'c_bad', type: 'function', function: { name: 'read', arguments: '{"path": "wb:/命定之诗/格' } }] }, 'tool_calls');
+      const echoed = body.messages.find((m) => m.role === 'assistant' && Array.isArray(m.tool_calls));
+      assert.equal(echoed.tool_calls[0].function.arguments, '{}', '残缺的参数换成 {}');
+      const result = body.messages.find((m) => m.role === 'tool' && m.tool_call_id === 'c_bad');
+      assert.match(result.content, /不是合法的 JSON/);
+      return nativeReply({ content: delivery(OUTLINE, INDEX, brief('参数清洗')) });
+    },
+  });
+  try {
+    await hArgs.director.ready();
+    assert.deepEqual(plain(await hArgs.director.activate()), { done: true });
+  } finally { hArgs.dispose(); }
+
+  /* 8. 文本协议下模型自己编出 <action_result>：截掉编造的部分，只执行它真正发出的调用 */
+  const hFake = makeNativeDirectorHost({
+    agentSettings: { toolProtocol: 'text' },
+    backend: (body) => {
+      const last = String(body.messages.at(-1).content);
+      if (!last.includes('<action_result')) {
+        return nativeReply({ content: '<action name="read">\n<param name="path">wb:/命定之诗/格温</param>\n</action>\n<action_result name="read" status="ok">\n编出来的结果\n</action_result>\n' + delivery(OUTLINE, INDEX, brief('不该被当成交付')) });
+      }
+      assert.ok(last.includes('备用舵钥匙') && !last.includes('编出来的结果'), '工具结果来自真实读取');
+      const echoed = body.messages.filter((m) => m.role === 'assistant').at(-1);
+      assert.ok(!String(echoed.content).includes('编出来的结果'), '写回历史的回复不含编造的结果');
+      return nativeReply({ content: delivery(OUTLINE, INDEX, brief('文本协议')) });
+    },
+  });
+  try {
+    await hFake.director.ready();
+    assert.deepEqual(plain(await hFake.director.activate()), { done: true });
+    assert.equal(hFake.director.getStatus().volume.title, INDEX.title);
+  } finally { hFake.dispose(); }
 });

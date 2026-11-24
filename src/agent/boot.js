@@ -150,7 +150,7 @@
     var director = null;
     try {
       director = modules.createDirector(env, kit, llm, {
-        vfs: vfs, skills: skills, connectors: connectors, permissions: agent.permissions, journal: journal, jobs: jobs, agent: agent,
+        vfs: vfs, registry: registry, skills: skills, connectors: connectors, permissions: agent.permissions, journal: journal, jobs: jobs, agent: agent,
         prompt: function () { var core = resolveCore(); return core && core.prompt || null; },
         openTab: function (tab) { return ui ? ui.open(tab) : null; }
       });

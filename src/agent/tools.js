@@ -216,6 +216,10 @@
         { name: 'flags', type: 'string', desc: '默认 i（忽略大小写）' }, { name: 'context', type: 'number', desc: '每处命中带几行上下文，0–5' }, { name: 'limit', type: 'number', desc: '最多返回几处，默认 40' }],
       run: async function (args, ctx) {
         var out = await vfs.grep(args.path, args.pattern, { flags: args.flags, context: args.context, limit: args.limit, signal: ctx && ctx.signal });
+        if (out.aborted) {
+          var partial = out.total ? out.hits.join('\n') + '\n' : '';
+          return partial + '— 检索被中断，结果不完整（仅扫描 ' + out.scanned + '/' + (out.totalFiles || out.scanned) + ' 个文件，已发现 ' + out.total + ' 处命中）。';
+        }
         if (!out.total) return '没有命中（检索了 ' + out.scanned + ' 个文件）。';
         return out.hits.join('\n') + '\n— 共 ' + out.total + ' 处命中，分布在 ' + out.files + ' 个文件' + (out.total > out.hits.length ? '；只列出前 ' + out.hits.length + ' 处，可缩小 path 或换更具体的 pattern' : '');
       }

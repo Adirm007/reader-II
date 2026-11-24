@@ -585,6 +585,12 @@
         presence_penalty: settings.presence_pen, frequency_penalty: settings.freq_pen, include_reasoning: settings.include_reasoning
       };
       if (settings.seed >= 0) body.seed = settings.seed;
+      /*
+       * 消息是按「角色: 正文」平铺的，模型写完这一轮就该停：不能接着替 user / system 往下编
+       * （文本协议下它会顺手编出工具结果）。只用这两条固定的轮次边界，不沿用正文预设的停止词。
+       */
+      body.stop = ['\n\nuser:', '\n\nsystem:'];
+      if (type === 'koboldcpp') body.stop_sequence = body.stop.slice();
       if (type === 'ollama' || type === 'llamacpp') {
         body.num_ctx = tokenLimit(request.contextWindow) || script.max_context;
         body.repeat_penalty = settings.rep_pen;
@@ -724,18 +730,20 @@
       return typeof root.fetch === 'function' ? root.fetch.bind(root) : null;
     }
 
-    function toolSupport(route) {
-      var api = resolveApi(route);
+    function toolSupport(route, options) {
+      var opts = modules.isObject(options) ? options : null;
+      var api = opts && Object.prototype.hasOwnProperty.call(opts, 'api') ? opts.api : resolveApi(route);
       var ctx = nativeContext();
       if (api) {
         if (!hostFetch()) return { native: false, via: '', reason: '当前环境发不出网络请求' };
-        return ctx && typeof ctx.getRequestHeaders === 'function' ? { native: true, via: 'backend', model: api.model } : { native: true, via: 'direct', model: api.model };
+        var model = String(opts && opts.modelOverride || api.model || '');
+        return ctx && typeof ctx.getRequestHeaders === 'function' ? { native: true, via: 'backend', model: model } : { native: true, via: 'direct', model: model };
       }
       if (!ctx) return { native: false, via: '', reason: '没有酒馆环境' };
       var main = String(ctx.mainApi || '');
       if (main && main !== 'openai') return { native: false, via: '', reason: '酒馆主 API 是文本补全类型（' + main + '），没有原生函数调用' };
       if (!env || typeof env.hostImport !== 'function') return { native: false, via: '', reason: '当前载体不能调用酒馆的聊天补全接口' };
-      return { native: true, via: 'openai', model: '' };
+      return { native: true, via: 'openai', model: String(opts && opts.modelOverride || '') };
     }
 
     function unsupportedError(message) {
@@ -744,10 +752,19 @@
       return error;
     }
 
-    /* 对方明确说不认 tools / function 的那类报错：换文本协议能解决，重试解决不了。 */
+    /*
+     * 明确指向「接口/模型不接受原生 tools / function calling 参数」的报错：换文本协议能解决，重试解决不了。
+     * 先排除上下文超限（如 OpenAI 报错中常见的 "in the functions"）、工具消息序列错位（tool_use/tool_result/turn order）
+     * 以及内容风控/配额/鉴权错误，防止把可压缩、可修复或上游故障的 400 误判成不支持原生工具。
+     */
+    var NOT_UNSUPPORTED_DETAIL = /context_(?:length|window)_exceeded|context (?:window|limit)|maximum context length|maximum number of tokens|too many tokens|prompt is too long|token limit|输入超过.{0,8}上下文|tool_use_id|tool_result|must be a response to a preceeding|preceding message|function call turn|turn order|expected.*role|alternate.*user.*assistant|missing.*tool_result|without.*tool_calls|content_filter|content policy|safety|moderation|prohibited|harmful|refusal|insufficient_quota|quota|billing|rate[_ ]?limit|api[_ ]?key|unauthorized|authentication/i;
+    var UNSUPPORTED_TOOL_DETAIL = /(?:not\s+support|unsupported|does not support|doesn't support|cannot use|not\s+enabled|not\s+permitted|not\s+implemented|disabled|disallowed|unknown (?:field|parameter|argument)|unrecognized|extra[_ ]?(?:fields|inputs)|additional properties|unexpected|不支持|未启用|无法识别).{0,80}(?:tools?\b|tool_choice|function[_ ]?call|functions?\b)|(?:tools?\b|tool_choice|function[_ ]?call|functions?\b).{0,80}(?:not\s+support|unsupported|not\s+enabled|not\s+permitted|not\s+implemented|disabled|disallowed|not allowed|forbidden|extra[_ ]?(?:fields|inputs)|unknown|unrecognized|invalid|not available|不支持|未启用|无法识别)/i;
+
     function looksUnsupported(status, text) {
       if ([400, 404, 405, 415, 422, 501].indexOf(Number(status)) < 0) return false;
-      return /tool|function[_ ]?call|functions?\b|not\s+support|unsupported|unknown (?:field|parameter|argument)|unrecognized|extra[_ ]?(?:fields|inputs)|additional properties|不支持|无法识别/i.test(String(text || ''));
+      var detail = String(text || '');
+      if (!detail || NOT_UNSUPPORTED_DETAIL.test(detail)) return false;
+      return UNSUPPORTED_TOOL_DETAIL.test(detail);
     }
 
     function argumentText(value) {
@@ -1159,7 +1176,8 @@
       if (isolatedRoute(request) && modules.hasAgentCompletionTransport && modules.hasAgentCompletionTransport(env)) {
         try { data = await modules.sendAgentCompletion(env, body, request.signal, request.timeoutMs); }
         catch (error) {
-          if (body.tools && looksUnsupported(error && error.status, error && error.message)) throw unsupportedError('当前连接不接受原生函数调用');
+          var detail = String(error && error.message || error || '').slice(0, 300);
+          if (body.tools && looksUnsupported(error && error.status, detail)) throw unsupportedError('当前连接不接受原生函数调用（' + detail + '）');
           throw error;
         }
       } else {
@@ -1300,13 +1318,16 @@
      * 返回 parseToolResponse 的结果，另带 via（走了哪条通道）。通道或接口不支持时抛 code === 'no_native_tools' 的错误。
      */
     async function chatTools(input) {
-      var request = modules.isObject(input) ? input : {};
+      var request = modules.isObject(input) ? Object.assign({}, input) : {};
       assertModelRoute(request);
       var messages = wireMessages(request.messages);
       if (!messages.length) throw new Error('Reader LLM 调用缺少消息');
-      var api = resolveApi(request.route);
+      var api = Object.prototype.hasOwnProperty.call(request, 'api') ? request.api : resolveApi(request.route);
+      if (api && request.modelOverride && api.model !== request.modelOverride) {
+        api = Object.assign({}, api, { model: request.modelOverride });
+      }
       if (wantsImageEndpoint(request, api)) return generateImages(api, messages, request);
-      var support = toolSupport(request.route);
+      var support = toolSupport(request.route, { api: api, modelOverride: request.modelOverride });
       if (!support.native) throw unsupportedError(support.reason || '当前通道没有原生函数调用');
       var retries = Math.max(0, Math.min(5, request.retries === undefined ? 2 : Math.trunc(Number(request.retries) || 0)));
       var timeoutMs = Math.max(0, Number(request.timeoutMs === undefined ? 180000 : request.timeoutMs) || 0);
@@ -1316,16 +1337,24 @@
         try {
           var data = await raceOnce(function () {
             if (support.via === 'backend') return backendRequest(api, messages, Object.assign({ timeoutMs: timeoutMs }, request));
-            if (support.via === 'direct') return directRequest(api, messages, request);
+            if (support.via === 'direct') return directRequest(api, messages, Object.assign({ timeoutMs: timeoutMs }, request));
             return mainRequest(messages, Object.assign({ timeoutMs: timeoutMs }, request));
           }, '', timeoutMs, request.signal);
+          if (request.checkProviderStop && data && typeof data === 'object') {
+            var firstChoice = data.choices && data.choices[0], providerMessage = firstChoice && firstChoice.message;
+            var reason = data.promptFeedback && data.promptFeedback.blockReason || data.stop_reason ||
+              firstChoice && firstChoice.finish_reason || data.candidates && data.candidates[0] && data.candidates[0].finishReason;
+            if (providerMessage && providerMessage.refusal || /^(?:refusal|content_filter|safety|blocklist|prohibited_content|recitation|image_safety|spii)$/i.test(reason || '')) {
+              throw Object.assign(new Error('模型停止生成（' + (reason || 'refusal') + '）'), { code: 'provider_stop' });
+            }
+          }
           var parsed = parseToolResponse(data, !request.textOnly);
           if (!parsed.text.trim() && !parsed.images.length && !parsed.toolCalls.length && !/^(?:tool_calls|function_call|tool_use)$/.test(parsed.finish)) throw new Error('LLM 未返回可用文本');
           parsed.via = support.via;
           return parsed;
         } catch (error) {
           lastError = error;
-          if (error && (error.name === 'AbortError' || error.code === 'no_native_tools')) throw error;
+          if (error && (error.name === 'AbortError' || error.code === 'no_native_tools' || error.code === 'provider_stop')) throw error;
           var message = String(error && error.message || error);
           if (attempt >= retries || !TRANSIENT.test(message)) throw error;
           await delay(1200 * (attempt + 1), request.signal);

@@ -6,7 +6,7 @@
    * 这里不碰 DOM、不读写存储、不发请求——那些在 director.js；这里只做「给定输入算出输出」，所以能在 Node 里直接测。
    *
    * 几条贯穿全文件的约定：
-   *   · 提示词一律「静态在前、动态在后」。编纲四步共用同一份 System 与同一段勘察资料；场记每轮的 System
+   *   · 提示词一律「静态在前、动态在后」。总导演单会话探索与撰稿全程共用同一份 System 与初始轻索引地图；场记每轮的 System
    *     （Skill 运行期切片 + 偏好 + 角色简介 + 大纲）在两次结构重构之间一字不变，变的只有末尾那条 User。
    *   · 大纲（outline）在两次 L2 之间只读。L1 的局部改写是一条「补丁」，跟着楼层快照走、只出现在动态尾部，
    *     所以既不打掉前缀缓存，也会随 Swipe / 删楼自动回滚。
@@ -29,14 +29,14 @@
     enabled: false,           /* 总开关；每个聊天还可以单独开关（聊天变量），没设过的跟这里 */
     injectEvery: 1,           /* 每几个回合注入一次简报 */
     patrolEvery: 1,           /* 每几个回合巡检一次 */
-    planMode: 'auto',         /* auto 一口气编完 ｜ review 第 2 步后停下等用户过目 */
+    planMode: 'auto',         /* 仅保留 auto：一轮连贯编纲，工作途中随时自由插话 */
     wbPolicy: 'preview',      /* 新角色建档：preview 列出来等用户点 ｜ auto 权限允许时直接写 ｜ none 不建档 */
     wbTemplateId: '',         /* 角色条目用哪份模板；空 = 模板库的默认模板 */
     autoArchive: false,       /* 满足完结条件后不等用户确认，直接归档 */
     floatMode: 'all',         /* 状态浮窗：all 全部后台任务 ｜ major 只显示编纲、重构、归档这类大活 */
     plannerMaxTokens: 8192,
     judgeMaxTokens: 3072,
-    timeoutMs: 120000,
+    timeoutMs: 240000,
     l2Cooldown: 2             /* 一次结构重构之后，这么多回合内再判 L2 一律按 L1 处理 */
   };
 
@@ -55,7 +55,7 @@
       enabled: s.enabled === true,
       injectEvery: clampInt(s.injectEvery, 1, 20, DEFAULT_SETTINGS.injectEvery),
       patrolEvery: clampInt(s.patrolEvery, 1, 20, DEFAULT_SETTINGS.patrolEvery),
-      planMode: oneOf(['auto', 'review'], s.planMode, DEFAULT_SETTINGS.planMode),
+      planMode: 'auto',
       wbPolicy: oneOf(['preview', 'auto', 'none'], s.wbPolicy, DEFAULT_SETTINGS.wbPolicy),
       wbTemplateId: typeof s.wbTemplateId === 'string' ? s.wbTemplateId.trim().slice(0, 120) : '',
       autoArchive: s.autoArchive === true,
@@ -199,40 +199,72 @@
    *   runtime    巡检：最高原则 + 阶段五 + 十条红线的标题（细则在编纲时已经用过，每轮都带太费）
    *   archive    归档：只要阶段五·丙那一小节
    *   worldbook  建档：一段固定的短提示
-   * 必需的段缺了（用户把标题改得认不出来）就降级：planner / runtime 退回整篇正文——宁可多花些 token，也不让导演
-   * 在缺了半本手册的情况下干活；archive 用内置的短提示，绝不回退全文（归档是个小活，不值得带一整本）。
+   * 必需的段缺了（用户把标题改得认不出来）就降级：先从内置 Skill 里取同一段补上（返回的 filled 列出补了哪几段），
+   * 这样总导演拿不到阶段五、场记拿不到阶段一～四，分工不串；连内置正文也拿不到（单独加载本文件的环境）时，
+   * planner / runtime 才退回整篇正文——宁可多花些 token，也不让导演在缺了半本手册的情况下干活。
+   * archive 用内置的短提示，绝不回退全文（归档是个小活，不值得带一整本）。
    */
+  function builtinSkillSections() {
+    var text = '';
+    try {
+      if (typeof modules.inlineBuiltinSkill === 'function') text = str(modules.inlineBuiltinSkill(SKILL_NAME));
+      else if (modules.READER_BUILTIN_SKILLS && typeof modules.READER_BUILTIN_SKILLS[SKILL_NAME] === 'string') text = modules.READER_BUILTIN_SKILLS[SKILL_NAME];
+    } catch (error) { text = ''; }
+    if (!text.trim()) return null;
+    var by = {};
+    splitSkill(text).sections.forEach(function (section) { if (section.key && !by[section.key]) by[section.key] = section; });
+    return by;
+  }
+
   function sliceDirectorSkillDetailed(raw, mode) {
     var parts = splitSkill(raw);
     var by = {};
     parts.sections.forEach(function (section) { if (section.key && !by[section.key]) by[section.key] = section; });
     function lack(keys) { return keys.filter(function (key) { return !by[key]; }).map(function (key) { return SECTION_LABEL[key]; }); }
-    var missing;
+    /* 用内置 Skill 的同一段补齐缺的段；内置里也没有就补不了。返回补上的段名，补不了返回 null。 */
+    function fill(keys) {
+      var absent = keys.filter(function (key) { return !by[key]; });
+      if (!absent.length) return [];
+      var builtin = builtinSkillSections();
+      if (!builtin || absent.some(function (key) { return !builtin[key]; })) return null;
+      absent.forEach(function (key) { by[key] = builtin[key]; });
+      return absent.map(function (key) { return SECTION_LABEL[key]; });
+    }
+    var missing, filled;
 
-    if (mode === 'worldbook') return { text: WORLDBOOK_PROMPT, degraded: false, missing: [] };
+    if (mode === 'worldbook') return { text: WORLDBOOK_PROMPT, degraded: false, missing: [], filled: [] };
 
     if (mode === 'archive') {
       var protocol = by.stage5 ? subsection(by.stage5.text, /^丙/) : '';
-      if (!protocol) return { text: ARCHIVE_FALLBACK, degraded: true, missing: ['阶段五·丙'] };
-      return { text: ARCHIVE_HEAD + '\n\n' + protocol, degraded: false, missing: [] };
+      if (!protocol) return { text: ARCHIVE_FALLBACK, degraded: true, missing: ['阶段五·丙'], filled: [] };
+      return { text: ARCHIVE_HEAD + '\n\n' + protocol, degraded: false, missing: [], filled: [] };
     }
 
     if (mode === 'runtime') {
       missing = lack(['principles', 'stage5']);
-      if (missing.length) return { text: parts.body, degraded: true, missing: missing };
+      filled = fill(['principles', 'stage5']);
+      if (!filled) return { text: parts.body, degraded: true, missing: missing, filled: [] };
       var titles = by.stage2 ? redlineTitles(by.stage2.text) : [];
       var redlines = titles.length >= 3 ? titles : FALLBACK_REDLINES;
       return {
         text: [by.principles.text, by.stage5.text,
           '## 红线速记（运行期只列标题）\n' + redlines.map(function (title, index) { return (index + 1) + '. ' + title; }).join('\n')].join('\n\n---\n\n'),
-        degraded: false, missing: []
+        degraded: missing.length > 0, missing: missing, filled: filled
       };
     }
 
-    missing = lack(['principles', 'stage1', 'stage2', 'stage3', 'stage4', 'stage6']);
-    if (missing.length) return { text: parts.body, degraded: true, missing: missing };
-    var kept = parts.sections.filter(function (section) { return section.key !== 'stage5'; }).map(function (section) { return section.text; });
-    return { text: (parts.preamble ? [parts.preamble] : []).concat(kept).join('\n\n---\n\n'), degraded: false, missing: [] };
+    var required = ['principles', 'stage1', 'stage2', 'stage3', 'stage4', 'stage6'];
+    missing = lack(required);
+    if (!missing.length) {
+      var kept = parts.sections.filter(function (section) { return section.key !== 'stage5'; }).map(function (section) { return section.text; });
+      return { text: (parts.preamble ? [parts.preamble] : []).concat(kept).join('\n\n---\n\n'), degraded: false, missing: [], filled: [] };
+    }
+    filled = fill(required);
+    if (!filled) return { text: parts.body, degraded: true, missing: missing, filled: [] };
+    /* 补过段：必需的段按手册顺序排（用户的版本优先，缺的用内置的），用户自己加的段（含改了标题认不出的那段）接在后面；阶段五始终不带。 */
+    var ordered = required.map(function (key) { return by[key].text; });
+    var custom = parts.sections.filter(function (section) { return !section.key; }).map(function (section) { return section.text; });
+    return { text: (parts.preamble ? [parts.preamble] : []).concat(ordered, custom).join('\n\n---\n\n'), degraded: true, missing: missing, filled: filled };
   }
 
   function sliceDirectorSkill(raw, mode) { return sliceDirectorSkillDetailed(raw, mode).text; }
@@ -719,16 +751,157 @@
     if (outline.length < 120) return { ok: false, truncated: false, error: '模型交付的大纲太短，不像一份完整的分卷大纲。' };
     var indexTag = tagBody(text, 'volume_index');
     var parsedIndex = null;
-    if (indexTag.found && indexTag.body && modules.agentKernel) {
+    var indexError = '';
+    if (!indexTag.found) indexError = '缺少 <volume_index> JSON 索引块';
+    else if (!indexTag.closed) indexError = '<volume_index> 标签没有闭合';
+    else if (!indexTag.body) indexError = '<volume_index> 为空';
+    else if (modules.agentKernel) {
       var parsed = modules.agentKernel.extractJson(indexTag.body);
       if (parsed.ok) parsedIndex = parsed.value;
+      else indexError = '<volume_index> 不是合法 JSON：' + parsed.error;
     }
     var briefTag = tagBody(text, 'first_brief');
     var noteTag = tagBody(text, 'restructure_note');
+    var checkTag = tagBody(text, 'self_check');
     return {
       ok: true, outline: outline, index: normalizeIndex(parsedIndex, outline), firstBrief: briefTag.found ? briefTag.body : '',
-      note: noteTag.found ? clip(noteTag.body, 200) : '', lenient: lenient
+      note: noteTag.found ? clip(noteTag.body, 200) : '', selfCheck: checkTag.found ? checkTag.body : '',
+      indexOk: !indexError, indexError: indexError, briefClosed: !briefTag.found || briefTag.closed, lenient: lenient
     };
+  }
+
+  /*
+   * 检查 <self_check> 中是否残留未修正的失败项：
+   * 1. 先剥掉序号和项名，只审视紧随其后的状态结论；
+   * 2. 以明确正向状态（「通过 / 已修正 / 过关 / 无需修改 / 不存在问题」等）开头直接放行，
+   *    避免因为括号说明里提到「玩家强攻失败」或「不存在问题 / 无需修改」被误杀；
+   * 3. 剥离否定语境（无需/不必/不用/不存在/没有/未发现/无）后仍命中未通过/失败/待修改且未标明已修正的才打回。
+   */
+  var SELF_CHECK_PASS_LEAD = /^(?:[✅✔✓]\s*|\[(?:通过|已修正|已修改|过关)\]\s*)?(?:已?(?:通过|过关|达标|合规|合格|符合|满足|无问题|没有问题|未发现问题|无需修改|无需重写|不必修改|不用修改|不存在问题|ok\b|pass\b)|已(?:修正|修改|改正|重写|删改|补足|解决|修复))/i;
+  var SELF_CHECK_NEGATED = /(?:无需|不必|不用|不需要|不存在|没有|未发现|并非|不涉及|无)(?:明显|任何)?(?:修改|重写|调整|改动|问题|漏洞|缺陷|失败|风险|硬伤|透风)/g;
+  var SELF_CHECK_FAIL = /(?:未通过|不通过|不合格|未达标|未修正|待修改|待重写|需修改|需重写|存在问题|未解决|未修复|仍(?:有|存在).{0,8}(?:问题|漏洞|缺陷|透风|硬伤)|^(?:❌|✗|✘|\[未通过\]|不通过|未通过)|(?:^|[\s：:，,。.;；!！\-—–（(\[])(?:检验|检查|自检|判定|核查|审核|验证)?失败(?=$|[\s：:，,。.;；!！\-—–）)\]]))/i;
+  /*
+   * 以「通过」开头的行，只有后面真写了「还没好」的状态才打回：待修改、需重写、未修正、未解决、还没改、仍有……硬伤 / 漏洞 / 问题。
+   * 只是提到「问题」「漏洞」这些名词（「问题不大」「旧账问题留给下一卷」「原先的漏洞已补上」「需留意节奏问题」）不算。
+   */
+  var SELF_CHECK_RESIDUAL_FAIL = /(?:未通过|不通过|不合格|未达标|未修正|待修改|待重写|待处理|待解决|需修改|需重写|需要修改|需要重写|未解决|未修复|(?:还没|尚未|仍未)(?:改|修|补|处理|解决)|(?:仍|还|尚)(?:有|存在|残留|留有)[^，,。；;]{0,8}(?:硬伤|漏洞|缺陷|透风|问题))/;
+  var SELF_CHECK_FIXED = /(?:已修正|已修改|已改正|已重写|已删改|已补足|已补齐|已补上|已解决|已修复|已处理|已调整|已改掉|修正为|改为|改成了|改掉了|补上了|补齐了|现已通过|重新通过|复核通过)/;
+  /* 「还没改掉」「尚未补上」这类否定的修正说法先剥掉，再看是否真的已修正。 */
+  var SELF_CHECK_NOT_FIXED = /(?:还没有|还没|尚未|仍未|没有|没能|未能|没|未)(?:修正|修改|改正|重写|删改|补足|补齐|补上|解决|修复|处理|调整|改掉|改好)/g;
+
+  function selfCheckFixed(text) {
+    return SELF_CHECK_FIXED.test(str(text).replace(SELF_CHECK_NOT_FIXED, ''));
+  }
+
+  function stripSelfCheckPrefix(line) {
+    var s = str(line).trim();
+    /* 去掉开头的列表符或序号，如 "1. "、"- "、"（2）" */
+    s = s.replace(/^(?:[-*•]\s*|[（(]?\d{1,2}[.、．)）]\s*)/, '').trim();
+    /* 若有项名 + 冒号/破折号（如 "**命名嗅探检验**：通过，无需修改"），提取状态正文 */
+    var colon = /^[^:：—–-]{1,36}[:：]\s*(.+)$/.exec(s);
+    if (colon) return colon[1].replace(/^\*{1,2}([^*]+)\*{1,2}/, '$1').trim();
+    return s.replace(/^\*{1,2}([^*]+)\*{1,2}/, '$1').trim();
+  }
+
+  function inspectSelfCheck(text) {
+    var source = str(text).trim();
+    if (!source) return [];
+    var failed = [];
+    source.split('\n').forEach(function (raw) {
+      var line = raw.trim();
+      if (!line) return;
+      var body = stripSelfCheckPrefix(line);
+      if (!body) return;
+      var cleaned = body.replace(SELF_CHECK_NEGATED, '');
+      if (SELF_CHECK_PASS_LEAD.test(body)) {
+        /* 以「通过」开头但同一行又写了「仍有硬伤 / 待修改」且没说已修正：依然打回。 */
+        if (SELF_CHECK_RESIDUAL_FAIL.test(cleaned) && !selfCheckFixed(cleaned)) failed.push(clip(line, 120));
+        return;
+      }
+      if (SELF_CHECK_FAIL.test(cleaned) && !selfCheckFixed(cleaned)) failed.push(clip(line, 120));
+    });
+    return failed;
+  }
+
+  /*
+   * 最终交付的全面质检（用于单会话自动打回闭环）：
+   * 区分硬失败（大纲截断、缺少核心板块 A/D 或 Phase、索引损坏、首轮简报缺失/截断/严重泄密）与软失败（仅 <self_check> 残留未修正项）。
+   * 返回 { ok, final, brief, issues, hardIssues, softIssues, hardFailure }。
+   */
+  function validateFinalDelivery(rawText, options) {
+    var opts = options || {};
+    var final = parseFinalOutline(rawText);
+    if (!final.ok) {
+      return { ok: false, final: final, brief: null, issues: [final.error], hardIssues: [final.error], softIssues: [], hardFailure: true };
+    }
+    var hardIssues = [];
+    var softIssues = [];
+    if (!final.index.totalPhases) {
+      hardIssues.push('板块 D 缺少连续编号的「#### Phase N：阶段名」阶段标题。');
+    }
+    if (!/板块\s*[AＡ]/i.test(final.outline) || !/板块\s*[DＤ]/i.test(final.outline)) {
+      hardIssues.push('大纲缺少核心板块结构（须包含以三级标题开头的板块 A 至板块 E，特别是板块 A 与板块 D）。');
+    }
+    if (!final.indexOk) {
+      hardIssues.push(final.indexError || '<volume_index> 缺失或不是合法 JSON。');
+    }
+    if (!str(final.firstBrief).trim()) {
+      hardIssues.push('缺少 <first_brief> 首轮《导演简报》（不超过 ' + BRIEF_LIMIT + ' 字，固定五栏）。');
+    } else if (!final.briefClosed) {
+      hardIssues.push('<first_brief> 标签没有闭合（可能被输出长度截断）。');
+    }
+    var brief = str(final.firstBrief).trim()
+      ? sanitizeBriefDetailed(final.firstBrief, { userName: opts.userName, outline: final.outline })
+      : { text: '', leaks: 0 };
+    if (str(final.firstBrief).trim() && brief.leaks > 0 && brief.text.length < 40) {
+      hardIssues.push('<first_brief> 与板块 C「后台完整实情」严重重合（触发防泄密后几乎清空），请重写一份严守信息隔离的首轮简报。');
+    }
+    var failedChecks = inspectSelfCheck(final.selfCheck);
+    if (failedChecks.length) {
+      softIssues.push('你在 <self_check> 中标出了尚未修正的项：' + failedChecks.join('；') + '。请直接在正文中修改到位，确保全部通过后再交付。');
+    }
+    var issues = hardIssues.concat(softIssues);
+    return {
+      ok: issues.length === 0, final: final, brief: brief,
+      issues: issues, hardIssues: hardIssues, softIssues: softIssues,
+      hardFailure: hardIssues.length > 0
+    };
+  }
+
+  /*
+   * 构造自动打回重写的质检反馈消息。options.softOnly：问题只出在 <self_check>（大纲、索引、简报的结构都合法），
+   * 这时允许模型只重交一段 <self_check>，程序把它换进上一稿（mergeSelfCheck），不必为几行自检措辞整卷重写。
+   */
+  function buildRevisionPrompt(issues, options) {
+    var list = (Array.isArray(issues) ? issues : []).map(function (item) { return str(item).trim(); }).filter(Boolean);
+    var softOnly = !!(options && options.softOnly);
+    return [
+      '【自动质检打回 · 请直接修正并重新交付】',
+      '刚才提交的交付物存在以下问题，尚未落盘：',
+      list.map(function (item, idx) { return (idx + 1) + '. ' + item; }).join('\n'),
+      '',
+      softOnly
+        ? '以上只涉及 <self_check> 自检。如果正文确实还有没改到位的地方，请修改正文后重新输出完整、闭合的四段标签交付物；如果正文其实已经改好、只是自检那几行写得让人误会，只需重新输出一段 <self_check>…</self_check>（每项一行，写「通过」或「已修正：改了什么」），程序会把它换进上一稿，不必重写全文。'
+        : '请直接针对上述问题修改正文（如某项需要核实世界书、变量或前文，可继续调用只读工具查证），然后重新输出完整、闭合、全部自检通过的四段标签交付物，标签之外不要有任何多余文字。'
+    ].join('\n');
+  }
+
+  /* 回复里只有一段闭合的 <self_check>，没有大纲（模型按软打回的提示只重交了自检）。 */
+  function isSelfCheckOnly(rawText) {
+    var text = stripBlocks(rawText);
+    var check = tagBody(text, 'self_check');
+    if (!check.found || !check.closed || tagBody(text, 'volume_outline').found) return false;
+    var rest = text.replace(/<self_check>[\s\S]*?<\/self_check>/i, '').trim();
+    return rest.length < 400 && !inferPhases(rest).length;
+  }
+
+  /* 把新的 <self_check> 换进上一稿；上一稿没有自检段就加在开头。 */
+  function mergeSelfCheck(previous, reply) {
+    var fresh = tagBody(stripBlocks(reply), 'self_check');
+    var block = '<self_check>\n' + (fresh.found ? fresh.body : '') + '\n</self_check>';
+    var prev = str(previous);
+    if (/<self_check>[\s\S]*?<\/self_check>/i.test(prev)) return prev.replace(/<self_check>[\s\S]*?<\/self_check>/i, function () { return block; });
+    return block + '\n' + prev;
   }
 
   function phaseTitle(index, cursor) {
@@ -851,19 +1024,60 @@
     ].join('\n');
   }
 
-  /* ---------- 提示词：编纲四步 ---------- */
+  /* ---------- 提示词：总导演（单会话编纲与重构） ---------- */
+
+  function formatToolManual(tools) {
+    if (typeof modules.agentToolManual === 'function') return modules.agentToolManual(tools);
+    return (Array.isArray(tools) ? tools : []).map(function (def) {
+      var params = (def.params || []).map(function (param) {
+        return '  - ' + param.name + '（' + param.type + (param.required ? '，必填' : '') + '）' + (param.desc ? '：' + param.desc : '');
+      });
+      return '● ' + def.name + '\n  ' + str(def.summary) + (params.length ? '\n' + params.join('\n') : '');
+    }).join('\n');
+  }
+
+  function buildPlannerToolGuide(options) {
+    if (!isObject(options) || !options.toolMode) return '';
+    var mode = options.toolMode === 'native' ? 'native' : 'text';
+    var tools = Array.isArray(options.tools) ? options.tools : [];
+    var mounts = Array.isArray(options.mounts) ? options.mounts : [];
+    var lines = [
+      '## 只读资料勘察工具（消除信息盲区）',
+      '- 你具备只读资料查阅能力（零写入风险、无需确认，可随时发起调用）。大纲落盘与新角色世界书建档由系统自动托管，你只负责查证资料并按要求交付文本。',
+      '- 开局提供的世界书仅是全量条目目录地图、变量仅是全景结构探测、近期正文未必涵盖全部前史。',
+      '- **“不偷懒、无盲区”勘察原则**：正式落笔产出本卷动态大纲或重构/修订方案之前，必须依据目录索引主动调用 `read` / `grep` / `ls`（及可用的只读查询工具）深入查阅与本卷舞台、核心人物、关键规则、关系细节及现状相关的世界书原文、完整变量结构与必要前文历史，直到对世界与现状没有明显信息盲区再交付最终成果。',
+      '- 当用户要求查看变量结构、核实世界书细节或追溯前文伏笔时，必须直接调用只读工具核实；**严禁在未查阅原文的情况下凭空猜测，严禁推说“看不了”或“无法查看”**。',
+      '- `read` 支持直接读取世界书条目全文（`wb:/书名/条目`）、任意历史楼层（`chat:/楼层号`）、角色卡字段（`card:/...`）、记忆（`mem:/...`），以及通过 JSON Pointer 钻取任意深度变量结构（如 `var:/mvu.json#/stat_data/...`、`var:/chat.json#/...`、`var:/character.json`、`var:/message/latest.json`）。'
+    ];
+    if (mode === 'native') {
+      lines.push('- 工具已随本次请求声明，直接发起函数调用即可（支持同轮并行调用多个只读工具）；收到返回结果后再继续查阅，或直接交付最终四段标签成果。');
+    } else {
+      var textFormat = modules.agentProtocol && modules.agentProtocol.TEXT_FORMAT;
+      if (textFormat) lines.push('', textFormat);
+      if (tools.length) lines.push('', '【可用只读工具】\n' + formatToolManual(tools));
+    }
+    if (mounts.length) {
+      lines.push('', '【可读挂载点】\n' + mounts.map(function (mount) {
+        return '- ' + mount.id + ':/  ' + str(mount.title) + (mount.hint ? '（' + str(mount.hint) + '）' : '');
+      }).join('\n'));
+    }
+    return lines.join('\n');
+  }
 
   /*
-   * 编纲四步共用的 System：Skill 的编纲切片 + 运行环境补充。四步里一个字都不变，后面三步的请求能吃到前缀缓存。
-   * 结构重构也用它（同一位总导演、同一本手册）。
+   * 编纲与重构共用的 System：Skill 的编纲切片 + 运行环境补充（+ 只读工具指引）。
+   * 整轮探索、撰稿、插话修订与自动打回重修全程共用同一份 System，吃满前缀缓存。
    */
-  function buildPlannerSystem(skillRaw, preferences, userName) {
-    return [
+  function buildPlannerSystem(skillRaw, preferences, userName, options) {
+    var parts = [
       expandUser(sliceDirectorSkill(skillRaw, 'planner'), userName),
       '---',
-      '## 运行环境补充（Reader-II 分卷导演 · 编纲）',
-      environmentNotes('- 你正以「插件运行模式」工作：程序分几步向你要产出，每一步只交这一步要的东西；不寒暄、不复述要求、不解释你用了什么写作技巧。', userName, preferences)
-    ].join('\n\n');
+      '## 运行环境补充（Reader-II 分卷导演 · 总导演）',
+      environmentNotes('- 你正以「插件运行模式」工作：先用只读工具充分勘察，再一气呵成完成本卷动态大纲、阶段六铁血自检与最终交付；不寒暄、不复述要求、不解释你用了什么写作技巧。', userName, preferences)
+    ];
+    var toolGuide = buildPlannerToolGuide(options);
+    if (toolGuide) parts.push(toolGuide);
+    return parts.join('\n\n');
   }
 
   var INDEX_SAMPLE = '{"title":"本卷标题（不带书名号）","phases":[{"n":1,"title":"阶段名"}],"new_characters":[{"name":"姓名","kind":"npc","brief":"定位、性格与说话习惯的要点（80 字以内）","keywords":["会在聊天里出现的叫法"]}]}';
@@ -881,70 +1095,48 @@
     'volume_index 必须是合法 JSON：phases 与板块 D 的 Phase 一一对应；new_characters 只列板块 B 里标了 [新增] 的角色，kind 取 npc（会长期留在这个世界里的人物）或 temp_event（只为本卷某个场面服务的龙套、一次性事件），没有新增就给空数组。'
   ].join('\n');
 
-  var PLANNER_STEPS = [
-    ['【步骤 1/4 · 全景勘察】',
-      '按 Skill「阶段一」对上面的资料做工况定性，只交一张《勘察卡》，不超过 600 字：',
-      '0. 原件：从资料里抓出 2–4 个具体的、带烟火气或有张力的原件（一句没展开的旧话、一份已经结下的默契、一个没人深究的细节）；',
-      '1. 世界土壤肥瘠：既有设定与前文够不够本卷生长，要不要引入外部变量；',
-      '2. 既有关系温度：主角与核心 NPC 眼下的信任走到了哪一步，哪些关系必须保护、不许硬造内讧；',
-      '3. 主角位阶与不可替代性：主角在这个世界的实力位置，本卷的戏眼为什么非这个人不可；',
-      '4. 长线连续性与偏好校准：已完结的卷留下了哪些可回收的钩子，用户偏好对本卷的题材、气质、节奏提了什么硬要求。',
-      '只写结论与依据，不展开剧情，不提大纲。'].join('\n'),
-    ['【步骤 2/4 · 卷核立意与关系网】',
-      '基于勘察卡，交 400–700 字：',
-      '- 卷核：本卷是什么味道的故事，焦点张力与人心火花在哪（2–3 句）；从 Skill「阶段三」的工具箱里挑 1–3 件真正贴合这个世界的，各用一句话说怎么用——不要全用。',
-      '- 关系网：3–5 位核心人物，逐位标 [既有] 或 [新增]，各写一行：眼前最想保住或做成的事 ｜ 与另一位 NPC 不经过主角的联系 ｜ 与主角的化学反应方向。',
-      '- [新增] 的角色先过「阶段二」的红线 1、2、10：不造为剧情量身定做的塑料件，不起功能拼接名与罐头名，没必要就不新增。'].join('\n'),
-    ['【步骤 3/4 · 单卷动态大纲】',
-      '按 Skill「阶段四」写出完整大纲，颗粒度以「现场能直接演起来」为准。下面几条格式是程序要解析的，务必照做：',
-      '- 五个板块各以单独一行的三级标题开头，例如「### 板块 A：全景勘察与卷核定性」（A–E 的标题用 Skill 原文）；',
-      '- 板块 C 里「后台完整实情」与「客观推进时钟」各自单独起一行、以这几个字开头：前者只有导演能看，后者的节点可以在简报里露出；',
-      '- 板块 D 的每个阶段以单独一行的「#### Phase N：阶段名」开头，N 从 1 连续编号，共 3–5 个；每个 Phase 写齐五项（时间与物理承接、核心场面与暗压、生活细节与伏笔落点、玩家分岔口、本段执导忌口）；',
-      '- 板块 B 有 [新增] 角色时，在板块 B 末尾附「待建档角色要点」。',
-      '直接写大纲正文：不自评，不解释用了什么技巧。'].join('\n'),
-    ['【步骤 4/4 · 自检与交付】',
-      '按 Skill「阶段六」的 8 项逐条自检上一步的大纲，查出问题就直接改正文。然后只输出下面四段，标签之外不要有任何内容：',
-      '',
-      '<self_check>',
-      '（8 行以内：每项一行，写「通过」或「已修正：改了什么」）',
-      '</self_check>',
-      DELIVERY_NOTES].join('\n')
-  ];
-  var PLANNER_STEP_NAMES = ['全景勘察', '卷核立意与关系网', '单卷动态大纲', '自检与交付'];
+  /* UI 展示的单会话工作阶段（不再把 LLM 强拆成四次割裂请求）。 */
+  var PLANNER_PHASES = ['构建地图', '查阅资料', '撰稿自检', '定稿落盘'];
+
+  var PLANNER_TASK = [
+    '## 编纲与交付任务（单会话连贯完成）',
+    '1. **充分勘察（不偷懒、无盲区）**：先依据上方世界书目录地图、变量全景探测与楼层提示，主动调用只读工具（read / grep / ls 及可用只读查询工具）深入查阅与本卷舞台、核心人物、关键规则、关系细节及现状相关的世界书原文、完整变量结构与必要早期楼层，直到对世界与现状没有明显信息盲区。',
+    '2. **一气呵成构思与撰稿**：按 Skill 的「阶段一 → 阶段二 → 阶段三 → 阶段四」在同一条完整思路下连贯完成工况定性、原件锚定、卷核立意、3–5 位核心人物独立关系网，并直接写出颗粒度饱满、现场能直接演起来的单卷动态大纲（板块 A–E，3–5 个弹性 Phase，每个 Phase 写齐五项；板块 B 有 [新增] 角色时在末尾附「待建档角色要点」）。',
+    '3. **交付前铁血自检**：按 Skill「阶段六」的 8 道拷问逐条审视自己的草稿；**凡查出任何破绽或触发红线，立刻在正文中直接推翻重写到位**，直到全部过关再输出最终稿。',
+    '4. **最终交付格式**（只输出以下四段，标签之外不要有任何寒暄或多余解释）：',
+    '',
+    '<self_check>',
+    '（8 行以内：对应阶段六的 8 项，每项一行写「通过」或「已修正：改了什么」）',
+    '</self_check>',
+    DELIVERY_NOTES
+  ].join('\n');
 
   function feedbackBlock(items) {
-    var list = (Array.isArray(items) ? items : []).map(function (item) { return str(item).trim(); }).filter(Boolean);
+    var list = (Array.isArray(items) ? items : []).map(function (item) {
+      return str(typeof item === 'string' ? item : item && item.text).trim();
+    }).filter(Boolean);
     if (!list.length) return '';
     return '\n\n【用户意见（最高优先级：与上面任何默认做法冲突时，以这里为准）】\n' + list.map(function (item) { return '- ' + item; }).join('\n');
   }
 
-  /*
-   * 第 stepIndex 步（1–4）要发的消息。ctx:
-   *   system     buildPlannerSystem 的结果
-   *   materials  勘察资料（四步共用，只在第一条 User 里出现一次）
-   *   outputs    前几步的产出 [第 1 步, 第 2 步, 第 3 步]
-   *   feedback   [{ step, text }] 用户在哪一步插的话，就跟在哪一步的要求后面（之后各步都看得到，前缀也不变）
-   *   revise     { previous, text }：这一步已经交过一版，用户提了意见，要求修订重出
-   * 消息是「一问一答往后接」的：第 k 步的请求以第 k-1 步的请求为前缀。
-   */
-  function buildPlannerStepMessages(stepIndex, ctx) {
+  /* 单会话开局消息：System + 初始轻索引地图与完整编纲交付任务。 */
+  function buildPlannerMessages(ctx) {
     var context = ctx || {};
-    var step = clampInt(stepIndex, 1, PLANNER_STEPS.length, 1);
-    var outputs = Array.isArray(context.outputs) ? context.outputs : [];
-    var feedback = Array.isArray(context.feedback) ? context.feedback : [];
-    var messages = [{ role: 'system', content: str(context.system) }];
-    for (var n = 1; n <= step; n += 1) {
-      var notes = feedback.filter(function (item) { return item && item.step === n; }).map(function (item) { return item.text; });
-      var instruction = PLANNER_STEPS[n - 1] + feedbackBlock(notes);
-      messages.push({ role: 'user', content: n === 1 ? '## 勘察资料（程序自动收集）\n\n' + str(context.materials).trim() + '\n\n---\n\n' + instruction : instruction });
-      if (n < step) messages.push({ role: 'assistant', content: str(outputs[n - 1]) });
-    }
-    if (context.revise && str(context.revise.previous).trim()) {
-      messages.push({ role: 'assistant', content: str(context.revise.previous) });
-      messages.push({ role: 'user', content: '【修订这一步】用户看过上面这一版后提了意见（最高优先级）：\n' + str(context.revise.text).trim()
-        + '\n\n请据此把这一步完整地重出一遍：格式与篇幅要求不变，只交修订后的全文，不要解释改了哪里。' });
-    }
-    return messages;
+    var notes = Array.isArray(context.feedback) ? context.feedback : (context.feedback ? [context.feedback] : []);
+    var user = '## 勘察资料（全量轻索引与近期正文；完整条目与深层变量请用只读工具按需查阅）\n\n'
+      + str(context.materials).trim() + '\n\n---\n\n'
+      + PLANNER_TASK + feedbackBlock(notes);
+    return [{ role: 'system', content: str(context.system) }, { role: 'user', content: user }];
+  }
+
+  /* 构造编纲途中用户的自由插话消息。 */
+  function buildInterjectionMessage(text) {
+    return [
+      '【用户实时插话（最高优先级：与此前构思或默认做法冲突时，一律以这里为准）】',
+      str(text).trim(),
+      '',
+      '请立刻结合此前已查到的资料处理用户的要求（若用户点名查看变量结构、核实世界书细节或追溯前文，请先调用只读工具查证原文，不要推说看不了），再按完整交付格式直接输出修正后的最终四段标签成果。'
+    ].join('\n');
   }
 
   /* ---------- 提示词：场记（每轮巡检） ---------- */
@@ -1034,12 +1226,14 @@
 
   /* ---------- 提示词：结构重构（L2） ---------- */
 
-  /* input: { system（编纲的 System）, outline, index, state, recent, userName, reason, feedback, manual } */
+  /* input: { system（编纲的 System）, outline, index, state, recent, userName, reason, feedback, manual, books?, variables?, totalFloors? } */
   function buildRestructureMessages(input) {
     var source = input || {};
     var state = normalizeState(source.state);
     var progress = '原大纲 ' + progressLine(source.index, state) + '；' + (state.progress || '（没有进度摘要）');
     if (state.patches.length) progress += '\n此前的局部补丁：\n' + bullets(state.patches.map(function (patch) { return '[Phase ' + patch.phase + '] ' + patch.text; }));
+    var floorHeading = '### 最近的正文（# 后面是楼层号'
+      + (Number(source.totalFloors) > 0 ? '；全聊天共 ' + Math.trunc(Number(source.totalFloors)) + ' 楼，如需追溯更早楼层请用 read / grep 查阅 chat:/' : '') + '）';
     var user = joinBlocks([
       block('## 结构重构', source.manual
         ? '这一卷正在后台执导中，用户要求修订大纲。请在尊重既成事实的前提下重写后续。'
@@ -1049,8 +1243,11 @@
       block('### 原大纲', source.outline),
       block('### 迄今硬事实（不可推翻）', state.facts.length ? bullets(state.facts) : '（暂无）'),
       block('### 当前进度', progress),
-      block('### 最近的正文（# 后面是楼层号）', floorsText(source.recent, source.userName) || '（没有读到正文）'),
+      block('### 变量全景探测索引（可用 read 钻取完整结构）', source.variables),
+      block('### 当前生效世界书目录地图（可用 read / grep 查原文）', source.books),
+      block(floorHeading, floorsText(source.recent, source.userName) || '（没有读到正文）'),
       block('### 要求', [
+        '- 重写前若涉及核实世界书设定、完整变量结构或更早历史楼层（特别是用户意见中要求查看或核实的内容），必须先主动调用只读工具（read / grep / ls 等）查阅原文，消除信息盲区后再落笔；严禁凭空猜测或推说看不了。',
         '- 完全尊重既成事实，严禁把玩家拗回原来的轨道；保留仍有活力的角色关系与客观时钟，顺着玩家的选择长出新的展开。',
         '- 板块 A、B、C、E 只改必须改的地方；板块 D 从当前时点起重新推演，Phase 从 1 重新连续编号（已经演完的阶段不再列入，在板块 A 用两三句交代前情）。',
         '- 仍按 Skill「阶段四」的格式与「阶段六」的自检标准。只输出下面四段，标签之外不要有任何内容：'
@@ -1122,7 +1319,7 @@
 
   /*
    * 勘察资料最多带多少字：模型窗口的一半折成字（中文按 1.4 token 一个字算），落在 6K–36K 之间。
-   * 四步的产出会一直留在上下文里，所以再用「窗口 − 固定部分 − 两倍输出上限」卡一道，窗口小的模型不至于第 3 步就满。
+   * 单会话探索结果、正文与可能发生的自检重写都会留在上下文里，所以再用「窗口 − 固定部分 − 两倍输出上限」卡一道，给工具查阅与成稿留足余量。
    */
   function reconBudget(contextWindow, fixedTokens, outputTokens) {
     var windowSize = Number(contextWindow) > 0 ? Number(contextWindow) : 32768;
@@ -1177,24 +1374,433 @@
   }
 
   /*
-   * 把收集到的资料拼成一段。sections: [{ key, title, text, weight, tail }]；空的段不出现。
+   * 把收集到的资料拼成一段。sections: [{ key, title, text, weight, tail, preserve }]；空的段不出现。
+   * preserve 为 true 的高优先级轻索引段（如世界书全量目录地图、变量全景探测）先按实数保底，
+   * 避免被正文或小权重截断丢弃绿灯条目；只有在极端小窗口下合计超过总预算 72% 时才按权重缩放。
    * 返回 { text, used: { key: 字数 } }。
    */
   function composeMaterials(sections, budget) {
     var list = (Array.isArray(sections) ? sections : []).map(function (section) {
-      return { key: section.key, title: section.title, text: str(section.text).trim(), weight: section.weight || 1, tail: section.tail === true };
+      return {
+        key: section.key, title: section.title, text: str(section.text).trim(),
+        weight: section.weight || 1, tail: section.tail === true, preserve: section.preserve === true,
+        render: typeof section.render === 'function' ? section.render : null
+      };
     }).filter(function (section) { return section.text; });
-    var shares = allocateBudget(budget, list.map(function (section) { return { key: section.key, weight: section.weight, size: section.text.length }; }));
+    var totalBudget = Math.max(0, Math.floor(Number(budget) || 0));
+    var preserved = list.filter(function (section) { return section.preserve; });
+    var flexible = list.filter(function (section) { return !section.preserve; });
+    var shares = {};
+    if (preserved.length) {
+      var preservedSize = preserved.reduce(function (sum, item) { return sum + item.text.length; }, 0);
+      var preservedCap = flexible.length ? Math.floor(totalBudget * 0.72) : totalBudget;
+      if (preservedSize <= preservedCap) {
+        preserved.forEach(function (item) { shares[item.key] = item.text.length; });
+        totalBudget = Math.max(0, totalBudget - preservedSize);
+      } else {
+        var preservedShares = allocateBudget(preservedCap, preserved.map(function (item) { return { key: item.key, weight: item.weight, size: item.text.length }; }));
+        Object.keys(preservedShares).forEach(function (key) { shares[key] = preservedShares[key]; });
+        totalBudget = Math.max(0, totalBudget - preservedCap);
+      }
+    }
+    var flexShares = allocateBudget(totalBudget, flexible.map(function (section) { return { key: section.key, weight: section.weight, size: section.text.length }; }));
+    Object.keys(flexShares).forEach(function (key) { shares[key] = flexShares[key]; });
     var used = {};
     var text = list.map(function (section) {
-      var body = clipChars(section.text, shares[section.key] || 0, section.tail);
+      var limit = shares[section.key] || 0;
+      var body = section.render && section.text.length > limit
+        ? clipChars(str(section.render(limit)).trim(), limit, section.tail)
+        : clipChars(section.text, limit, section.tail);
       used[section.key] = body.length;
       return body ? '### ' + section.title + '\n' + body : '';
     }).filter(Boolean).join('\n\n');
     return { text: text, used: used };
   }
 
-  /* 世界书条目的摘要：启用的条目里常驻的排前面，其余按顺序值从大到小；每条一行「名字：正文开头」。 */
+  function encodeSegment(name) {
+    if (typeof modules.vfsEnc === 'function') return modules.vfsEnc(name);
+    return String(name).replace(/%/g, '%25').replace(/\//g, '%2F').replace(/#/g, '%23');
+  }
+  function decodeSegment(name) {
+    if (typeof modules.vfsDec === 'function') return modules.vfsDec(name);
+    try { return decodeURIComponent(String(name)); } catch (error) { return String(name); }
+  }
+  function escapePointer(key) {
+    return String(key).replace(/~/g, '~0').replace(/\//g, '~1');
+  }
+
+  function worldbookActiveItems(bookName, entries) {
+    var list = Array.isArray(entries) ? entries : [];
+    var book = str(bookName).trim();
+    if (!book || !list.length) return [];
+    var counts = Object.create(null);
+    list.forEach(function (entry) {
+      if (!entry) return;
+      var name = str(entry.name);
+      counts[name] = (counts[name] || 0) + 1;
+    });
+    var encBook = encodeSegment(book);
+    var active = [];
+    for (var i = 0; i < list.length; i += 1) {
+      var entry = list[i];
+      if (!entry || entry.enabled === false) continue;
+      var content = str(entry.content);
+      if (!content.trim()) continue;
+      var rawName = str(entry.name);
+      /*
+       * 与 providers.js 的 uniqueNames() 同一口径：空名、重名、名字含 '#'、以空白结尾（vfs.parse 会 trim 路径末尾）时追加 #uid。
+       * pick() 先按唯一全名精确匹配、再按最后一个 '#' 后的 uid 匹配，所以目录、ls、grep 给出的路径 read 回去都命中同一条。
+       */
+      var needUid = !rawName || counts[rawName] > 1 || rawName.indexOf('#') >= 0 || /\s$/.test(rawName);
+      var seg = needUid ? rawName + '#' + entry.uid : rawName;
+      var strategy = entry.strategy || {}, place = entry.position || {};
+      var type = strategy.type === 'constant' ? 'constant' : strategy.type === 'vectorized' ? 'vectorized' : 'selective';
+      var keys = Array.isArray(strategy.keys) ? strategy.keys.map(function (k) { return str(k).trim(); }).filter(Boolean) : [];
+      var secondary = strategy.keys_secondary && Array.isArray(strategy.keys_secondary.keys)
+        ? strategy.keys_secondary.keys.map(function (k) { return str(k).trim(); }).filter(Boolean) : [];
+      active.push({
+        path: 'wb:/' + encBook + '/' + encodeSegment(seg),
+        name: rawName.trim() || '（未命名#' + entry.uid + '）',
+        type: type,
+        constant: type === 'constant' ? 1 : 0,
+        order: Number(place.order) || 0,
+        at: i,
+        keys: keys,
+        secondary: secondary,
+        chars: content.length
+      });
+    }
+    active.sort(function (left, right) {
+      return (right.constant - left.constant) || (right.order - left.order) || (left.at - right.at);
+    });
+    return active;
+  }
+
+  function formatWorldbookRow(item, mode) {
+    var typeLabel = item.type === 'constant' ? '常驻' : item.type === 'vectorized' ? '向量' : '关键词';
+    if (mode === 'minimal') return '- ' + item.path + ' ｜ ' + typeLabel;
+    if (mode === 'compact') {
+      var shortKeys = item.keys.length ? item.keys.slice(0, 3).join('/') + (item.keys.length > 3 ? '+' : '') : '';
+      return '- ' + item.path + ' ｜ ' + typeLabel + (shortKeys ? '(' + shortKeys + ')' : '') + ' ｜ ' + item.chars + '字';
+    }
+    var keyText = '';
+    if (item.keys.length) {
+      keyText = item.keys.slice(0, 8).join('、') + (item.keys.length > 8 ? '…共' + item.keys.length + '词' : '');
+    }
+    if (item.secondary.length) {
+      var sec = item.secondary.slice(0, 4).join('、') + (item.secondary.length > 4 ? '…' : '');
+      keyText = keyText ? keyText + '；次词：' + sec : '次词：' + sec;
+    }
+    return '- ' + item.path + ' ｜ ' + item.name + ' ｜ ' + typeLabel + (keyText ? '（' + keyText + '）' : '') + ' ｜ ' + item.chars + ' 字';
+  }
+
+  /*
+   * 世界书全量条目目录地图：与 providers.js 完全一致地计算 VFS 条目路径（空名/重名/含#/尾空格带 #uid），
+   * 列出全部启用条目的准确 wb:/ 路径、触发类型、关键词与字数，不再砍成 150 字或截丢绿灯条目。
+   * options: { tag, mode: 'full' | 'compact' | 'minimal' }
+   */
+  function indexWorldbook(bookName, entries, options) {
+    var book = str(bookName).trim();
+    var active = worldbookActiveItems(book, entries);
+    if (!active.length) return '';
+    var tag = options && str(options.tag).trim();
+    var mode = options && (options.mode === 'compact' || options.mode === 'minimal') ? options.mode : 'full';
+    var header = '【' + book + '】' + (tag ? ' ' + tag : '') + '（启用 ' + active.length + ' 条）';
+    return header + '\n' + active.map(function (item) { return formatWorldbookRow(item, mode); }).join('\n');
+  }
+
+  /*
+   * 多本世界书分级目录渲染（消除大卡 72% 预算硬截断且自称未截断的矛盾）：
+   * 依次尝试 full → compact → minimal 直到全量零省略装入 budget；
+   * 若极端超大规模连 minimal 仍超 budget，按书均匀分配行额并在每本末尾与总附注诚实标明省略条数与 ls/grep 补查指令。
+   * books: [{ name, tag, entries }]；返回 { text, mode, truncated, omitted, total }。
+   */
+  function formatWorldbookCatalog(books, budget) {
+    var list = (Array.isArray(books) ? books : []).map(function (item) {
+      var name = str(item && item.name).trim();
+      var active = worldbookActiveItems(name, item && item.entries);
+      return active.length ? { name: name, encBook: encodeSegment(name), tag: str(item && item.tag).trim(), active: active } : null;
+    }).filter(Boolean);
+    if (!list.length) return { text: '', mode: 'full', truncated: false, omitted: 0, total: 0 };
+    var total = list.reduce(function (sum, b) { return sum + b.active.length; }, 0);
+    var cap = Number(budget) > 0 ? Math.floor(Number(budget)) : Infinity;
+
+    var notes = {
+      full: '（注：以上为当前全部已启用条目的完整目录，未截断；请使用只读工具 read("wb:/书名/条目") 或 grep("wb:/", "关键词") 按需查阅正文全文。）',
+      compact: '（注：以上为当前全部已启用条目的紧凑目录，未截断；请使用 read("wb:/书名/条目") 或 grep("wb:/", "关键词") 按需查阅正文全文。）',
+      minimal: '（注：以上为当前全部已启用条目的精简路径目录，未截断；请使用 read("wb:/书名/条目") 或 grep("wb:/", "关键词") 按需查阅正文全文。）'
+    };
+    var modes = ['full', 'compact', 'minimal'];
+    for (var m = 0; m < modes.length; m += 1) {
+      var mode = modes[m];
+      var blocks = list.map(function (b) {
+        var header = '【' + b.name + '】' + (b.tag ? ' ' + b.tag : '') + '（启用 ' + b.active.length + ' 条）';
+        return header + '\n' + b.active.map(function (item) { return formatWorldbookRow(item, mode); }).join('\n');
+      });
+      var assembled = blocks.join('\n\n') + '\n\n' + notes[mode];
+      if (assembled.length <= cap) {
+        return { text: assembled, mode: mode, truncated: false, omitted: 0, total: total };
+      }
+    }
+
+    /* 极端规模（即使 minimal 仍超预算）：严格遵守 cap 上限，保证诚实总附注与 ls/grep 补查指令永远完整留在末尾。 */
+    function makeHonestFooter(omittedEntries, omittedBooks) {
+      if (!omittedEntries && !omittedBooks) return notes.minimal;
+      return '（注：因窗口预算有限，以上目录已省略共 ' + omittedEntries + ' / ' + total + ' 条'
+        + (omittedBooks ? '（含未展开的 ' + omittedBooks + ' 本书）' : '')
+        + '；请务必用 ls("wb:/") 或 grep("wb:/", "关键词") 补充查阅，切勿假设目录已全覆盖。）';
+    }
+    var maxFooterLen = makeHonestFooter(total, list.length).length;
+    if (cap <= maxFooterLen + 24) {
+      var tinyFooter = makeHonestFooter(total, list.length);
+      return { text: tinyFooter.slice(0, cap), mode: 'minimal', truncated: true, omitted: total, total: total };
+    }
+
+    var bodyBudget = Math.max(0, cap - maxFooterLen - 2);
+    var rawSizes = list.map(function (b, idx) {
+      var header = '【' + b.name + '】' + (b.tag ? ' ' + b.tag : '') + '（启用 ' + b.active.length + ' 条）';
+      var compactHead = '【' + b.name + '】' + (b.tag ? ' ' + b.tag : '') + '（启用 ' + b.active.length + ' 条；ls("wb:/' + b.encBook + '")）';
+      var rows = b.active.map(function (item) { return formatWorldbookRow(item, 'minimal'); });
+      return { key: String(idx), weight: Math.max(1, b.active.length), size: header.length + 1 + rows.join('\n').length, header: header, compactHead: compactHead, rows: rows, book: b };
+    });
+    var totalMin = rawSizes.reduce(function (sum, x) { return sum + x.compactHead.length; }, 0) + Math.max(0, rawSizes.length - 1) * 2;
+    var bookShares = Object.create(null);
+    if (totalMin <= bodyBudget) {
+      /* 先保证每本书至少保底出现（不让靠后的全局/附书被大书按权重挤掉），再将余量按条目比例分配。 */
+      var extraBudget = bodyBudget - totalMin;
+      var extraShares = allocateBudget(extraBudget, rawSizes.map(function (x) {
+        return { key: x.key, weight: x.weight, size: Math.max(0, x.size - x.compactHead.length) };
+      }));
+      rawSizes.forEach(function (x) {
+        bookShares[x.key] = x.compactHead.length + Math.floor(extraShares[x.key] || 0);
+      });
+    } else {
+      rawSizes.forEach(function (x) { bookShares[x.key] = x.compactHead.length; });
+    }
+
+    var blocks = [];
+    var blockEntries = [];
+    var usedTotal = 0;
+    var omittedTotal = 0;
+    var omittedBooks = 0;
+
+    function shortTail(encBook, left) {
+      return '…（余 ' + left + ' 条，用 ls("wb:/' + encBook + '") 查）';
+    }
+
+    for (var bi = 0; bi < rawSizes.length; bi += 1) {
+      var x = rawSizes[bi];
+      var sep = blocks.length ? 2 : 0;
+      var rem = bodyBudget - usedTotal - sep;
+      if (rem < x.compactHead.length) {
+        for (var rest = bi; rest < rawSizes.length; rest += 1) {
+          omittedTotal += rawSizes[rest].rows.length;
+          omittedBooks += 1;
+        }
+        break;
+      }
+      var share = Math.min(rem, Math.max(x.compactHead.length, Math.floor(bookShares[x.key] || 0)));
+      var out = [x.header];
+      var used = x.header.length;
+      var shown = 0;
+      for (var r = 0; r < x.rows.length; r += 1) {
+        var row = x.rows[r];
+        var leftAfter = x.rows.length - r - 1;
+        var tailStr = leftAfter > 0 ? '\n' + shortTail(x.book.encBook, leftAfter) : '';
+        if (used + 1 + row.length + tailStr.length > share) break;
+        out.push(row);
+        used += 1 + row.length;
+        shown += 1;
+      }
+      var blockText = '';
+      var omittedHere = x.rows.length - shown;
+      if (shown > 0) {
+        if (omittedHere > 0) out.push(shortTail(x.book.encBook, omittedHere));
+        blockText = out.join('\n');
+      }
+      if (!blockText || blockText.length > rem) {
+        blockText = x.compactHead;
+        omittedHere = x.rows.length;
+      }
+      omittedTotal += omittedHere;
+      blocks.push(blockText);
+      blockEntries.push(x.rows.length - omittedHere);
+      usedTotal += sep + blockText.length;
+    }
+
+    var honestFooter = makeHonestFooter(omittedTotal, omittedBooks);
+    var assembledFinal = (blocks.length ? blocks.join('\n\n') + '\n\n' : '') + honestFooter;
+    while (blocks.length && assembledFinal.length > cap) {
+      blocks.pop();
+      omittedTotal += blockEntries.pop() || 0;
+      omittedBooks += 1;
+      honestFooter = makeHonestFooter(omittedTotal, omittedBooks);
+      assembledFinal = (blocks.length ? blocks.join('\n\n') + '\n\n' : '') + honestFooter;
+    }
+    return {
+      text: assembledFinal.length > cap ? assembledFinal.slice(0, cap) : assembledFinal,
+      mode: 'minimal', truncated: omittedTotal > 0 || omittedBooks > 0, omitted: omittedTotal, total: total
+    };
+  }
+
+  /* 过滤 Reader-II / 夜梦助手内部配置与状态键，避免污染变量全景探测。 */
+  var INTERNAL_VAR_KEY = /^(?:reader_ii(?:_|$)|dream_(?:persona|user_address|visual_theme|appearance|custom_persona(?:_id)?|extra_settings|independent_api))/i;
+  var MVU_META_KEYS = ['stat_data', 'display_data', 'delta_data', 'schema', 'initialized_lorebooks', 'is_during_extra_analysis'];
+
+  function isInternalVarKey(key) {
+    return INTERNAL_VAR_KEY.test(str(key).trim());
+  }
+
+  function probeShape(value, depth) {
+    if (value === null) return 'null';
+    if (value === undefined) return 'undefined';
+    var type = typeof value;
+    if (type === 'boolean' || type === 'number') return String(value);
+    if (type === 'string') {
+      var trimmed = value.trim();
+      if ((trimmed.charAt(0) === '{' || trimmed.charAt(0) === '[') && trimmed.length > 2) {
+        try {
+          var parsed = JSON.parse(trimmed);
+          if (parsed && typeof parsed === 'object') return 'JSON文本→' + probeShape(parsed, depth);
+        } catch (error) { /* 普通字符串 */ }
+      }
+      var flat = value.replace(/\s+/g, ' ').trim();
+      if (!flat) return '""';
+      return flat.length <= 42 ? JSON.stringify(flat) : JSON.stringify(flat.slice(0, 38) + '…') + '（' + value.length + ' 字）';
+    }
+    if (Array.isArray(value)) {
+      if (!value.length) return '[]';
+      if (depth <= 0) return '[' + value.length + ' 项]';
+      var sample = probeShape(value[0], depth - 1);
+      return '[' + value.length + ' 项，首项：' + sample + ']';
+    }
+    if (type === 'object') {
+      var keys = Object.keys(value);
+      if (!keys.length) return '{}';
+      var shown = keys.slice(0, 10);
+      var suffix = keys.length > 10 ? '…共 ' + keys.length + ' 键' : '';
+      if (depth <= 0) return '{' + shown.join('、') + suffix + '}';
+      if (keys.length <= 4) {
+        return '{' + shown.map(function (k) { return k + ': ' + probeShape(value[k], depth - 1); }).join('；') + '}';
+      }
+      return '{' + shown.join('、') + suffix + '}';
+    }
+    return str(value).slice(0, 40);
+  }
+
+  function formatObjectEntries(basePath, pointerPrefix, obj, options) {
+    var keys = Object.keys(obj || {}).filter(function (key) {
+      if (options && options.skip && options.skip.indexOf(key) >= 0) return false;
+      if (options && options.filterInternal && isInternalVarKey(key)) return false;
+      return true;
+    });
+    if (!keys.length) return [];
+    var maxKeys = options && options.maxKeys > 0 ? options.maxKeys : 40;
+    var lines = keys.slice(0, maxKeys).map(function (key) {
+      var pointer = pointerPrefix + '/' + escapePointer(key);
+      return '  - ' + basePath + '#' + pointer + ' ｜ ' + key + '：' + probeShape(obj[key], 1);
+    });
+    if (keys.length > maxKeys) {
+      lines.push('  - …其余 ' + (keys.length - maxKeys) + ' 个顶层键（用 read("' + basePath + (pointerPrefix ? '#' + pointerPrefix : '') + '") 查看完整列表）');
+    }
+    return lines;
+  }
+
+  /*
+   * 全类型变量全景探测索引：接收多个变量源 [{ path, label, data }]（覆盖 mvu.json、chat.json 含小白X、
+   * character.json、global.json 等），自动过滤 reader_ii_* 内部噪点键，输出可用文件、顶层键结构与精确 JSON Pointer 读取路径。
+   */
+  function indexVariableSources(sources) {
+    var list = Array.isArray(sources) ? sources : [];
+    var blocks = [];
+    list.forEach(function (source) {
+      if (!source || !isObject(source.data)) return;
+      var path = str(source.path).trim();
+      var label = str(source.label).trim();
+      var data = source.data;
+      if (path === 'var:/mvu.json') {
+        var mvuLines = [];
+        if (isObject(data.stat_data) && Object.keys(data.stat_data).length) {
+          mvuLines.push('  [stat_data]（' + Object.keys(data.stat_data).length + ' 个顶层键）：');
+          mvuLines = mvuLines.concat(formatObjectEntries('var:/mvu.json', '/stat_data', data.stat_data, { filterInternal: false }));
+        }
+        var metaPresent = ['display_data', 'delta_data', 'schema'].filter(function (k) {
+          return data[k] !== undefined && data[k] !== null && (!isObject(data[k]) || Object.keys(data[k]).length > 0);
+        });
+        if (metaPresent.length) {
+          mvuLines.push('  [其他 MVU 分区] ' + metaPresent.map(function (k) { return 'var:/mvu.json#/' + k; }).join('、'));
+        }
+        var extraLines = formatObjectEntries('var:/message/latest.json', '', data, { filterInternal: true, skip: MVU_META_KEYS });
+        if (extraLines.length) {
+          mvuLines.push('  [最新楼层其他变量]：');
+          mvuLines = mvuLines.concat(extraLines);
+        }
+        if (mvuLines.length) blocks.push('【' + (label || 'MVU / 最新楼层变量') + '】`var:/mvu.json`\n' + mvuLines.join('\n'));
+        return;
+      }
+      var lines = formatObjectEntries(path, '', data, { filterInternal: true });
+      if (!lines.length) return;
+      blocks.push('【' + (label || path) + '】`' + path + '`（' + lines.length + ' 项）\n' + lines.join('\n'));
+    });
+    if (!blocks.length) return '';
+    return blocks.join('\n\n') + '\n\n（需要查看任意键的完整数值、子项或深层结构时，直接调用 read("<路径>#/<键名>") 钻取，或 grep var:/。）';
+  }
+
+  function displayVfsPath(rawPath) {
+    var source = str(rawPath).trim();
+    var match = /^([A-Za-z][\w-]*):\/?(.*)$/.exec(source);
+    if (!match) return source;
+    var rest = match[2], pointer = '';
+    var hash = rest.indexOf('#/');
+    if (hash >= 0) { pointer = rest.slice(hash); rest = rest.slice(0, hash); }
+    var segs = rest.split('/').filter(Boolean).map(decodeSegment);
+    return match[1] + ':/' + segs.join('/') + pointer;
+  }
+
+  /* 将总导演的只读工具调用格式化为给用户看的探索轨迹文案。 */
+  function describeToolCall(name, args) {
+    var tool = str(name).trim();
+    var a = isObject(args) ? args : {};
+    var path = displayVfsPath(a.path || '');
+    var mount = /^([A-Za-z][\w-]*):/.exec(path);
+    var id = mount ? mount[1] : '';
+    if (tool === 'read') {
+      var pageNote = Number(a.offset) > 1 ? '（第 ' + Math.trunc(Number(a.offset)) + ' 行起）' : '';
+      if (id === 'wb') return '查阅世界书 ' + path + pageNote;
+      if (id === 'var') return '查看变量 ' + path + pageNote;
+      if (id === 'chat') return '翻看历史楼层 ' + path + pageNote;
+      if (id === 'card' || id === 'cards') return '查阅角色卡 ' + path + pageNote;
+      if (id === 'mem') return '查阅记忆 ' + path + pageNote;
+      return '读取 ' + (path || '资料') + pageNote;
+    }
+    if (tool === 'ls') {
+      if (!path) return '浏览可用资料目录';
+      if (id === 'wb') return '浏览世界书目录 ' + path;
+      if (id === 'var') return '浏览变量目录 ' + path;
+      if (id === 'chat') return '浏览历史楼层目录 ' + path;
+      if (id === 'card' || id === 'cards') return '浏览角色卡目录 ' + path;
+      if (id === 'mem') return '浏览记忆目录 ' + path;
+      return '浏览目录 ' + path;
+    }
+    if (tool === 'grep') {
+      var kw = clip(a.pattern, 30);
+      if (id === 'chat') return '搜索历史 ' + path + ' 关键词「' + kw + '」';
+      if (id === 'wb') return '搜索世界书 ' + path + ' 关键词「' + kw + '」';
+      if (id === 'var') return '搜索变量 ' + path + ' 关键词「' + kw + '」';
+      if (id === 'card' || id === 'cards') return '搜索角色卡 ' + path + ' 关键词「' + kw + '」';
+      return '检索 ' + (path || '资料') + ' 关键词「' + kw + '」';
+    }
+    if (tool === 'mvu_inspect') return '查看 MVU 变量' + (a.path ? ' ' + a.path : a.category ? '（' + a.category + '）' : '');
+    if (tool === 'lwb_schema' || tool === 'lwb_v3_inspect' || tool === 'lwb_v3_export_rules') return '查看小白X变量结构';
+    if (tool === 'baibai_query') return '查询柏宝书（' + str(a.resource || 'state') + '）';
+    if (tool === 'shujuku_tables') return '查阅数据库表格';
+    if (tool === 'ejs_variables') return '查看 EJS 可见变量' + (a.path ? ' ' + a.path : '');
+    if (tool === 'tt_search_chat') return '搜索聊天记录「' + clip(a.query, 30) + '」';
+    if (tool === 'memory_search' || tool === 'memory_list') return '检索记忆' + (a.query ? '「' + clip(a.query, 30) + '」' : '');
+    return '查阅 ' + tool;
+  }
+
+  /* 世界书条目的摘要（保留兼容旧调用）：启用的条目里常驻的排前面，其余按顺序值从大到小；每条一行「名字：正文开头」。 */
   function summarizeWorldbook(entries, perEntry) {
     var size = perEntry > 0 ? perEntry : 160;
     return (Array.isArray(entries) ? entries : []).filter(function (entry) { return entry && entry.enabled !== false && str(entry.content).trim(); })
@@ -1207,7 +1813,7 @@
       .join('\n');
   }
 
-  /* 变量树的精简写法：只下到 depth 层，长字符串与长数组掐短。给模型看个大概，不是要它逐项核对。 */
+  /* 变量树的精简写法（保留兼容旧调用）：只下到 depth 层，长字符串与长数组掐短。 */
   function summarizeVariables(value, depth, budget) {
     function walk(node, level) {
       if (node === null || node === undefined) return null;
@@ -1233,7 +1839,7 @@
 
   modules.directorCore = {
     SKILL_NAME: SKILL_NAME, BRIEF_LIMIT: BRIEF_LIMIT, RING_LIMIT: RING_LIMIT, ARCHIVE_LIMIT: ARCHIVE_LIMIT, TAIL_WINDOW: TAIL_WINDOW, LEAK_SPAN: LEAK_SPAN,
-    BRIEF_COLUMNS: BRIEF_COLUMNS, DEFAULT_SETTINGS: DEFAULT_SETTINGS, REQUIRED_HEADINGS: REQUIRED_HEADINGS, PLANNER_STEP_NAMES: PLANNER_STEP_NAMES,
+    BRIEF_COLUMNS: BRIEF_COLUMNS, DEFAULT_SETTINGS: DEFAULT_SETTINGS, REQUIRED_HEADINGS: REQUIRED_HEADINGS, PLANNER_PHASES: PLANNER_PHASES,
     normalizeSettings: normalizeSettings, hashId: hashId,
     splitSkill: splitSkill, sliceDirectorSkill: sliceDirectorSkill, sliceDirectorSkillDetailed: sliceDirectorSkillDetailed,
     expandUser: expandUser, neutralizeMacros: neutralizeMacros, hiddenTruth: hiddenTruth, removeLeaks: removeLeaks, clampBrief: clampBrief,
@@ -1242,12 +1848,15 @@
     initialState: initialState, normalizeState: normalizeState, emptySnapshots: emptySnapshots, normalizeSnapshots: normalizeSnapshots,
     makeSnapshot: makeSnapshot, snapshotMatches: snapshotMatches, pickSnapshot: pickSnapshot, pushSnapshot: pushSnapshot, pruneVersions: pruneVersions,
     latestVersion: latestVersion, addVersion: addVersion,
-    inferPhases: inferPhases, normalizeIndex: normalizeIndex, parseFinalOutline: parseFinalOutline, phaseTitle: phaseTitle,
+    inferPhases: inferPhases, normalizeIndex: normalizeIndex, parseFinalOutline: parseFinalOutline, inspectSelfCheck: inspectSelfCheck,
+    validateFinalDelivery: validateFinalDelivery, buildRevisionPrompt: buildRevisionPrompt, isSelfCheckOnly: isSelfCheckOnly, mergeSelfCheck: mergeSelfCheck, phaseTitle: phaseTitle,
     parseVerdict: parseVerdict, applyVerdict: applyVerdict,
-    mergePreferences: mergePreferences, buildPlannerSystem: buildPlannerSystem, buildPlannerStepMessages: buildPlannerStepMessages,
+    mergePreferences: mergePreferences, buildPlannerSystem: buildPlannerSystem, buildPlannerMessages: buildPlannerMessages,
+    buildInterjectionMessage: buildInterjectionMessage,
     buildJudgeSystem: buildJudgeSystem, buildJudgeUser: buildJudgeUser, buildJudgeMessages: buildJudgeMessages,
     buildRestructureMessages: buildRestructureMessages, buildArchiveMessages: buildArchiveMessages, parseArchive: parseArchive, fallbackArchive: fallbackArchive,
     reconBudget: reconBudget, allocateBudget: allocateBudget, clipChars: clipChars, clipMiddle: clipMiddle, composeMaterials: composeMaterials,
+    indexWorldbook: indexWorldbook, formatWorldbookCatalog: formatWorldbookCatalog, indexVariableSources: indexVariableSources, isInternalVarKey: isInternalVarKey, describeToolCall: describeToolCall,
     summarizeWorldbook: summarizeWorldbook, summarizeVariables: summarizeVariables
   };
 })(typeof globalThis !== 'undefined' ? globalThis : window);
