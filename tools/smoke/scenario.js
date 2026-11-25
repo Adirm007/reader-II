@@ -661,8 +661,15 @@ async function main() {
       await until(() => /导演 · 编纲/.test(docked.textContent) && /查阅资料与撰稿/.test(docked.textContent) && docked.querySelector('.rf-step')?.textContent === '2/4', '浮窗显示编纲的当前阶段（查阅资料与撰稿，2/4）', 3000);
       assert(docked.dataset.theme === $('#reader-agent-overlay').dataset.theme, '浮窗的主题应与助手窗口一致');
 
-      /* 关掉窗口：浮窗回到酒馆页面上，能展开、能点。 */
+      /*
+       * 关掉窗口：浮窗回到酒馆页面上，能展开、能点。
+       * <dialog> 的 close 事件是异步派发的，助手在它的处理函数里收起导演页（ui.js）。先等它派发完，再用「查看」重开：
+       * 晚到的 close 落在重开之后，会把刚显示的导演页收起来，页面不再跟着导演更新，定稿后状态卡一直停在「编纲中」。
+       */
+      let closeEvent = false;
+      $('#reader-agent-overlay').addEventListener('close', () => { closeEvent = true; }, { once: true });
       agent.close();
+      await until(() => closeEvent, '助手窗口的 close 事件');
       const floating = await until(() => (floatNode()?.dataset.dock === 'page' && floatNode().parentElement === document.body ? floatNode() : null), '浮窗回到页面上');
       assert(getComputedStyle(floating).position === 'fixed' && floating.getBoundingClientRect().width > 120, '页面上的浮窗应固定在角落');
       floating.querySelector('[data-rf="toggle"]').click();
