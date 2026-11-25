@@ -1471,8 +1471,16 @@
         event.stopPropagation();
       });
       overlay.addEventListener('cancel', function (event) { event.preventDefault(); close(); });
-      /* 不管是怎么关掉的（按钮、Esc、点遮罩），状态浮窗都要搬回酒馆页面上。 */
-      overlay.addEventListener('close', function () { if (directorUi) directorUi.hide(); syncFloat(); });
+      /*
+       * 不管是怎么关掉的（按钮、Esc、点遮罩），状态浮窗都要搬回酒馆页面上。
+       * close 事件是异步派发的：关窗后马上重开（例如点浮窗的「查看」），它会在窗口又开着时才到。
+       * 这时不能再收起导演页、搬走浮窗，否则导演页不再跟着更新，浮窗也停错了地方。
+       */
+      overlay.addEventListener('close', function () {
+        if (overlay && overlay.open) return;
+        if (directorUi) directorUi.hide();
+        syncFloat();
+      });
       /* scroll 事件不冒泡，直接挂在设置页与说明页的滚动容器上。 */
       var scroller = settingsScroll();
       if (scroller) scroller.addEventListener('scroll', function () { spy(false); }, { passive: true });

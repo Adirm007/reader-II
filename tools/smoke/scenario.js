@@ -688,6 +688,15 @@ async function main() {
   });
 
   await step('导演页：后台巡检更新简报；设置页有导演模型与简报位置；完结归档后可恢复', async () => {
+    /*
+     * 关窗后马上重开（不等 close 事件）：close 是异步派发的，会在窗口又开着时才到。
+     * 晚到的 close 不能把刚显示的导演页收起来——下面巡检出的新简报照样要刷到页面上。
+     */
+    agent.close();
+    agent.open('director');
+    await sleep(80);
+    assert($('#reader-agent-overlay')?.open && $('.ra-pane[data-pane="director"].is-on'), '关窗后马上重开，应停在导演页');
+    assert(!(floatNode()?.isConnected && floatNode().parentElement === document.body), '窗口开着时浮窗不该搬回酒馆页面上');
     mock.replies.length = 0;
     mock.replies.push(JSON.stringify({ drift_level: 1, reason: '换了路', phase_cursor: 2, state_delta: '绕到了钟楼后面', facts_add: ['没走正门'], local_patch: '艾琳改从后门送人',
       next_brief: dirBrief('第二轮'), volume_completed: false }));
