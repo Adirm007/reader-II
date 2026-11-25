@@ -224,15 +224,22 @@ test('百万窗口保留长旧输入；缩为两万后新对话从交接结论�
   assert.equal(log.events.filter((event) => event.type === 'context').at(-1).contextWindow, 20000);
   const body = JSON.stringify(log.backend.at(-1).body.messages);
   assert.match(body, /17:30/);
-  assert.doesNotMatch(body, /原始记录甲/);
+  /* 交接后旧原文不再整段带上，只按预算留首尾；之前的短问句照原文带。 */
+  assert.ok(!body.includes('原始记录甲'.repeat(300)));
+  assert.match(body, /中间省略约/);
+  assert.match(body, /续问0/);
   assert.ok(log.text.some((call) => JSON.stringify(call.prompts).includes(marker)));
   same(agent.getHistory().map((turn) => turn.text), ['根据结论排班', '记录好了。']);
   assert.equal(agent.threads.checkpoint().text, handoff);
+  assert.equal(agent.threads.checkpoint().users.at(-1), '续问10');
   await agent.threads.select(old);
   assert.equal(agent.getHistory()[0].text, document);
+  /* 开工时已存进原对话的那句不会被交接再补一遍。 */
+  assert.equal(agent.getHistory().filter((turn) => turn.text === '根据结论排班').length, 1);
   await agent.threads.select(current);
   assert.equal((await run('继续')).error, '');
   assert.match(JSON.stringify(log.backend.at(-1).body.messages), /17:30/);
+  assert.match(JSON.stringify(log.backend.at(-1).body.messages), /续问10/);
 });
 
 test('子代理只接收分配的资料和任务，使用单独的无工具请求，结论交还父代理', async () => {
@@ -423,7 +430,8 @@ test('上游返回真实窗口比配置小，摘要每一块和重试主请求�
   assert.match(JSON.stringify(log.text.at(-1).prompts), /最后一个定位/);
   assert.ok(log.backend.at(-1).body.max_tokens < 4000);
   assert.match(JSON.stringify(log.backend.at(-1).body.messages), /交接时间六点/);
-  assert.doesNotMatch(JSON.stringify(log.backend.at(-1).body.messages), /待核对的资料/);
+  /* 旧的长输入不再整段带上（压缩后用户原话只按窗口两成的预算留首尾）。 */
+  assert.ok(!JSON.stringify(log.backend.at(-1).body.messages).includes('待核对的资料。'.repeat(200)));
   assert.equal(log.events.filter(event => event.type === 'context').at(-1).contextWindow, 8000);
 });
 
@@ -447,7 +455,85 @@ test('新建交接对话后中断再打开，保留精确用户任务和已读�
   const wire = JSON.stringify(log.backend.at(-1).body.messages);
   assert.ok(wire.includes(task));
   assert.match(wire, /早两小时/);
-  assert.doesNotMatch(wire, /原始读数/);
+  /* 交接前的旧输入随检查点存下，按预算只留首尾带给新对话的模型。 */
+  assert.ok(!wire.includes('原始读数'.repeat(300)));
+  assert.match(wire, /用户此前的原话/);
+  /* 新对话里记下了出错的那一轮：用户任务原文和一条说明。 */
+  same(agent.getHistory().map((turn) => [turn.role, turn.interrupted || '']), [['user', ''], ['assistant', 'error'], ['user', ''], ['assistant', '']]);
+});
+
+test('停止、出错的一轮也保留用户原话和已执行的操作，下一轮的模型接得上', async () => {
+  const spec = '主角设定：Lv.5、特殊种族、时钟塔城平民、完全失忆、27 初始、简约核心技能';
+  let host = null;
+  const { agent, run, log } = makeHost({ backend: (body, turn) => {
+    if (turn === 1) return reply({ tool_calls: [nativeCall('read', { path: 'wb:/设定集/王都' })] });
+    if (turn === 2) { host.stop(); return reply({ content: '正在整理……' }); }
+    if (turn === 3) return { status: 403, body: { error: { message: '上游暂时拒绝了请求' } } };
+    return reply({ content: '都记下了。' });
+  } });
+  host = agent;
+  agent.saveSettings({ toolProtocol: 'native' });
+  const stopped = await run(spec);
+  assert.equal(stopped.aborted, true);
+  const failed = await run('记得核心能力方案 A');
+  assert.match(failed.error, /拒绝/);
+  assert.equal((await run('世界书深度调整，两种修改方式都用，要改也写成新条目')).error, '');
+  const wire = log.backend.at(-1).body.messages;
+  const text = JSON.stringify(wire);
+  assert.ok(text.includes(spec));
+  assert.ok(text.includes('记得核心能力方案 A'));
+  assert.match(text, /中途停止/);
+  assert.match(text, /read wb:\/设定集\/王都：完成/);
+  assert.match(text, /上游暂时拒绝了请求/);
+  same(wire.slice(1).map((message) => message.role), ['user', 'assistant', 'user', 'assistant', 'user']);
+  same(agent.getHistory().map((turn) => [turn.role, turn.interrupted || '']),
+    [['user', ''], ['assistant', 'aborted'], ['user', ''], ['assistant', 'error'], ['user', ''], ['assistant', '']]);
+  same(log.events.filter((event) => event.type === 'final').map((event) => event.interrupted), ['aborted', 'error', '']);
+});
+
+test('压缩上下文后，先前交代的用户原话照原文带给模型，下一轮也还在', async () => {
+  const spec = '主角设定：Lv.5、特殊种族、时钟塔城平民、完全失忆、27 初始、简约核心技能';
+  const follow = '记得核心能力方案 A；世界书深度调整，两种修改方式都用，要改也写成新条目';
+  const large = '设定资料'.repeat(9000);
+  const { agent, run, log } = makeHost({ text: () => '已把设定资料写入 ws:/设定稿，下一步按方案 A 调整世界书。', backend: (body, turn) => {
+    if (turn === 1) return reply({ content: '收到设定。' });
+    if (turn === 2) return reply({ tool_calls: [nativeCall('write', { path: 'ws:/设定稿', content: large })] });
+    return reply({ content: '已按设定调整。' });
+  } });
+  agent.saveModelSettings({ contextWindow: 20000 });
+  assert.equal((await run(spec)).error, '');
+  assert.equal((await run(follow)).error, '');
+  assert.equal(log.events.filter((event) => event.type === 'compact').length, 1);
+  assert.match(log.text[0].prompts[0].content, /一条都不能省/);
+  const compacted = log.backend.at(-1).body.messages;
+  assert.ok(!JSON.stringify(compacted).includes(large));
+  same(compacted.slice(1).map((message) => message.role), ['user', 'assistant', 'user']);
+  assert.match(compacted[1].content, /用户此前的原话/);
+  assert.ok(compacted[1].content.includes(spec));
+  assert.match(compacted[2].content, /此前工作摘要/);
+  assert.equal(compacted[3].content, follow);
+  assert.equal((await run('继续')).error, '');
+  const next = JSON.stringify(log.backend.at(-1).body.messages);
+  assert.ok(next.includes(spec));
+  assert.ok(next.includes(follow));
+  assert.match(next, /按方案 A 调整世界书/);
+});
+
+test('跑到一半切走聊天：原对话里仍留着用户这句，回来后模型知道那一轮没有完成', async () => {
+  const { agent, run, log, ctx } = makeHost({ backend: (body, turn) => {
+    if (turn === 1) { ctx.getCurrentChatId = () => 'chat-2'; return reply({ content: '好的。' }); }
+    return reply({ content: '那一轮被打断了，人口还是十万。要我现在改吗？' });
+  } });
+  assert.equal((await run('先把王都的人口改成九万')).aborted, true);
+  ctx.getCurrentChatId = () => 'chat-1';
+  await agent.threads.ready();
+  same(agent.getHistory().map((turn) => turn.text), ['先把王都的人口改成九万']);
+  assert.equal((await run('改好了吗？')).error, '');
+  const wire = log.backend.at(-1).body.messages.slice(1);
+  same(wire.map((message) => message.role), ['user', 'assistant', 'user']);
+  assert.equal(wire[0].content, '先把王都的人口改成九万');
+  assert.match(wire[1].content, /没有留下回复/);
+  assert.equal(wire[2].content, '改好了吗？');
 });
 
 test('旧预设开关失效，当前人格和助手专用文本随请求和工具续轮发送', async () => {
@@ -728,7 +814,10 @@ test('结构缺失时严格模式报告本批未执行，普通正文仍可解�
   const failure = await broken.run('查看资料。');
   assert.match(failure.error, /本批工具未执行/);
   assert.equal(broken.log.text.length, 1);
-  assert.equal(broken.agent.getHistory().length, 0);
+  /* 出错的这一轮也留在对话里：用户原话 + 一条没能完成的说明。 */
+  same(broken.agent.getHistory().map((turn) => [turn.role, turn.interrupted || '']), [['user', ''], ['assistant', 'error']]);
+  assert.equal(broken.agent.getHistory()[0].text, '查看资料。');
+  assert.match(broken.agent.getHistory()[1].text, /没能完成/);
 
   const explanation = '数组转成字符串会显示 [object Object],[object Object]。';
   const chat = makeHost({ backend: () => reply({ content: explanation }) });

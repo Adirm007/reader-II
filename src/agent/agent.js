@@ -64,6 +64,77 @@
   var prefixLength = kernel.prefixLength;
   /* 同一批里全是可并行的只读调用时，最多同时跑这么多个（见主循环）。 */
   var PARALLEL_TOOLS = 4;
+  /*
+   * 上下文压缩（或交接到新对话）之后，用户自己说过的话照原文带给模型：最多这么多 token，且不超过输入窗口的两成。
+   * 摘要篇幅有限，又以当前这句为重点，早先给的要求、设定和数值最容易被挤掉（真机：先交代的「Lv.5、特殊种族、
+   * 时钟塔城平民、完全失忆……」压缩后整段不见，模型只记得后来补的两句）。交接到新对话时，这些原话随检查点存下：
+   * 单条超长的留首尾，总量有上限。
+   */
+  var USER_ECHO_TOKENS = 20000;
+  var USER_ECHO_ITEM_CHARS = 12000;
+  var USER_ECHO_STORE_CHARS = 48000;
+  var USER_ECHO_FALLBACK = '（此前用户说过的话较多，要点已整理进下面的工作摘要。）';
+
+  function isHighSurrogate(code) { return code >= 0xD800 && code <= 0xDBFF; }
+  function isLowSurrogate(code) { return code >= 0xDC00 && code <= 0xDFFF; }
+
+  /* 按字数截取，保留开头和结尾（长段落里的要求常写在首尾），中间注明省略了多少字；不拆代理对。 */
+  function clipChars(text, chars) {
+    if (text.length <= chars) return text;
+    var half = Math.max(1, Math.floor(chars / 2));
+    var headEnd = half, tailStart = text.length - half;
+    if (isHighSurrogate(text.charCodeAt(headEnd - 1))) headEnd -= 1;
+    if (isLowSurrogate(text.charCodeAt(tailStart))) tailStart += 1;
+    return text.slice(0, headEnd) + '\n…（中间省略约 ' + (tailStart - headEnd) + ' 字）…\n' + text.slice(tailStart);
+  }
+
+  /* 同上，按 token 预算。 */
+  function clipMiddle(text, tokens) {
+    if (tokenEstimate(text) <= tokens) return text;
+    var half = Math.max(8, Math.floor((tokens - 24) / 2));
+    var head = text.slice(0, prefixLength(text, half));
+    var tail = kernel.clipToTokens(text, half, true).replace(/^…/, '');
+    var omitted = text.length - head.length - tail.length;
+    if (omitted <= 0) return text;
+    return head + '\n…（中间省略约 ' + omitted + ' 字）…\n' + tail;
+  }
+
+  function nonEmptyTexts(list) {
+    return (Array.isArray(list) ? list : []).map(function (text) { return String(text == null ? '' : text).trim(); }).filter(Boolean);
+  }
+
+  /* 存进交接检查点的用户原话：从最近的往前取，单条超长的留首尾，总字数有上限；按时间先后返回。 */
+  function storedUsers(list) {
+    var texts = nonEmptyTexts(list), kept = [], total = 0;
+    for (var index = texts.length - 1; index >= 0; index -= 1) {
+      var text = clipChars(texts[index], USER_ECHO_ITEM_CHARS);
+      if (total + text.length > USER_ECHO_STORE_CHARS && kept.length) break;
+      kept.unshift(text);
+      total += text.length;
+    }
+    return kept;
+  }
+
+  /*
+   * 压缩后给模型看的用户原话：从最近的往前取，单条最多占预算的一半（过长的留首尾），
+   * 放不下的更早几条只注明条数（它们早先已经整理进工作摘要）。预算太小时返回空串。
+   */
+  function userEcho(list, budget) {
+    var texts = nonEmptyTexts(list);
+    if (!texts.length || !(budget >= 240)) return '';
+    var cap = Math.max(160, Math.floor(budget / 2));
+    var used = 90, items = [], omitted = 0;
+    for (var index = texts.length - 1; index >= 0; index -= 1) {
+      var left = budget - used - 16;
+      if (left < 80) { omitted += 1; continue; }
+      var piece = clipMiddle(texts[index], Math.min(cap, left));
+      used += tokenEstimate(piece) + 16;
+      items.unshift(piece);
+    }
+    return '【用户此前的原话】（较早的对话已整理成工作摘要；这里按时间先后保留用户自己说过的话，其中的要求、设定和数值以原话为准。）'
+      + (omitted ? '\n（更早的 ' + omitted + ' 条没有放进来，要点见工作摘要。）' : '')
+      + items.map(function (text, index) { return '\n\n〔' + (index + 1) + '〕' + text; }).join('');
+  }
 
   function normalizeSubagents(source) {
     source = source || {};
@@ -155,6 +226,7 @@
         if (Array.isArray(turn.tools) && turn.tools.length) item.tools = turn.tools.map(String).slice(0, 20);
         if (Array.isArray(turn.images) && turn.images.length) item.images = turn.images;
         if (Array.isArray(turn.videos) && turn.videos.length) item.videos = turn.videos;
+        if (turn.interrupted === 'aborted' || turn.interrupted === 'error') item.interrupted = turn.interrupted;
         output.turns.push(item);
       });
       /* 旧聊天可以继续翻阅。第一次写入新版历史时，把之前的聊天整体留在整理起点之前。 */
@@ -168,7 +240,14 @@
       return kit.writeChatValue(HISTORY_KEY, history, options);
     }
 
-    return { read: readHistory, write: writeHistory, turnId: turnId };
+    /* 读-改-写（与线程库的 update 同一用法）；聊天变量是同步读写的，不必排队。 */
+    function updateHistory(mutate) {
+      var history = readHistory();
+      if (mutate(history) === false) return Promise.resolve(true);
+      return Promise.resolve(writeHistory(history));
+    }
+
+    return { read: readHistory, write: writeHistory, update: updateHistory, turnId: turnId };
   }
 
   function createAgent(env, llm, kit, memory, deps) {
@@ -233,6 +312,14 @@
     var writeHistory = deps.history.write;
     var turnId = deps.history.turnId;
 
+    /* 读-改-写一次对话记录。线程库把它排进自己的写入队列；没有 update 的旧接口退回读一次、写一次。 */
+    async function updateHistory(mutate) {
+      if (typeof deps.history.update === 'function') return deps.history.update(mutate);
+      var latest = readHistory();
+      if (mutate(latest) === false) return true;
+      return writeHistory(latest);
+    }
+
     function getHistory() { return readHistory().turns; }
 
     function threadId() { return deps.history.currentId ? deps.history.currentId() : ''; }
@@ -271,7 +358,11 @@
       var oldCheckpoint = history.checkpoint;
       var throughIndex = oldCheckpoint && history.turns.findIndex(function (item) { return item.id === oldCheckpoint.throughId; });
       if (throughIndex >= 0 && history.turns.indexOf(turn) <= throughIndex) {
-        if (oldCheckpoint.seed) history.checkpoint = { text: oldCheckpoint.seed, throughId: '', seed: oldCheckpoint.seed };
+        if (oldCheckpoint.seed) {
+          history.checkpoint = { text: oldCheckpoint.seed, throughId: '', seed: oldCheckpoint.seed };
+          /* 交接时带来的用户原话属于上一段对话，回到交接起点时照样保留。 */
+          if (Array.isArray(oldCheckpoint.users) && oldCheckpoint.users.length) history.checkpoint.users = oldCheckpoint.users;
+        }
         else delete history.checkpoint;
       }
       turn.text = text;
@@ -597,21 +688,26 @@
       return sizer.messages(messages, toolSize ? toolSize + 16 : 8);
     }
 
-    var SUMMARY_PROMPT = '你是任务交接摘要整理器。仅依据提供的对话、工具输出与既有摘要，整理一份紧凑、可直接接续工作的交接单：'
-      + '明确用户目标与约束、已完成的操作与验证结果、已读关键路径与结论、尚未验证项以及下一步待办。'
-      + '保留精确路径、定位与具体值，冲突信息以最新证据为准，直接输出精炼交接单。';
+    /* 用户的要求单列第一项：摘要以当前这句为重点、又按「最新证据为准」去重时，早先交代、后来没再提的要求最容易被丢掉。 */
+    var SUMMARY_PROMPT = '你是任务交接摘要整理器。仅依据提供的对话、工具输出与既有摘要，整理一份紧凑、可直接接续工作的交接单，依次写：'
+      + '一、用户提出过的全部要求、设定、偏好与约束，逐条列出，保留原词和具体数值；早先提出、之后没有被用户明确改口的要求一条都不能省，'
+      + '用户改过口的只写最后的说法；'
+      + '二、已完成的操作与验证结果、已读关键路径与结论；三、尚未验证项以及下一步待办。'
+      + '保留精确路径、定位与具体值；工具结果互相冲突时以最新证据为准。直接输出精炼交接单。';
 
     async function summarize(messages, input, room, route, checkActive) {
       // 原生调用与结果在同一份记录中总结，发往摘要模型的消息完全不含工具协议。
-      var pieces = messages.filter(function (message) { return !message.activeInput && message.role !== 'system'; }).map(function (message) {
+      // 用户原话（echo）压缩后照原文另带，不再送去摘要。
+      var pieces = messages.filter(function (message) { return !message.activeInput && !message.echo && message.role !== 'system'; }).map(function (message) {
         if (message.roundSummary) return (message.assistantProse ? '助手判断：' + message.assistantProse + '\n' : '')
           + '已执行工具批次：' + message.roundSummary + (message.roundTail ? '\n' + message.roundTail : '');
         return (message.toolResult ? '工具返回' : message.role === 'user' ? '用户' : '助手') + '：' + (message.content || '');
       });
-      var limit = Math.min(2048, Math.floor(room * 0.55), Math.floor(route.window * 0.12));
+      var cap = Math.max(2048, Math.min(4096, settings.maxTokens || 0));
+      var limit = Math.min(cap, Math.floor(room * 0.55), Math.floor(route.window * 0.12));
       if (limit < 80) throw new Error('系统指令、工具和本次输入已占满模型窗口，无法容纳任务摘要。请缩短当前输入或调整模型窗口。');
       var question = input.slice(0, prefixLength(input, Math.min(600, Math.floor(route.window / 12))));
-      var header = '当前任务（定位摘要重点）：' + question + '\n';
+      var header = '当前这句用户输入（帮助判断重点；更早的要求同样要保留）：' + question + '\n';
       var chunkSize = route.window - (limit * 2 + tokenEstimate(SUMMARY_PROMPT + header) + Math.ceil(route.window * 0.06) + 128);
       if (chunkSize < 128) throw new Error('当前模型窗口过小，无法容纳摘要请求');
       var rolling = '', chunk = '', left = chunkSize;
@@ -649,8 +745,10 @@
       return rolling;
     }
 
-    function resumedMessages(system, summary, user, tail) {
+    /* echo：用户此前的原话（user）在前，助手自己的工作摘要（assistant）在后——角色交替，原话也不会被当成助手的转述。 */
+    function resumedMessages(system, summary, user, tail, echo) {
       var messages = [system];
+      if (echo && echo.content) messages.push(echo);
       if (summary) messages.push({ role: 'assistant', content: '【此前工作摘要】\n' + summary, checkpoint: true });
       messages.push(user);
       if (tail) messages.push({ role: 'user', content: tail, continuation: true });
@@ -1132,26 +1230,50 @@
         assertRunActive(job.key, signal);
       }
       var images = [], videos = [], usedTools = [], delivering = false;
-      async function deliver() {
+      /* 被停止或出错的一轮留在对话里的说明：做到了哪一步，下一轮的模型据此接着办，不重做、不漏做。 */
+      function interruptedText(kind) {
+        var text = images.length || videos.length ? '已生成的附件如下。' : '';
+        text += kind === 'aborted' ? '（这次任务被中途停止，没有完成。）' : '（这次任务没能完成：' + result.error + '）';
+        if (!steps.length) return text;
+        var shown = steps.slice(-12).map(function (step) {
+          var path = step.args && typeof step.args.path === 'string' ? ' ' + shorten(step.args.path, 80) : '';
+          var note = String(step.summary || '').replace(/\s+/g, ' ').trim();
+          return '- ' + (step.name || '?') + path + (step.ok ? '：完成' : step.denied ? '：未获准' : '：未完成') + (note ? '（' + shorten(note, 80) + '）' : '');
+        });
+        return text + '\n已执行的操作' + (steps.length > shown.length ? '（共 ' + steps.length + ' 步，这里是最后 ' + shown.length + ' 步）' : '') + '：\n' + shown.join('\n');
+      }
+      /*
+       * 把这一轮记进对话。用户这句话在开工时已经先存下（job.userTurn），这里只补回复；
+       * 中途交接到了新对话、或者开工时没存上的，连同用户这句一起写进当前对话。
+       * interrupted 为 'aborted' | 'error' 时，回复换成 interruptedText 的说明，并且不触发记忆整理。
+       */
+      async function deliver(interrupted) {
         delivering = true;
         result.images = images; result.videos = videos;
         var savedTurns = null;
         try {
           if (opts.remember === false || kit.chatKey() !== job.key || threadId() !== job.thread) return;
-          var latest = readHistory();
-          if (latest.checkpoint && latest.checkpoint.pendingInput === input) delete latest.checkpoint.pendingInput;
-          var userTurn = { id: turnId(), role: 'user', text: input, at: Date.now() };
-          var reply = { id: turnId(), role: 'assistant', text: result.answer, at: Date.now() };
+          var reply = { id: turnId(), role: 'assistant', text: interrupted ? interruptedText(interrupted) : result.answer, at: Date.now() };
+          if (interrupted) reply.interrupted = interrupted;
           if (images.length) reply.images = images;
           if (videos.length) reply.videos = videos;
           if (usedTools.length) reply.tools = usedTools;
-          latest.turns.push(userTurn, reply);
-          if (!await writeHistory(latest)) throw new Error('助手回复无法保存到当前对话');
+          var userTurn = job.userTurn;
+          var saved = await updateHistory(function (latest) {
+            if (latest.threadId && latest.threadId !== job.thread) throw new Error('助手对话已切换，这一轮没有保存');
+            if (latest.checkpoint && latest.checkpoint.pendingInput === input) delete latest.checkpoint.pendingInput;
+            if (!userTurn || !latest.turns.some(function (turn) { return turn.id === userTurn.id; })) {
+              userTurn = { id: turnId(), role: 'user', text: input, at: Date.now() };
+              latest.turns.push(userTurn);
+            }
+            latest.turns.push(reply);
+          });
+          if (!saved) throw new Error('助手回复无法保存到当前对话');
           savedTurns = [userTurn, reply];
-          if (!unbound() && memory) memory.consolidate({ automatic: true }).catch(function () { /* 助手回复已保存 */ });
+          if (!interrupted && !unbound() && memory) memory.consolidate({ automatic: true }).catch(function () { /* 助手回复已保存 */ });
         } finally {
           if (kit.chatKey() === job.key && threadId() === job.thread) emit({ type: 'final', text: result.answer, images: images, videos: videos,
-            runId: result.runId, changes: record ? record.changes : 0, turns: savedTurns });
+            runId: result.runId, changes: record ? record.changes : 0, turns: savedTurns, interrupted: interrupted || '' });
         }
       }
       try {
@@ -1160,6 +1282,21 @@
         job.thread = threadId();
         checkActive();
         if (sessionChat !== JSON.stringify([job.key, job.thread])) resetThreadState();
+        /*
+         * 开工前先把用户这句话存进对话。以前要等整轮跑完才连同回复一起写入：中途点了停止、请求出错、
+         * 或者切走了聊天，这句话就从记录里消失了，下一轮的模型只看得到后来补的话（真机：「记后面丢前面」）。
+         * 存不上（例如别的标签页正在改同一条对话）时照旧在收尾时连同回复一起写，运行本身不受影响。
+         */
+        if (opts.remember !== false) {
+          var pendingTurn = { id: turnId(), role: 'user', text: input, at: Date.now() };
+          try {
+            if (await updateHistory(function (latest) {
+              if (latest.threadId && latest.threadId !== job.thread) throw new Error('助手对话已切换');
+              latest.turns.push(pendingTurn);
+            })) job.userTurn = pendingTurn;
+          } catch (error) { /* 见上 */ }
+          checkActive();
+        }
         await connectors.prepare(signal);
         checkActive();
         /* 模型探测、记忆召回、剧情摘要互不依赖，一起等：冷启动时各自都可能卡上几秒（模型元数据、插件的摘要接口）。 */
@@ -1179,10 +1316,26 @@
         var proto = lite ? { mode: 'text', via: '', key: '', reason: '轻聊' } : pickProtocol();
         var messages = [{ role: 'system', content: '' }];
         var history = readHistory();
+        /* 只取这句用户消息之前的记录（它在开工时已经存进去了，作为本轮输入单独放在最后）。 */
+        var mark = job.userTurn ? history.turns.findIndex(function (turn) { return turn.id === job.userTurn.id; }) : -1;
+        var earlier = mark >= 0 ? history.turns.slice(0, mark) : history.turns;
         var checkpoint = settings.historyTurns !== 0 && history.checkpoint;
-        var covered = checkpoint && checkpoint.throughId ? history.turns.findIndex(function (turn) { return turn.id === checkpoint.throughId; }) : -1;
-        var previousTurns = settings.historyTurns === 0 ? [] : history.turns.slice(covered + 1);
+        var covered = checkpoint && checkpoint.throughId ? earlier.findIndex(function (turn) { return turn.id === checkpoint.throughId; }) : -1;
+        var previousTurns = settings.historyTurns === 0 ? [] : earlier.slice(covered + 1);
         if (settings.historyTurns > 0) previousTurns = previousTurns.slice(-settings.historyTurns * 2);
+        /*
+         * 用户此前的原话：交接时从上一段对话带来的、这段对话里已被摘要盖住的（coveredUsers），加上照原文带着的历史里的。
+         * 有摘要时，被盖住的那部分照原文放在摘要前面（echo）；这一轮中途再压缩，就改为全部 priorUsers。
+         */
+        var userTexts = function (turns) { return turns.filter(function (turn) { return turn.role === 'user'; }).map(function (turn) { return turn.text; }); };
+        var coveredUsers = checkpoint ? nonEmptyTexts(checkpoint.users).concat(userTexts(earlier.slice(0, covered + 1))) : [];
+        var priorUsers = coveredUsers.concat(userTexts(previousTurns));
+        var echoSource = coveredUsers;
+        var echoMessage = null, echoMark = '';
+        if (echoSource.length) {
+          echoMessage = { role: 'user', content: '', echo: true };
+          messages.push(echoMessage);
+        }
         if (checkpoint && checkpoint.text) {
           var inheritedTask = checkpoint.pendingInput || checkpoint.task;
           var taskRecorded = inheritedTask && (input === inheritedTask || previousTurns.some(function (turn) { return turn.role === 'user' && turn.text === inheritedTask; }));
@@ -1190,20 +1343,25 @@
           if (inheritedTask && !taskRecorded) priorText += '\n【交接时的用户任务】\n' + inheritedTask;
           messages.push({ role: 'assistant', content: priorText, checkpoint: true });
         }
-        previousTurns.forEach(function (turn) {
+        previousTurns.forEach(function (turn, index) {
           var text = turn.text;
           if (turn.role === 'assistant') text = llm.visibleText(text);
           if (turn.images && turn.images.length) text += '\n（此回复附有 ' + turn.images.length + ' 张图片）';
           if (turn.videos && turn.videos.length) text += '\n（此回复附有 ' + turn.videos.length + ' 段视频）';
           if (text || turn.tools) messages.push({ role: turn.role, history: true, content: text + (turn.tools ? '\n（当时用过的工具：' + turn.tools.join('、') + '）' : '') });
+          /* 用户发了话、那一轮却没留下回复（跑到一半切走了聊天、页面被关）：补一句，免得两条用户消息挨着、模型以为前一句已经办完。 */
+          if (turn.role === 'user') {
+            var next = previousTurns[index + 1];
+            if (!next || next.role === 'user') messages.push({ role: 'assistant', history: true, content: '（这条消息之后没有留下回复，那一轮没有在这里完成。）' });
+          }
         });
         var userMessage = { role: 'user', content: input, activeInput: true };
         messages.push(userMessage);
         emit({ type: 'start', persona: persona.name, recalled: recalled.length, runId: result.runId, protocol: proto.mode });
         await registry.emit('run:start', { input: input, runId: result.runId });
 
-        /* 用户亲口说过的话（这一句与历史里的用户发言）：联网工具据此判断某个网址是不是用户自己给的。 */
-        var userText = [input].concat(previousTurns.filter(function (turn) { return turn.role === 'user'; }).map(function (turn) { return turn.text.slice(0, 12000); })).join('\n');
+        /* 用户亲口说过的话（这一句与此前的用户发言）：联网工具据此判断某个网址是不是用户自己给的。 */
+        var userText = [input].concat(priorUsers.map(function (text) { return text.slice(0, 12000); })).join('\n');
         var state = {
           seen: Object.create(null), opts: opts, emit: emit, run: record, chatKey: job.key,
           toolCtx: {
@@ -1270,14 +1428,21 @@
           if (retryWindow && route.key === retryWindow.key && retryWindow.size < route.window) {
             applyWindow(route, retryWindow.size, retryWindow.origin, settings.maxTokens);
           }
-          var used = estimateRequest(messages, lite, proto);
           var reserved = route.options.maxTokens;
           var tail = forced ? (forced === 'step_limit' ? budgetNote : '请根据已得到的结果收尾，说明未完成之处。') : '';
           if (job.todos.length) tail = planText(job.todos) + '\n' + tail;
           var fresh = resumedMessages(messages[0], '', userMessage, tail);
           var fixed = estimateRequest(fresh, lite, proto);
+          /* 用户原话的预算随窗口定；同一个窗口里只排一次，前缀不变，好吃缓存。 */
+          var echoBudget = Math.min(USER_ECHO_TOKENS, Math.floor(route.input * 0.2), Math.floor(route.input * 0.7) - fixed);
+          var echoKey = route.key + '|' + route.input;
+          if (echoMessage && echoMark !== echoKey) {
+            echoMark = echoKey;
+            echoMessage.content = userEcho(echoSource, echoBudget) || USER_ECHO_FALLBACK;
+          }
+          var used = estimateRequest(messages, lite, proto);
           var reducible = messages.some(function (item) {
-            return !(item.role === 'system' || item.activeInput || item.checkpoint || item.continuation);
+            return !(item.role === 'system' || item.activeInput || item.checkpoint || item.continuation || item.echo);
           }) || (used > route.input && messages.some(function (item) { return item.checkpoint; }));
           if (fixed + 512 > route.input && !route.imageOnly) {
             // 输入贴近上限时，只预留实际可用的输出空间，同时给交接单留出位置。
@@ -1288,26 +1453,38 @@
           }
           if (!route.imageOnly && used > route.input * 0.9 && reducible) {
             emit({ type: 'summarizing', strategy: settings.contextStrategy, used: used, contextWindow: route.window });
-            var summary = await summarize(messages, input, route.input - fixed - 32, route, checkActive);
+            /* 压缩以后，这句之前用户说过的话全部改由原文带上（预算内），摘要只需交代做过的事和结论。 */
+            var nextEcho = priorUsers.length ? { role: 'user', echo: true, content: userEcho(priorUsers, echoBudget) || USER_ECHO_FALLBACK } : null;
+            var echoSize = nextEcho ? kernel.messageSize(nextEcho) : 0;
+            var summary = await summarize(messages, input, route.input - fixed - echoSize - 32, route, checkActive);
             checkActive();
             if (opts.remember !== false) {
               if (settings.contextStrategy === 'handoff' && deps.history.handoff) {
-                await deps.history.handoff({ fromId: job.thread, summary: summary, input: input });
+                await deps.history.handoff({ fromId: job.thread, summary: summary, input: input,
+                  inputId: job.userTurn ? job.userTurn.id : '', users: storedUsers(priorUsers) });
                 job.thread = threadId();
                 resetThreadState();
                 messages[0].content = buildSystem(persona, recalled, plot, lite, proto.mode);
                 emit({ type: 'handoff', summary: summary, threadId: job.thread });
               } else {
-                var latest = readHistory();
-                var prior = latest.checkpoint;
-                latest.checkpoint = { text: summary, throughId: latest.turns.length ? latest.turns[latest.turns.length - 1].id : '', pendingInput: input };
-                if (prior && (prior.seed || prior.task)) latest.checkpoint.seed = prior.seed || prior.text;
-                if (!await writeHistory(latest)) throw new Error('无法保存工作摘要，原对话已保留');
+                var saved = await updateHistory(function (latest) {
+                  if (latest.threadId && latest.threadId !== job.thread) throw new Error('助手对话已切换，工作摘要没有保存');
+                  var prior = latest.checkpoint;
+                  /* 摘要盖住的是这句之前的记录；这句（开工时已存）和之后的回复留在摘要后面照原文带。没存上的才记 pendingInput。 */
+                  var at = job.userTurn ? latest.turns.findIndex(function (turn) { return turn.id === job.userTurn.id; }) : -1;
+                  var through = at >= 0 ? at - 1 : latest.turns.length - 1;
+                  latest.checkpoint = { text: summary, throughId: through >= 0 ? latest.turns[through].id : '' };
+                  if (at < 0) latest.checkpoint.pendingInput = input;
+                  if (prior && (prior.seed || prior.task)) latest.checkpoint.seed = prior.seed || prior.text;
+                  if (prior && Array.isArray(prior.users) && prior.users.length) latest.checkpoint.users = prior.users;
+                });
+                if (!saved) throw new Error('无法保存工作摘要，原对话已保留');
                 emit({ type: 'compact', summary: summary });
               }
             } else emit({ type: 'compact', summary: summary });
             checkActive();
-            messages = resumedMessages(messages[0], summary, userMessage, tail);
+            echoMessage = nextEcho; echoSource = priorUsers; echoMark = echoKey;
+            messages = resumedMessages(messages[0], summary, userMessage, tail, nextEcho);
             used = estimateRequest(messages, lite, proto);
           }
           if (!route.imageOnly && used > route.input) {
@@ -1514,7 +1691,8 @@
         result.answer = answer || (images.length || videos.length ? '' : '（模型没有给出回答，请再试一次。）');
         await deliver();
       } catch (error) {
-        if (error && error.name === 'AbortError') {
+        var kind = error && error.name === 'AbortError' ? 'aborted' : 'error';
+        if (kind === 'aborted') {
           result.aborted = true;
           result.answer = '（已停止。）';
           emit({ type: 'aborted' });
@@ -1523,9 +1701,10 @@
           result.answer = '（这次没能完成：' + result.error + '）';
           emit({ type: 'error', message: result.error });
         }
-        if (!delivering && (images.length || videos.length) && kit.chatKey() === job.key && threadId() === job.thread) {
-          result.answer = '已生成的附件如下。' + result.answer;
-          try { await deliver(); } catch (saveError) { emit({ type: 'error', message: String(saveError.message || saveError) }); }
+        /* 停止、出错的这一轮也记进对话（用户这句开工时已存；这里补上做到哪一步、已生成的附件）。切走了聊天的，原对话里仍留着用户这句。 */
+        if (!delivering && kit.chatKey() === job.key && threadId() === job.thread) {
+          if (images.length || videos.length) result.answer = '已生成的附件如下。' + result.answer;
+          try { await deliver(kind); } catch (saveError) { emit({ type: 'error', message: String(saveError.message || saveError) }); }
         }
       } finally {
         result.rounds = rounds;

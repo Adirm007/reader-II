@@ -330,7 +330,11 @@
       if (next.checkpoint && next.checkpoint.text) data.checkpoint = modules.clone(next.checkpoint);
       var result = await mutate(s, function (directory, writer) {
         var live = directory.rows.find(function (item) { return item.id === row.id; });
-        if (!live || live.revision !== revision) throw new Error('对话已被其他操作修改，请重新打开对话');
+        if (!live || live.revision !== revision) {
+          var conflict = new Error('对话已被其他操作修改，请重新打开对话');
+          conflict.code = 'thread_conflict';
+          throw conflict;
+        }
         var first = data.turns.find(function (turn) { return turn.role === 'user'; });
         if (!live.title && first) live.title = first.text.trim().slice(0, 40);
         live.updated = Date.now();
@@ -342,6 +346,33 @@
       if (currentId() === row.id) await install(s, result, data);
       return true;
     }
+    /*
+     * 读-改-写合成一个排队动作（助手追加消息、存工作摘要用）：前面排着的写入都落定后才读，
+     * 不会拿着旧版本去撞别处刚写下的内容（例如记忆整理推进的游标）。别的标签页改过这条对话时
+     * （版本对不上），重新载入一次再改；对话被删了或已经换成别的，就照原样报错。
+     * mutator 直接改传进来的副本，返回 false 表示不用写。
+     */
+    async function update(mutator) {
+      var s = scope();
+      await ready(); same(s);
+      var expectedId = currentId();
+      for (var attempt = 0; ; attempt += 1) {
+        var data = read();
+        if (mutator(data) === false) return true;
+        try {
+          return await write(data);
+        } catch (error) {
+          if (attempt || !error || error.code !== 'thread_conflict') throw error;
+          var result = await mutate(s, function (directory) {
+            var live = directory.rows.find(function (item) { return item.id === expectedId; });
+            if (!live) throw error;
+            return live;
+          });
+          await install(s, result);
+          if (currentId() !== expectedId || !canRun()) throw error;
+        }
+      }
+    }
     async function create(options) {
       var s = scope();
       await ready(); same(s);
@@ -349,11 +380,15 @@
       if (opts.fromId) {
         if (currentId() !== opts.fromId || !canRun()) throw new Error('交接来源已切换，请重试');
         data.checkpoint = { text: opts.summary, throughId: '', task: String(opts.input || '') };
+        /* 交接前用户说过的话（原文，助手已按条数和字数截好）：新对话的模型照原文看，不只看摘要。 */
+        if (Array.isArray(opts.users) && opts.users.length) data.checkpoint.users = opts.users.map(String);
       }
       var title = opts.fromId ? '交接 · ' + String(opts.input || s.active.title || '继续任务').slice(0, 35) : '';
       var row = makeRow(owner, title, opts.fromId);
       var parentData = opts.fromId ? modules.clone(s.data) : null;
-      if (parentData && opts.input) parentData.turns.push({ id: id(), role: 'user', text: String(opts.input), at: Date.now() });
+      /* 助手开工时已经把这句存进原对话的（inputId），不再补第二遍。 */
+      var recorded = parentData && opts.inputId && parentData.turns.some(function (turn) { return turn.id === opts.inputId; });
+      if (parentData && opts.input && !recorded) parentData.turns.push({ id: id(), role: 'user', text: String(opts.input), at: Date.now() });
       var result = await mutate(s, function (directory, writer) {
         if (opts.fromId) {
           var parent = directory.rows.find(function (item) { return item.id === opts.fromId; });
@@ -421,7 +456,7 @@
     }
     var newThread = queued(create);
     return {
-      ready: whenReady, refresh: queued(refresh), read: read, write: queued(write), turnId: id, currentId: currentId, canRun: canRun, isUnbound: isUnbound,
+      ready: whenReady, refresh: queued(refresh), read: read, write: queued(write), update: queued(update), turnId: id, currentId: currentId, canRun: canRun, isUnbound: isUnbound,
       checkpoint: function () { var data = scope().data; return data && modules.clone(data.checkpoint); },
       list: function () { return modules.clone(scope().rows).sort(function (a, b) { return b.updated - a.updated; }); },
       persistent: function () { return scope().remembered; },

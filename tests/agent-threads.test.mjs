@@ -97,6 +97,29 @@ test('交接只带摘要，保留来源；并发编辑按版本拒绝覆盖，�
   assert.equal(history.currentId(), dest);
 });
 
+test('update 排队读改写；另一个标签页改过时重新载入再追加；交接不重复补已存的用户原话', async () => {
+  const { history, reopen } = setup();
+  await history.ready();
+  const fromId = history.currentId();
+  const another = reopen();
+  await another.ready();
+  await another.update((data) => { data.turns.push({ id: 'x', role: 'user', text: '另一页先说的' }); });
+  /* 这一页缓存的还是旧版本：版本对不上时重新载入，再把这句追加上去，不覆盖另一页写的。 */
+  await history.update((data) => { data.turns.push({ id: 'y', role: 'user', text: '这一页后说的' }); });
+  assert.equal(history.read().turns.map((turn) => turn.id).join(','), 'x,y');
+  /* 同一页里排在后面的 update 读到的是前一个落定后的内容。 */
+  await Promise.all([
+    history.update((data) => { data.turns.push({ id: 'a1', role: 'assistant', text: '一' }); }),
+    history.update((data) => { data.extracted = data.turns.length; }),
+  ]);
+  assert.equal(history.read().extracted, 3);
+  const dest = await history.handoff({ fromId, input: '这一页后说的', inputId: 'y', summary: '摘要', users: ['另一页先说的'] });
+  assert.equal(history.currentId(), dest);
+  assert.equal(history.read().checkpoint.users.join(','), '另一页先说的');
+  await history.select(fromId);
+  assert.equal(history.read().turns.map((turn) => turn.id).join(','), 'x,y,a1');
+});
+
 test('待返回的正文刷新不会覆盖新选中的线程，带占位角色 ID 的欢迎页使用无卡记录', async () => {
   const { ctx, history } = setup();
   await history.ready();

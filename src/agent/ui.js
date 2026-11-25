@@ -431,6 +431,11 @@
       }
       if (event.type === 'final') {
         clearIndicator();
+        /* 被停止或出错的一轮：「已停止」「没能完成」已作为提示显示过；这里只把用户那条接上存档（之后可编辑）。带附件的照常显示。 */
+        if (event.interrupted && !(event.images && event.images.length) && !(event.videos && event.videos.length)) {
+          if (event.turns) showTurn(pendingUserNode, event.turns[0]);
+          return;
+        }
         var replyNode = append(rich(event.text) + (event.turns ? '' : mediaHtml(event)), 'ra-msg ra-ai');
         if (event.turns) {
           var greeting = $('#ra-log [data-turn-id="greeting"]:not(.is-editing)');
