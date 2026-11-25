@@ -619,7 +619,7 @@ async function main() {
     + '\n</volume_index>\n<first_brief>\n' + dirBrief('Phase 1 · 雨夜') + '\n</first_brief>';
   const floatNode = () => $('#reader-agent-float');
 
-  await step('导演页：开卷四步编纲；状态浮窗随助手窗口的开关换停靠位', async () => {
+  await step('导演页：开卷单会话编纲，交代的话进首个编纲请求；状态浮窗随助手窗口的开关换停靠位', async () => {
     mock.replies.length = 0;
     /* 两种模式共用同一个浏览器档案：上一种模式留下的分卷还在工作区里（档案是持久的），先清掉再从头演。 */
     await director.ready();
@@ -632,34 +632,47 @@ async function main() {
     await until(() => ($('#rd-skill')?.value || '').includes('## 阶段五'), 'Skill 编辑器载入内置正文');
     assert(!/undefined|\[object /.test($('[data-pane="director"]').textContent), '导演页文字里出现了 undefined');
 
+    /*
+     * 单会话编纲：先在本地建图（不调模型），再在同一个只读 Agent 会话里边查资料边写。
+     * 假模型第一轮用 read 查一条世界书，第二轮交付四段标签；第二轮先停在闸门上，好在编纲途中看浮窗。
+     * 闸门在 finally 里放开：中途哪条断言没过，编纲也照样定稿，不会把后面的导演步骤一起拖死。
+     */
     let release;
     const gate = new Promise((resolve) => { release = resolve; });
-    mock.replies.push('《勘察卡》土壤够肥。', async () => { await gate; return '卷核：一本账与一座钟。'; }, dirOutline, dirDelivery);
-    $('#rd-say-text').value = '这一卷不要阴谋';
-    $('[data-act="dir-activate"]').click();
-    await until(() => /编纲中/.test($('#rd-status-card')?.textContent || '') && $('#rd-flow-card .rd-track li[data-on="now"]'), '编纲中的进度');
-    assert(mock.llmCalls.some((messages) => messages.some((message) => String(message.content).includes('这一卷不要阴谋'))), '开卷前交代的话没有带给导演');
-    await sleep(80);
-    assert(!floatNode()?.isConnected, '助手窗口停在导演页时不该再摆一个浮窗');
+    const before = mock.llmCalls.length;
+    mock.replies.push(call('read', { path: 'wb:/设定集/王都' }), async () => { await gate; return dirDelivery; });
+    try {
+      $('#rd-say-text').value = '这一卷不要阴谋';
+      $('[data-act="dir-activate"]').click();
+      await until(() => /编纲中/.test($('#rd-status-card')?.textContent || '') && $('#rd-flow-card .rd-track li[data-on="now"]'), '编纲中的进度');
+      /* 建图不调模型：等第一个编纲请求真的发出去，再看交代的话在不在里面。 */
+      const first = await until(() => mock.llmCalls[before], '第一个编纲请求', 15000);
+      assert(/总导演/.test(String(first[0] && first[0].content)), '第一个模型请求不是总导演的编纲请求');
+      assert(first.some((message) => message.role === 'user' && /【用户意见[\s\S]*这一卷不要阴谋/.test(String(message.content))), '开卷前交代的话没有带进第一个编纲请求');
+      const second = await until(() => mock.llmCalls[before + 1], '带着查阅结果的第二个编纲请求', 15000);
+      assert(second.some((message) => message.role === 'user' && /<action_result name="read" status="ok">[\s\S]*王都位于北方/.test(String(message.content))), '只读查阅的结果没有交回编纲会话');
+      await sleep(80);
+      assert(!floatNode()?.isConnected, '助手窗口停在导演页时不该再摆一个浮窗');
 
-    /* 换到别的页：浮窗收进窗口，成为标题栏下面的一条。 */
-    $('#reader-agent-overlay [data-tab="chat"]').click();
-    const docked = await until(() => (floatNode()?.dataset.dock === 'dialog' && floatNode().parentElement === $('#reader-agent-overlay .ra-shell') ? floatNode() : null), '浮窗停靠在窗口里');
-    assert(docked.previousElementSibling === $('#reader-agent-overlay .ra-head'), '窗口里的浮窗应紧跟在标题栏后面');
-    assert(/导演 · 编纲/.test(docked.textContent) && /第 2 步/.test(docked.textContent), '浮窗没有显示当前阶段');
-    assert(docked.dataset.theme === $('#reader-agent-overlay').dataset.theme, '浮窗的主题应与助手窗口一致');
+      /* 换到别的页：浮窗收进窗口，成为标题栏下面的一条。 */
+      $('#reader-agent-overlay [data-tab="chat"]').click();
+      const docked = await until(() => (floatNode()?.dataset.dock === 'dialog' && floatNode().parentElement === $('#reader-agent-overlay .ra-shell') ? floatNode() : null), '浮窗停靠在窗口里');
+      assert(docked.previousElementSibling === $('#reader-agent-overlay .ra-head'), '窗口里的浮窗应紧跟在标题栏后面');
+      await until(() => /导演 · 编纲/.test(docked.textContent) && /查阅资料与撰稿/.test(docked.textContent) && docked.querySelector('.rf-step')?.textContent === '2/4', '浮窗显示编纲的当前阶段（查阅资料与撰稿，2/4）', 3000);
+      assert(docked.dataset.theme === $('#reader-agent-overlay').dataset.theme, '浮窗的主题应与助手窗口一致');
 
-    /* 关掉窗口：浮窗回到酒馆页面上，能展开、能点。 */
-    agent.close();
-    const floating = await until(() => (floatNode()?.dataset.dock === 'page' && floatNode().parentElement === document.body ? floatNode() : null), '浮窗回到页面上');
-    assert(getComputedStyle(floating).position === 'fixed' && floating.getBoundingClientRect().width > 120, '页面上的浮窗应固定在角落');
-    floating.querySelector('[data-rf="toggle"]').click();
-    await until(() => floatNode().querySelector('[data-rf="open"]') && floatNode().querySelector('[data-rf="cancel"]'), '展开后的「查看」与「停止」');
-    assert(/第 1 步完成/.test(floatNode().querySelector('.rf-lines')?.textContent || ''), '展开后应有过程日志');
-    floatNode().querySelector('[data-rf="open"]').click();
-    await until(() => $('#reader-agent-overlay')?.open && $('.ra-pane[data-pane="director"].is-on'), '「查看」跳到导演页');
+      /* 关掉窗口：浮窗回到酒馆页面上，能展开、能点。 */
+      agent.close();
+      const floating = await until(() => (floatNode()?.dataset.dock === 'page' && floatNode().parentElement === document.body ? floatNode() : null), '浮窗回到页面上');
+      assert(getComputedStyle(floating).position === 'fixed' && floating.getBoundingClientRect().width > 120, '页面上的浮窗应固定在角落');
+      floating.querySelector('[data-rf="toggle"]').click();
+      await until(() => floatNode().querySelector('[data-rf="open"]') && floatNode().querySelector('[data-rf="cancel"]'), '展开后的「查看」与「停止」');
+      const lines = floatNode().querySelector('.rf-lines')?.textContent || '';
+      assert(/开局轻索引地图/.test(lines) && /查阅世界书 wb:\/设定集\/王都（\d+ 字）/.test(lines), '展开后应有建图与查阅的过程日志：' + lines.slice(0, 160));
+      floatNode().querySelector('[data-rf="open"]').click();
+      await until(() => $('#reader-agent-overlay')?.open && $('.ra-pane[data-pane="director"].is-on'), '「查看」跳到导演页');
+    } finally { release(); }
 
-    release();
     await until(() => /执导中/.test($('#rd-status-card')?.textContent || ''), '定稿后进入执导', 15000);
     assert($('#rd-status-card .rd-track li[data-on="now"]')?.textContent.includes('雨夜来客'), '阶段进度条没有标出当前阶段');
     await until(() => ($('#rd-brief')?.value || '').includes('Phase 1 · 雨夜。我刚在酒馆坐下'), '首轮简报（主角名已换成实名）');
