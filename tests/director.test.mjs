@@ -78,10 +78,10 @@ const INDEX = {
 };
 const brief = (tag) => [
   '【当前阶段与承接】' + tag + '。{{user}}刚在酒馆坐下，门外有人收伞。',
-  '【在场角色意图（仅表现层）】艾琳照常擦杯子，对<user>多看了一眼。',
-  '【本轮细节与暗压】柜台上的座钟慢了七分钟。',
-  '【节奏与情绪红线】不要快进到钟楼；留给玩家决定要不要搭话。',
-  '【本轮防 AI 味忌口】禁止写「眼底闪过一丝算计」；禁止替玩家做决定。',
+  '【在场角色状态与情绪动因】艾琳照常擦杯子，心底还挂着旧钟的事，对<user>多看了一眼。',
+  '【人物火花与本轮暗压】柜台上的座钟慢了七分钟。',
+  '【情绪节奏与交互留白】不要快进到钟楼；把选择留给玩家决定要不要搭话。',
+  '【本轮忌口】禁止写「眼底闪过一丝算计」；禁止替玩家做决定。',
 ].join('\n');
 const delivery = (outline, index, firstBrief, note = '') => (note ? `<restructure_note>${note}</restructure_note>\n` : '<self_check>\n1. 通过\n</self_check>\n')
   + `<volume_outline>\n${outline}\n</volume_outline>\n<volume_index>\n${JSON.stringify(index)}\n</volume_index>\n<first_brief>\n${firstBrief}\n</first_brief>`;
@@ -289,29 +289,29 @@ test('两份内置 Skill 内容各管各的：总导演只有编纲方法论，�
   assert.equal(core.skillBody('﻿---\r\nname: x\r\n---\r\n\r\n  正文  \r\n第二行\r\n\r\n'), '正文  \n第二行', '去掉 frontmatter 与首尾空白，中间一字不动');
   assert.equal(core.skillBody('没有 frontmatter\n---\n这条分隔线不是 frontmatter'), '没有 frontmatter\n---\n这条分隔线不是 frontmatter');
 
-  /* 总导演：第 0 原则 + 四条底座 + 勘察 + 十条红线全文 + 叙事引擎与手感标尺 + 五板块规范 + 8 道自检。 */
+  /* 总导演：第 0 原则 + 四条底座 + 勘察 + 十条红线全文 + 进攻型叙事引擎与手感标尺 + 五板块规范 + 重写后续纪律 + 8 道自检。 */
   for (const part of ['### 第 0 原则：用户偏好与显式指令大于本 Skill', '### 四条叙事底座', '## 阶段一：全景勘察与工况定性', '## 阶段二：十条 AI 弊病绝杀红线',
-    '高发惰性套路警觉', '## 阶段三：反平直叙事引擎工具箱', '### 作家手感校准', '## 阶段四：单卷动态大纲产出规范', '### 板块 A：', '### 板块 B：', '### 板块 C：', '### 板块 D：', '### 板块 E：',
-    '## 阶段五：交付前铁血自检闭环', '8 道拷问', '8. **互动自由度检验**']) {
+    '高发惰性套路警觉', '## 阶段三：进攻型叙事引擎工具箱', '### 作家手感校准', '## 阶段四：单卷动态大纲产出规范', '### 板块 A：', '### 板块 B：', '### 板块 C：', '### 板块 D：', '### 板块 E：',
+    '### 重写后续纪律', '## 阶段五：交付前铁血自检闭环', '8 道拷问', '8. **反偷懒套路与互动自由度检验**']) {
     assert.ok(planner.includes(part), '总导演 Skill 缺：' + part);
   }
   for (const part of ['导演简报', 'Turn Director Brief', 'Anti-Leak', '【当前阶段与承接】', '三级偏移', 'L0', 'L1', 'L2', '巡检', '场记', 'volume_completed', '双保险', '已完结卷档案', '阶段六']) {
     assert.ok(!planner.includes(part), '总导演 Skill 不该带后台巡检协议：' + part);
   }
-  /* 场记：第 0 原则与核心约束 + 红线速记 + 简报五栏与防剧透 + L0/L1/L2 + 双保险完结。 */
-  for (const part of ['### 第 0 原则：用户偏好与显式指令大于本 Skill', '### 核心约束', '## 十条红线速记', '## 每轮《导演简报（Turn Director Brief）》规范', '信息隔离（Anti-Leak）',
-    ...core.BRIEF_COLUMNS, '≤ 550 字', '## 三级偏移判定', '`L0（顺轨 / 良性风味发散）`', '`L1（局部绕道 / 战术换路）`', '`L2（结构破局 / 彻底改线）`', '## 完结判定（双保险）', 'volume_completed = true']) {
+  /* 场记：第 0 原则与核心约束 + 正文一线红线速记 + 简报五栏与分级信息隔离 + L0/L1/L2 + 双保险完结。 */
+  for (const part of ['### 第 0 原则：用户偏好与显式指令大于本 Skill', '### 核心约束', '## 正文一线红线速记', '## 每轮《导演简报（Turn Director Brief）》规范', '分级信息隔离',
+    ...core.BRIEF_COLUMNS, '800–1200 字', '## 三级偏移判定', '`L0（顺轨 / 良性风味发散）`', '`L1（局部绕道 / 战术换路）`', '`L2（结构破局 / 彻底改线）`', '## 完结判定（双保险）', 'volume_completed = true']) {
     assert.ok(patrol.includes(part), '场记 Skill 缺：' + part);
   }
   for (const part of ['全景勘察', '工况', '原件', '叙事引擎', '手感', '板块 A', '板块 B', '板块 D', '板块 E', '跨卷钩子', '铁血自检', '拷问', '阶段一', '阶段二', '阶段三', '阶段四', '阶段五', '已完结卷档案']) {
     assert.ok(!patrol.includes(part), '场记 Skill 不该带编纲方法论：' + part);
   }
-  /* 红线：总导演是带 ❌ / ✅ 细则的全文，场记只留十行标题。 */
+  /* 红线：总导演是带 ❌ / ✅ 细则的全文，场记只留八条正文一线速记。 */
   assert.equal(planner.split('\n').filter((line) => /^\d{1,2}\. \*\*严禁.+\*\*$/.test(line)).length, 10);
   assert.ok(planner.includes('❌') && planner.includes('✅'));
-  assert.equal(patrol.split('\n').filter((line) => /^\d{1,2}\. 严禁/.test(line)).length, 10, '场记的红线只留十行标题');
+  assert.equal(patrol.split('\n').filter((line) => /^\d{1,2}\. 严禁/.test(line)).length, 8, '场记只留八条正文一线红线速记');
   assert.ok(!patrol.includes('❌') && !patrol.includes('✅'));
-  assert.ok(patrol.length < planner.length / 3, '场记那份每轮都带，要比总导演那份小得多');
+  assert.ok(patrol.length < planner.length * 0.45, '场记那份每轮都带，要比总导演那份小得多');
 });
 
 test('提示词直接用各自那份 Skill 的原文：任意改写原样生效，不认标题、不补段、不拿内置正文替换，也不串到另一份', () => {
@@ -324,7 +324,7 @@ test('提示词直接用各自那份 Skill 的原文：任意改写原样生效�
   assert.ok(planSystem.startsWith(core.expandUser(core.skillBody(PLANNER_SKILL), '林渡') + PLAN_ENV));
   assert.ok(judgeSystem.startsWith(core.expandUser(core.skillBody(PATROL_SKILL), '林渡') + JUDGE_ENV));
   assert.ok(!planSystem.includes('{{user}}') && !judgeSystem.includes('{{user}}'));
-  assert.ok(!planSystem.includes('三级偏移判定') && !planSystem.includes('Turn Director Brief') && !planSystem.includes('十条红线速记'), '总导演的 System 里没有场记的协议');
+  assert.ok(!planSystem.includes('三级偏移判定') && !planSystem.includes('Turn Director Brief') && !planSystem.includes('正文一线红线速记'), '总导演的 System 里没有场记的协议');
   assert.ok(!judgeSystem.includes('## 阶段一') && !judgeSystem.includes('8 道拷问') && !judgeSystem.includes('叙事引擎'), '场记的 System 里没有编纲方法论');
 
   /* 任意改写：一个标题都没有、标题全改了名、只剩一句话、frontmatter 也换了——写什么用什么。 */
@@ -449,7 +449,7 @@ test('跑起来也不串活：总导演的请求只带总导演那一份，场�
     assert.ok(patrolPrefix.startsWith(patrolMine + '\n\n---\n\n## 运行环境补充（Reader-II 分卷导演 · 场记）'), '场记的 System 以用户写的原文开头');
     assert.ok(!patrolPrefix.includes('甲乙丙丁') && !patrolPrefix.includes('编纲口诀'), '总导演的 Skill 不进场记的提示词');
     /* （大纲样例的板块 A 标题里本来就有「全景勘察」四个字，所以这里拿只在内置 Skill 里才有的说法来验。） */
-    for (const builtin of ['十条红线速记', '三级偏移判定', '完结判定（双保险）', '反平直叙事引擎', '8 道拷问', '铁血自检']) assert.ok(!patrolPrefix.includes(builtin), '没有被内置段落替换或补齐：' + builtin);
+    for (const builtin of ['正文一线红线速记', '三级偏移判定', '完结判定（双保险）', '进攻型叙事引擎', '8 道拷问', '铁血自检']) assert.ok(!patrolPrefix.includes(builtin), '没有被内置段落替换或补齐：' + builtin);
     assert.equal(judges()[1].system, patrolPrefix, '场记的静态前缀逐字节稳定');
     assert.equal(judges()[0].prompts.length, 2, '场记还是无状态单轮');
 
@@ -691,7 +691,7 @@ test('场记与总导演 Skill 严格隔离且前缀静态；单会话编纲消�
   const planMsgs = core.buildPlannerMessages({ system, materials: '### 近期正文\n……', feedback: [{ text: '少一点阴谋' }] });
   assert.equal(planMsgs.length, 2);
   assert.ok(planMsgs[1].content.includes('### 近期正文') && planMsgs[1].content.includes('## 编纲与交付任务（单会话连贯完成）') && planMsgs[1].content.includes('少一点阴谋'));
-  assert.ok(planMsgs[1].content.includes('<self_check>') && planMsgs[1].content.includes('<volume_outline>') && planMsgs[1].content.includes('<volume_index>') && planMsgs[1].content.includes('<first_brief>') && planMsgs[1].content.includes('【本轮防 AI 味忌口】'));
+  assert.ok(planMsgs[1].content.includes('<self_check>') && planMsgs[1].content.includes('<volume_outline>') && planMsgs[1].content.includes('<volume_index>') && planMsgs[1].content.includes('<first_brief>') && planMsgs[1].content.includes('【本轮忌口】'));
   assert.match(core.buildInterjectionMessage('先查一下银币数量'), /用户实时插话.*先查一下银币数量/s);
 
   /* 交付物解析与自动质检闭环：完整交付通过；截断、坏索引、缺简报、自检未通过均触发打回。 */
@@ -978,21 +978,21 @@ test('简报净化：主角名换成实名，{{char}} 不动手，其余宏与 E
   /* 防泄密：与「后台完整实情」连续重合 18 个字以上的那一句整句拿掉；公开的时钟节点不算。 */
   assert.equal(core.hiddenTruth(OUTLINE).includes('灯塔的旧账本其实被莫师傅藏在了钟楼的夹层里'), true);
   assert.equal(core.hiddenTruth(OUTLINE).includes('港务司会来清点'), false);
-  const leaky = '【当前阶段与承接】Phase 2。\n【在场角色意图（仅表现层）】莫师傅守着楼梯。灯塔的旧账本其实被莫师傅藏在了钟楼的夹层里，他不想让人上去。他的手一直按着围裙。\n【本轮细节与暗压】第三天傍晚，港务司会来清点灯塔的库房；雨停之前渡船不开。';
+  const leaky = '【当前阶段与承接】Phase 2。\n【在场角色状态与情绪动因】莫师傅守着楼梯。灯塔的旧账本其实被莫师傅藏在了钟楼的夹层里，他不想让人上去。他的手一直按着围裙。\n【人物火花与本轮暗压】第三天傍晚，港务司会来清点灯塔的库房；雨停之前渡船不开。';
   const guarded = core.sanitizeBriefDetailed(leaky, { userName: '林渡', outline: OUTLINE });
   assert.equal(guarded.leaks, 1);
   assert.ok(!guarded.text.includes('旧账本其实被莫师傅藏在'));
-  assert.ok(guarded.text.includes('【在场角色意图（仅表现层）】莫师傅守着楼梯。') && guarded.text.includes('他的手一直按着围裙。'), '只拿掉泄密的那一句，栏名与前后句都在');
+  assert.ok(guarded.text.includes('【在场角色状态与情绪动因】莫师傅守着楼梯。') && guarded.text.includes('他的手一直按着围裙。'), '只拿掉泄密的那一句，栏名与前后句都在');
   assert.ok(guarded.text.includes('第三天傍晚，港务司会来清点灯塔的库房'), '时钟的节点可以露出');
   assert.equal(core.sanitizeBriefDetailed('莫师傅藏了账本。', { outline: OUTLINE }).leaks, 0, '短的重合不算');
 
   /* 限长：从最长的一段缩起，各栏的开头都留得住。 */
-  const long = core.BRIEF_COLUMNS.map((column, index) => column + '细节'.repeat(index === 1 ? 300 : 40) + '。').join('\n');
+  const long = core.BRIEF_COLUMNS.map((column, index) => column + '细节'.repeat(index === 1 ? 700 : 80) + '。').join('\n');
   const clamped = core.clampBrief(long, core.BRIEF_LIMIT);
   assert.ok(clamped.length <= core.BRIEF_LIMIT, String(clamped.length));
   for (const column of core.BRIEF_COLUMNS) assert.ok(clamped.includes(column), column);
-  assert.equal(core.clampBrief('短的', 550), '短的');
-  assert.ok(core.sanitizeBrief('字'.repeat(2000), {}).length <= 550);
+  assert.equal(core.clampBrief('短的', 1200), '短的');
+  assert.ok(core.sanitizeBrief('字'.repeat(2000), {}).length <= 1200);
 });
 
 /* 只装正文提示词模块：导演槽位自己的开关、注入位置与防吞槽兜底（与读者的三段互不牵连）。 */

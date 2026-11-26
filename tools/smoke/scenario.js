@@ -612,8 +612,8 @@ async function main() {
     '### 板块 C：后台实情与客观时钟', '**后台完整实情**：灯塔的旧账本被藏在了钟楼的夹层里。', '**客观推进时钟**：第三天傍晚港务司来清点库房。',
     '### 板块 D：分阶段动态推演', '#### Phase 1：雨夜来客', '新看守冒雨来打听修钟的人。', '#### Phase 2：钟楼的夹层', '上钟楼校时。', '#### Phase 3：清点之日', '账本的去向摆上桌面。',
     '### 板块 E：收束形态与跨卷钩子库', '钩子：一只怀表。'].join('\n');
-  const dirBrief = (tag) => ['【当前阶段与承接】' + tag + '。{{user}}刚在酒馆坐下。', '【在场角色意图（仅表现层）】艾琳照常擦杯子。', '【本轮细节与暗压】座钟慢了七分钟。',
-    '【节奏与情绪红线】不要快进到钟楼。', '【本轮防 AI 味忌口】禁止替玩家做决定。'].join('\n');
+  const dirBrief = (tag) => ['【当前阶段与承接】' + tag + '。{{user}}刚在酒馆坐下。', '【在场角色状态与情绪动因】艾琳照常擦杯子，心底还压着对旧钟的牵挂。', '【人物火花与本轮暗压】座钟慢了七分钟。',
+    '【情绪节奏与交互留白】不要快进到钟楼；把选择留给玩家。', '【本轮忌口】禁止替玩家做决定。'].join('\n');
   const dirDelivery = '<self_check>\n1. 通过\n</self_check>\n<volume_outline>\n' + dirOutline + '\n</volume_outline>\n<volume_index>\n'
     + JSON.stringify({ title: '雨季的钟', phases: [{ n: 1, title: '雨夜来客' }, { n: 2, title: '钟楼的夹层' }, { n: 3, title: '清点之日' }], new_characters: [] })
     + '\n</volume_index>\n<first_brief>\n' + dirBrief('Phase 1 · 雨夜') + '\n</first_brief>';

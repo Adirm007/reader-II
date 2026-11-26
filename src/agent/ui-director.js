@@ -447,7 +447,7 @@
       if (card) card.hidden = !active && !archive.volumes.length;
       var html = '';
       if (active) {
-        var limit = core ? core.BRIEF_LIMIT : 550;
+        var limit = core ? core.BRIEF_LIMIT : 1200;
         html += '<div class="ra-field-stack"><label for="rd-brief">下一轮的导演简报'
           + '<span class="ra-hint">正文生成之前注入的就是它（位置在「设置 → 正文提示词位置 → 导演简报」）。' + (brief.forked ? '当前楼层与记录对不上，暂不注入。' : brief.exact ? '已按最新一楼备好。' : '这是上一次巡检留下的，下一次巡检后更新。') + '</span></label>'
           + '<textarea id="rd-brief" data-d="brief" rows="9" spellcheck="false" placeholder="还没有简报：点「立即巡检」让场记写一份，或自己写。">' + esc(brief.text) + '</textarea></div>'
@@ -873,7 +873,7 @@
       if (key === 'brief') {
         dirty.brief = true;
         var count = $('#rd-brief-count');
-        if (count) count.textContent = target.value.length + ' / ' + (core ? core.BRIEF_LIMIT : 550) + ' 字' + (target.value.length > (core ? core.BRIEF_LIMIT : 550) ? '（保存时会自动缩短）' : '');
+        if (count) count.textContent = target.value.length + ' / ' + (core ? core.BRIEF_LIMIT : 1200) + ' 字' + (target.value.length > (core ? core.BRIEF_LIMIT : 1200) ? '（保存时会自动缩短）' : '');
       } else if (key === 'outline') dirty.outline = true;
       else if (key === 'pref') dirty.prefs = true;
       else if (key.indexOf('skill.') === 0) { if (dirty.skill[key.slice(6)] !== undefined) dirty.skill[key.slice(6)] = true; }
