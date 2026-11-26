@@ -1,9 +1,10 @@
 /*
  * 分卷导演（Volume Director）的 Node 测试。
  *   node --test tests/director.test.mjs
- * 六组场景：
- *   1. Skill 的优先级与切片      2. 楼层锚点与快照环        3. 三级偏移路由与静态前缀
- *   4. 完结双保险与归档分流      5. 提示词槽位与独立运行    6. 世界书模板与权限
+ * 七组场景：
+ *   1. 两份独立 Skill 的隔离与热重载  2. 楼层锚点与快照环        3. 三级偏移路由与静态前缀
+ *   4. 完结双保险与归档分流          5. 提示词槽位与独立运行    6. 世界书模板与权限
+ *   7. 总导演只读 Agent（工具循环、断点、插话、不带步数的工作态）
  * 纯逻辑（director-core.js / director-wb.js）单独装进一个 vm 上下文直接测；运行器（director.js）用整包 + mock 酒馆 +
  * 按提示词内容分流的脚本化模型来测。没覆盖：真实酒馆、IndexedDB（走内存退路）、导演页与状态浮窗的 DOM。
  */
@@ -11,7 +12,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
-import { EXT_MODULES, AGENT_MODULES, DEFAULTS_MODULE, DIRECTOR_SKILL_HEADINGS, bundle, defaultsModule, inlineDefaults, skillHeadings } from '../build.mjs';
+import { EXT_MODULES, AGENT_MODULES, DEFAULTS_MODULE, INLINE_SKILLS, bundle, defaultsModule, inlineDefaults, inlineSkill } from '../build.mjs';
 
 const read = (file) => fs.readFileSync(new URL('../' + file, import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 const plain = (value) => (value === undefined ? undefined : JSON.parse(JSON.stringify(value)));
@@ -26,7 +27,9 @@ async function until(check, label, timeout = 3000) {
   }
 }
 
-const SKILL = read('knowledge/volume-director/SKILL.md');
+/* 导演的两份内置 Skill：总导演（编纲与重构）与场记（每轮巡检与简报），物理上是两个文件。 */
+const PLANNER_SKILL = read('knowledge/director-planner/SKILL.md');
+const PATROL_SKILL = read('knowledge/director-patrol/SKILL.md');
 const CODE = bundle(EXT_MODULES);
 
 /* ---------- 纯逻辑 ---------- */
@@ -230,12 +233,23 @@ async function activated(options = {}) {
 }
 
 /* ========================================================================================================
- * 1. Skill 的优先级与切片
+ * 1. 两份物理独立的 Skill：内联、隔离、任意改写、热重载与恢复默认
  * ====================================================================================================== */
 
-test('构建把导演 Skill 与通用角色条目模板内联进扩展包，标题表与运行时一致', () => {
-  assert.deepEqual(plain(core.REQUIRED_HEADINGS), DIRECTOR_SKILL_HEADINGS);
-  for (const heading of DIRECTOR_SKILL_HEADINGS) assert.ok(skillHeadings(SKILL).includes(heading), heading);
+test('构建把总导演与场记两份 Skill、通用角色条目模板内联进扩展包；只核对两份都在且有正文，不再核对标题', async () => {
+  assert.deepEqual(Object.keys(INLINE_SKILLS).sort(), ['director-patrol', 'director-planner']);
+  assert.deepEqual(plain(core.SKILL_ROLES), ['planner', 'patrol']);
+  assert.deepEqual(plain(core.SKILL_NAMES), { planner: 'director-planner', patrol: 'director-patrol' });
+  assert.ok(!fs.existsSync(new URL('../knowledge/volume-director', import.meta.url)), '旧的单文件 Skill 已经删除');
+  /* 标题切片那一套整个没有了：构建不导出标题表，纯逻辑不导出切片函数与 4 步阶段表。 */
+  const build = await import('../build.mjs');
+  for (const gone of ['DIRECTOR_SKILL_HEADINGS', 'skillHeadings']) assert.equal(build[gone], undefined, 'build.mjs 不再导出 ' + gone);
+  for (const gone of ['SKILL_NAME', 'REQUIRED_HEADINGS', 'PLANNER_PHASES', 'splitSkill', 'sliceDirectorSkill', 'sliceDirectorSkillDetailed']) {
+    assert.equal(core[gone], undefined, 'director-core 不再导出 ' + gone);
+  }
+  assert.doesNotMatch(read('src/agent/director-core.js'), /SECTION_DEFS|builtinSkillSections|sliceDirectorSkill|PLANNER_PHASES/);
+  assert.doesNotMatch(read('src/agent/director.js'), /PHASE_INDEX|PLANNER_PHASES|volume-director/);
+
   assert.ok(AGENT_MODULES.indexOf(DEFAULTS_MODULE) < AGENT_MODULES.indexOf('src/agent/skills.js'), '内联资料要先于知识库加载');
   assert.ok(AGENT_MODULES.indexOf('src/agent/kernel.js') < AGENT_MODULES.indexOf('src/agent/jobs.js'));
   for (const [before, after] of [['src/agent/agent.js', 'src/agent/director-core.js'], ['src/agent/director-core.js', 'src/agent/director-wb.js'],
@@ -246,110 +260,218 @@ test('构建把导演 Skill 与通用角色条目模板内联进扩展包，标�
   const ctx = vm.createContext({});
   vm.runInContext(defaultsModule(), ctx);
   const inlined = ctx.__ReaderIIModules;
-  assert.equal(inlined.READER_BUILTIN_SKILLS['volume-director'], SKILL);
+  assert.deepEqual(Object.keys(inlined.READER_BUILTIN_SKILLS).sort(), ['director-patrol', 'director-planner']);
+  assert.equal(inlined.READER_BUILTIN_SKILLS['director-planner'], PLANNER_SKILL);
+  assert.equal(inlined.READER_BUILTIN_SKILLS['director-patrol'], PATROL_SKILL);
   assert.equal(inlined.READER_DEFAULT_ENTRY_TEMPLATE.id, 'reader-default-generic-character');
   assert.ok(inlined.READER_DEFAULT_ENTRY_TEMPLATE.templateText.includes('基本信息:') && inlined.READER_DEFAULT_ENTRY_TEMPLATE.output.targetWorldbook);
-  /* 正文里即使写了 </script，嵌进页面也不会提前结束脚本；少了必需的标题，构建直接报错。 */
+
+  /* 内置 Skill 是空的、只有 frontmatter、名字对不上：构建直接报错。正文里有什么标题、有没有标题都不管。 */
+  assert.throws(() => inlineSkill('director-planner', '  \n'), /是空的/);
+  assert.throws(() => inlineSkill('director-planner', '---\nname: director-planner\n---\n\n'), /没有正文/);
+  assert.throws(() => inlineSkill('director-planner', '---\nname: director-patrol\n---\n正文'), /name: director-planner/);
+  assert.throws(() => inlineSkill('director-patrol', '没有 frontmatter 的正文'), /name: director-patrol/);
+  const untitled = '---\nname: director-patrol\ndescription: x\n---\n一个二级标题都没有的正文也照样内联';
+  assert.equal(inlineSkill('director-patrol', '﻿' + untitled.replace(/\n/g, '\r\n')), untitled, '去掉 BOM、换行统一成 LF，其余原样');
+  /* 正文里即使写了 </script，嵌进页面也不会提前结束脚本；内联之后要能原样读回来。 */
   const defaults = inlineDefaults();
-  assert.doesNotMatch(defaultsModule({ skills: { x: '</script><b>' }, template: defaults.template }), /<\/script/i);
-  assert.equal(skillHeadings('## 甲\n```md\n## 代码块里的不算\n```\n## 乙').join('|'), '## 甲|## 乙');
+  const tricky = defaultsModule({ skills: { x: '</script><b> `${1}`\\' }, template: defaults.template });
+  assert.doesNotMatch(tricky, /<\/script/i);
+  const back = vm.createContext({});
+  vm.runInContext(tricky, back);
+  assert.equal(back.__ReaderIIModules.READER_BUILTIN_SKILLS.x, '</script><b> `${1}`\\');
 });
 
-test('Skill 按用途切片：编纲、运行期、归档、建档各取所需', () => {
-  const planner = core.sliceDirectorSkillDetailed(SKILL, 'planner');
-  assert.deepEqual(plain([planner.degraded, planner.missing]), [false, []]);
-  for (const part of ['# 单卷群像导演', '## 最高原则', '## 阶段一', '## 阶段二', '## 阶段三', '## 阶段四', '## 阶段六']) assert.ok(planner.text.includes(part), part);
-  assert.ok(!planner.text.includes('## 阶段五') && !planner.text.includes('三级偏移判定'), '编纲不带运行期协议');
-  assert.ok(!/^---\nname:/.test(planner.text), '去掉 frontmatter');
+test('两份内置 Skill 内容各管各的：总导演只有编纲方法论，场记只有巡检协议', () => {
+  const planner = core.skillBody(PLANNER_SKILL), patrol = core.skillBody(PATROL_SKILL);
+  assert.ok(!/^---\n/.test(planner) && !/^---\n/.test(patrol), '进提示词的正文不带 frontmatter');
+  assert.ok(planner.startsWith('# 单卷群像导演 · 总导演编纲与重构方法论') && patrol.startsWith('# 单卷群像导演 · 场记巡检与简报协议'));
+  assert.equal(core.skillBody('﻿---\r\nname: x\r\n---\r\n\r\n  正文  \r\n第二行\r\n\r\n'), '正文  \n第二行', '去掉 frontmatter 与首尾空白，中间一字不动');
+  assert.equal(core.skillBody('没有 frontmatter\n---\n这条分隔线不是 frontmatter'), '没有 frontmatter\n---\n这条分隔线不是 frontmatter');
 
-  const runtime = core.sliceDirectorSkillDetailed(SKILL, 'runtime');
-  assert.equal(runtime.degraded, false);
-  assert.ok(runtime.text.includes('## 最高原则') && runtime.text.includes('## 阶段五') && runtime.text.includes('三级偏移判定'));
-  assert.ok(!runtime.text.includes('## 阶段三') && !runtime.text.includes('## 阶段四') && !runtime.text.includes('## 阶段六'));
-  const redlines = runtime.text.slice(runtime.text.indexOf('## 红线速记')).split('\n').filter((line) => /^\d+\. 严禁/.test(line));
-  assert.equal(redlines.length, 10, '十条红线只留标题');
-  assert.ok(runtime.text.length < planner.text.length / 2, '运行期切片要比编纲切片小得多');
-
-  const archive = core.sliceDirectorSkillDetailed(SKILL, 'archive');
-  assert.equal(archive.degraded, false);
-  assert.ok(archive.text.includes('丙、完结判定与资产沉淀协议') && archive.text.includes('已完结卷档案'));
-  assert.ok(!archive.text.includes('三级偏移判定') && !archive.text.includes('## 阶段') && archive.text.length < 900);
-
-  const worldbook = core.sliceDirectorSkillDetailed(SKILL, 'worldbook');
-  assert.ok(worldbook.text.length < 400 && /严禁写进后台尚未揭晓的秘密/.test(worldbook.text));
-  assert.equal(worldbook.text, core.sliceDirectorSkill('随便什么', 'worldbook'), '建档提示是固定的');
+  /* 总导演：第 0 原则 + 四条底座 + 勘察 + 十条红线全文 + 叙事引擎与手感标尺 + 五板块规范 + 8 道自检。 */
+  for (const part of ['### 第 0 原则：用户偏好与显式指令大于本 Skill', '### 四条叙事底座', '## 阶段一：全景勘察与工况定性', '## 阶段二：十条 AI 弊病绝杀红线',
+    '高发惰性套路警觉', '## 阶段三：反平直叙事引擎工具箱', '### 作家手感校准', '## 阶段四：单卷动态大纲产出规范', '### 板块 A：', '### 板块 B：', '### 板块 C：', '### 板块 D：', '### 板块 E：',
+    '## 阶段五：交付前铁血自检闭环', '8 道拷问', '8. **互动自由度检验**']) {
+    assert.ok(planner.includes(part), '总导演 Skill 缺：' + part);
+  }
+  for (const part of ['导演简报', 'Turn Director Brief', 'Anti-Leak', '【当前阶段与承接】', '三级偏移', 'L0', 'L1', 'L2', '巡检', '场记', 'volume_completed', '双保险', '已完结卷档案', '阶段六']) {
+    assert.ok(!planner.includes(part), '总导演 Skill 不该带后台巡检协议：' + part);
+  }
+  /* 场记：第 0 原则与核心约束 + 红线速记 + 简报五栏与防剧透 + L0/L1/L2 + 双保险完结。 */
+  for (const part of ['### 第 0 原则：用户偏好与显式指令大于本 Skill', '### 核心约束', '## 十条红线速记', '## 每轮《导演简报（Turn Director Brief）》规范', '信息隔离（Anti-Leak）',
+    ...core.BRIEF_COLUMNS, '≤ 550 字', '## 三级偏移判定', '`L0（顺轨 / 良性风味发散）`', '`L1（局部绕道 / 战术换路）`', '`L2（结构破局 / 彻底改线）`', '## 完结判定（双保险）', 'volume_completed = true']) {
+    assert.ok(patrol.includes(part), '场记 Skill 缺：' + part);
+  }
+  for (const part of ['全景勘察', '工况', '原件', '叙事引擎', '手感', '板块 A', '板块 B', '板块 D', '板块 E', '跨卷钩子', '铁血自检', '拷问', '阶段一', '阶段二', '阶段三', '阶段四', '阶段五', '已完结卷档案']) {
+    assert.ok(!patrol.includes(part), '场记 Skill 不该带编纲方法论：' + part);
+  }
+  /* 红线：总导演是带 ❌ / ✅ 细则的全文，场记只留十行标题。 */
+  assert.equal(planner.split('\n').filter((line) => /^\d{1,2}\. \*\*严禁.+\*\*$/.test(line)).length, 10);
+  assert.ok(planner.includes('❌') && planner.includes('✅'));
+  assert.equal(patrol.split('\n').filter((line) => /^\d{1,2}\. 严禁/.test(line)).length, 10, '场记的红线只留十行标题');
+  assert.ok(!patrol.includes('❌') && !patrol.includes('✅'));
+  assert.ok(patrol.length < planner.length / 3, '场记那份每轮都带，要比总导演那份小得多');
 });
 
-test('Skill 的标题缺失时平滑降级；用户自己加的段进编纲，不进运行期', () => {
-  const noStage4 = SKILL.replace('## 阶段四：单卷动态大纲产出规范', '## 大纲规范（我改了标题）');
-  const noStage5 = SKILL.replace('## 阶段五：后台运行期执导协议（适用于多轮互动实时导演）', '## 运行期');
-  /* 拿不到内置正文（单独加载 director-core 的环境）时才退回整篇照发。 */
-  const bare = core.sliceDirectorSkillDetailed(noStage4, 'planner');
-  assert.deepEqual(plain([bare.degraded, bare.missing, bare.filled]), [true, ['阶段四'], []]);
-  assert.ok(bare.text.includes('## 阶段五'), '没有内置正文可补时整篇照发');
-  /* 扩展包里有内置 Skill：缺的段用内置的同名段补上。 */
-  M.READER_BUILTIN_SKILLS = { 'volume-director': SKILL };
-  try {
-    const planner = core.sliceDirectorSkillDetailed(noStage4, 'planner');
-    assert.equal(planner.degraded, true);
-    assert.deepEqual(plain([planner.missing, planner.filled]), [['阶段四'], ['阶段四']]);
-    assert.ok(planner.text.includes('## 阶段四：单卷动态大纲产出规范'), '缺的段用内置 Skill 的同名段补上');
-    assert.ok(planner.text.includes('## 大纲规范（我改了标题）'), '改了标题认不出的那段仍作为自定义段带上');
-    assert.ok(!planner.text.includes('## 阶段五') && !planner.text.includes('三级偏移判定'), '降级也不把运行期协议塞给总导演');
-    assert.equal(core.sliceDirectorSkillDetailed(noStage4, 'runtime').degraded, false, '运行期用不到阶段四');
+test('提示词直接用各自那份 Skill 的原文：任意改写原样生效，不认标题、不补段、不拿内置正文替换，也不串到另一份', () => {
+  const judgeBase = { preferences: '', userName: '林渡', profile: '主角「林渡」：修表匠', outline: OUTLINE };
+  const PLAN_ENV = '\n\n---\n\n## 运行环境补充（Reader-II 分卷导演 · 总导演）\n';
+  const JUDGE_ENV = '\n\n---\n\n## 运行环境补充（Reader-II 分卷导演 · 场记）\n';
+  /* 内置的两份：各进各的 System，去掉 frontmatter 后原样（只把主角占位换成实名）。 */
+  const planSystem = core.buildPlannerSystem(PLANNER_SKILL, '', '林渡');
+  const judgeSystem = core.buildJudgeSystem({ ...judgeBase, skillRaw: PATROL_SKILL });
+  assert.ok(planSystem.startsWith(core.expandUser(core.skillBody(PLANNER_SKILL), '林渡') + PLAN_ENV));
+  assert.ok(judgeSystem.startsWith(core.expandUser(core.skillBody(PATROL_SKILL), '林渡') + JUDGE_ENV));
+  assert.ok(!planSystem.includes('{{user}}') && !judgeSystem.includes('{{user}}'));
+  assert.ok(!planSystem.includes('三级偏移判定') && !planSystem.includes('Turn Director Brief') && !planSystem.includes('十条红线速记'), '总导演的 System 里没有场记的协议');
+  assert.ok(!judgeSystem.includes('## 阶段一') && !judgeSystem.includes('8 道拷问') && !judgeSystem.includes('叙事引擎'), '场记的 System 里没有编纲方法论');
 
-    const runtime = core.sliceDirectorSkillDetailed(noStage5, 'runtime');
-    assert.deepEqual(plain([runtime.degraded, runtime.missing, runtime.filled]), [true, ['阶段五'], ['阶段五']]);
-    assert.ok(runtime.text.includes('## 阶段五') && runtime.text.includes('三级偏移判定'), '运行期缺阶段五时用内置的补上');
-    assert.ok(!runtime.text.includes('## 阶段一') && !runtime.text.includes('## 阶段四'), '降级也不把编纲阶段塞给场记');
-  } finally { delete M.READER_BUILTIN_SKILLS; }
-  const archive = core.sliceDirectorSkillDetailed(noStage5, 'archive');
-  assert.equal(archive.degraded, true);
-  assert.ok(archive.text.length < 700 && !archive.text.includes('## 阶段一') && archive.text.includes('已完结卷档案'), '归档绝不回退全文');
+  /* 任意改写：一个标题都没有、标题全改了名、只剩一句话、frontmatter 也换了——写什么用什么。 */
+  const rewrites = [
+    '我的规矩只有一条：每卷必须有一场吃饭的戏。',
+    '# 完全不同的手册\n\n## 第一章 随便写\n没有「阶段」二字的标题。\n\n## 运行期\n这一节的名字像巡检，但它写在哪一份里就归哪一份。',
+    '---\nname: whatever\ndescription: 连 frontmatter 也改了\n---\n\n\n只有正文，前后有空行\n\n\n',
+    PLANNER_SKILL.replace(/^#{1,3} .*$/gm, '## 标题全被我改了'),
+    PATROL_SKILL.replace(/^#{1,3} .*$/gm, '').replace('L0', '零级'),
+  ];
+  for (const text of rewrites) {
+    const body = core.expandUser(core.skillBody(text), '林渡');
+    const asPlanner = core.buildPlannerSystem(text, '', '林渡');
+    const asPatrol = core.buildJudgeSystem({ ...judgeBase, skillRaw: text });
+    assert.ok(asPlanner.startsWith(body + PLAN_ENV), '总导演的 System 以用户写的原文开头');
+    assert.ok(asPatrol.startsWith(body + JUDGE_ENV), '场记的 System 以用户写的原文开头');
+    assert.equal(asPlanner.split(body).length, 2, '原文只出现一次，没有被切开重排');
+  }
+  /* 改得再短也不会被内置的段落补齐：一句话的 Skill 后面紧跟的就是运行环境，没有任何内置章节。 */
+  const oneLine = rewrites[0];
+  const shortPlan = core.buildPlannerSystem(oneLine, '', '林渡');
+  for (const builtin of ['全景勘察', '十条 AI 弊病', '叙事引擎', '铁血自检', '板块 A：全景勘察']) assert.ok(!shortPlan.includes(builtin), '没有拿内置的总导演段落来补：' + builtin);
+  const shortJudge = core.buildJudgeSystem({ ...judgeBase, skillRaw: oneLine });
+  for (const builtin of ['十条红线速记', '三级偏移判定', '完结判定（双保险）', '核心约束']) assert.ok(!shortJudge.includes(builtin), '没有拿内置的场记段落来补：' + builtin);
+  assert.ok(shortJudge.includes(OUTLINE) && shortJudge.includes('## 输出契约'), '输出契约与大纲由程序固定追加，不靠 Skill');
+  /* 编纲任务与重构要求只按「做什么」引用 Skill，不提章节编号：Skill 整篇重写后没有悬空的引用。 */
+  const planTask = core.buildPlannerMessages({ system: shortPlan, materials: '### 近期正文\n……', feedback: [] })[1].content;
+  const rsTask = core.buildRestructureMessages({ system: shortPlan, outline: OUTLINE, index: core.normalizeIndex(INDEX, OUTLINE), state: core.initialState(), recent: [], userName: '林渡', reason: '改线' })[1].content;
+  for (const task of [planTask, rsTask, shortPlan]) assert.doesNotMatch(task, /阶段[一二三四五六]/);
+  assert.ok(planTask.includes('按上方 Skill 的方法论') && planTask.includes('交付前自检清单') && rsTask.includes('大纲产出规范与交付前自检标准'));
 
-  /* 标题只改了后半句：照样切得开。红线读不出三条时用内置的速记。 */
-  const renamed = SKILL.replace('## 阶段二：十条 AI 弊病绝杀红线（针对抽象劣质特质，不限题材）', '## 阶段二：我的红线').replace(/^\d+\. \*\*严禁.*\*\*$/gm, '（删掉了）');
-  const fallback = core.sliceDirectorSkillDetailed(renamed, 'runtime');
-  assert.equal(fallback.degraded, false);
-  assert.match(fallback.text, /1\. 严禁为剧情量身定做的塑料道具、机制与体质/);
-  assert.equal(core.sliceDirectorSkillDetailed(renamed, 'planner').degraded, false);
-
-  const extended = SKILL + '\n\n---\n\n## 我的补充规则\n每卷至少一场吃饭的戏。\n\n```md\n## 代码块里的标题不是新的一段\n```\n';
-  const withExtra = core.sliceDirectorSkillDetailed(extended, 'planner');
-  assert.equal(withExtra.degraded, false);
-  assert.ok(withExtra.text.includes('## 我的补充规则') && withExtra.text.includes('每卷至少一场吃饭的戏') && withExtra.text.includes('## 代码块里的标题不是新的一段'));
-  assert.ok(!core.sliceDirectorSkill(extended, 'runtime').includes('我的补充规则'));
-  assert.equal(core.splitSkill(extended).sections.filter((section) => section.title === '我的补充规则').length, 1);
+  /* 归档与新角色建档不读任何一份 Skill：各用一段写死的短协议。 */
+  const archive = core.buildArchiveMessages({ skillRaw: '这一句不该出现在归档提示词里', preferences: '日常多一些', userName: '林渡', outline: OUTLINE, index: core.normalizeIndex(INDEX, OUTLINE), state: core.initialState(), recent: [], entries: [] });
+  assert.ok(archive[0].content.startsWith(core.ARCHIVE_PROTOCOL + '\n\n---\n\n'));
+  assert.ok(core.ARCHIVE_PROTOCOL.includes('归档与清理原则') && core.ARCHIVE_PROTOCOL.includes('不超过 400 字的《已完结卷档案》') && core.ARCHIVE_PROTOCOL.includes('2–3 条沉淀进跨卷钩子库')
+    && core.ARCHIVE_PROTOCOL.includes('建议停用（只关不删）') && core.ARCHIVE_PROTOCOL.includes('建议保留启用') && core.ARCHIVE_PROTOCOL.length < 400);
+  assert.ok(archive[0].content.includes('日常多一些') && !archive[0].content.includes('这一句不该出现') && !archive[0].content.includes('三级偏移') && !archive[0].content.includes('全景勘察'));
+  assert.ok(core.WORLDBOOK_PROMPT.length < 400 && /严禁写进后台尚未揭晓的秘密/.test(core.WORLDBOOK_PROMPT));
 });
 
-test('工作区里的 Skill 覆盖内置的，改动当场生效；删掉或恢复默认回到内置；离线时内置正文来自内联', async () => {
+test('两份 Skill 各有各的工作区覆盖与缓存：改一份、恢复一份都不动另一份；知识库跟着热重载；离线时内置正文来自内联', async () => {
   const h = makeHost();
   try {
-    const builtin = await h.director.getSkill();
-    assert.equal(builtin.source, 'builtin');
-    assert.equal(builtin.text, SKILL, '离线（fetch 一律失败）时读到的是随包内联的正文');
-    assert.equal(builtin.degraded, false);
-    const mine = SKILL.replace('# 单卷群像导演 · 叙事创作与动态执导协议', '# 我改过的导演手册');
-    const saved = await h.director.saveSkill(mine);
-    assert.deepEqual([saved.source, saved.text.includes('# 我改过的导演手册')], ['user', true]);
-    /* 知识库（助手读的 kb:/）跟着热重载：vfs.onWrite → skills.reload。 */
-    await until(async () => String(await h.vfs.readText('kb:/volume-director/SKILL.md')).includes('# 我改过的导演手册'), '知识库热重载');
+    const both = await h.director.getSkills();
+    assert.deepEqual(Object.keys(plain(both)).sort(), ['patrol', 'planner']);
+    assert.deepEqual(plain(both.planner), { role: 'planner', name: 'director-planner', label: '总导演 Skill（编纲与重构）', text: PLANNER_SKILL, source: 'builtin', path: 'ws:/skills/director-planner/SKILL.md' },
+      '离线（fetch 一律失败）时读到的是随包内联的正文；没有降级、缺段这类字段');
+    assert.deepEqual(plain(both.patrol), { role: 'patrol', name: 'director-patrol', label: '场记 Skill（每轮巡检与简报）', text: PATROL_SKILL, source: 'builtin', path: 'ws:/skills/director-patrol/SKILL.md' });
+    const listed = () => plain(h.agent.listSkills()).map((item) => item.name + ':' + item.source).filter((item) => /director/.test(item)).sort();
+    assert.deepEqual(listed(), ['director-patrol:builtin', 'director-planner:builtin'], '助手的知识目录里登记着这两份，旧名字不再有');
+    const kb = async (name) => { const text = await h.vfs.readText('kb:/' + name + '/SKILL.md').catch(() => null); return text == null ? '' : String(text); };
+    assert.equal(await kb('volume-director'), '');
 
-    /* 不经过导演，直接删工作区里的文件：导演与知识库都回到内置。 */
-    await h.vfs.remove('ws:/skills/volume-director/SKILL.md');
-    await until(async () => (await h.director.getSkill()).source === 'builtin', '删文件后回到内置');
-    await until(async () => String(await h.vfs.readText('kb:/volume-director/SKILL.md')).includes('# 单卷群像导演 · 叙事创作与动态执导协议'), '知识库回到内置');
+    /* 只改总导演那一份：写成一个标题都没有的两行字也照存照用。 */
+    const plannerMine = '我的编纲手册只有一条：\n每卷必须有一场吃饭的戏。';
+    const saved = await h.director.saveSkill('planner', plannerMine);
+    assert.deepEqual([saved.role, saved.source, saved.text, saved.path], ['planner', 'user', plannerMine, 'ws:/skills/director-planner/SKILL.md']);
+    assert.equal(await h.vfs.readText('ws:/skills/director-planner/SKILL.md'), plannerMine);
+    assert.equal(await h.vfs.readText('ws:/skills/director-patrol/SKILL.md'), null, '场记那一份没有被写出来');
+    assert.deepEqual(plain(await h.director.getSkill('patrol')), plain(both.patrol), '场记那一份原样是内置的');
+    assert.ok((await kb('director-planner')).includes('每卷必须有一场吃饭的戏'), '保存返回时知识库已经换成新的');
+    assert.ok((await kb('director-patrol')).includes('场记巡检与简报协议'));
+    assert.deepEqual(listed(), ['director-patrol:builtin', 'director-planner:user']);
 
-    await h.director.saveSkill(mine);
-    const reset = await h.director.resetSkill();
-    assert.deepEqual([reset.source, reset.text], ['builtin', SKILL]);
-    assert.equal(await h.vfs.readText('ws:/skills/volume-director/SKILL.md'), null);
-    await assert.rejects(() => h.director.saveSkill('   '), /不能是空的/);
+    /* 不经过导演，直接往工作区写场记那一份（比如让助手改）：只有场记那一份换了。 */
+    const patrolMine = PATROL_SKILL.replace('# 单卷群像导演 · 场记巡检与简报协议', '# 我改过的场记手册');
+    await h.vfs.write('ws:/skills/director-patrol/SKILL.md', patrolMine);
+    assert.deepEqual([(await h.director.getSkill('patrol')).source, (await h.director.getSkill('patrol')).text], ['user', patrolMine], '写入即作废这一份的缓存');
+    assert.equal((await h.director.getSkill('planner')).text, plannerMine, '总导演那一份原样');
+    await until(async () => (await kb('director-patrol')).includes('# 我改过的场记手册'), '知识库里的场记 Skill 热重载');
+    assert.ok((await kb('director-planner')).includes('每卷必须有一场吃饭的戏'));
 
-    /* 用户改坏了标题：导演照常能用，并把缺了哪一段说出来。 */
-    const broken = await h.director.saveSkill(SKILL.replace('## 阶段五：', '## 第五阶段：'));
-    assert.equal(broken.degraded, true);
-    assert.ok(plain(broken.missing).includes('阶段五'));
+    /* 恢复默认只恢复点的那一份。 */
+    const reset = await h.director.resetSkill('planner');
+    assert.deepEqual([reset.role, reset.source, reset.text], ['planner', 'builtin', PLANNER_SKILL]);
+    assert.equal(await h.vfs.readText('ws:/skills/director-planner/SKILL.md'), null);
+    assert.equal((await h.director.getSkill('patrol')).text, patrolMine, '恢复总导演不动场记');
+    assert.equal(await h.vfs.readText('ws:/skills/director-patrol/SKILL.md'), patrolMine);
+    assert.ok((await kb('director-planner')).includes('总导演编纲与重构方法论') && (await kb('director-patrol')).includes('# 我改过的场记手册'));
+    assert.deepEqual(listed(), ['director-patrol:user', 'director-planner:builtin']);
+
+    /* 直接删掉工作区里的文件：这一份回到内置，知识库也跟着回去。 */
+    await h.vfs.remove('ws:/skills/director-patrol/SKILL.md');
+    assert.deepEqual([(await h.director.getSkill('patrol')).source, (await h.director.getSkill('patrol')).text], ['builtin', PATROL_SKILL]);
+    await until(async () => (await kb('director-patrol')).includes('场记巡检与简报协议'), '知识库回到内置');
+    /* 别的知识被改动，不牵连导演的缓存。 */
+    await h.vfs.write('ws:/skills/my-notes/SKILL.md', '---\nname: my-notes\ndescription: 我的笔记\n---\n随手记');
+    assert.deepEqual([(await h.director.getSkill('planner')).source, (await h.director.getSkill('patrol')).source], ['builtin', 'builtin']);
+
+    /* 只拦「什么都没写」与不认识的角色；内容怎么写不拦。 */
+    await assert.rejects(() => h.director.saveSkill('planner', '   '), /不能是空的/);
+    await assert.rejects(() => h.director.saveSkill('patrol', '---\nname: director-patrol\n---\n\n'), /不能是空的/);
+    for (const bad of ['archive', 'volume-director', '', undefined]) {
+      await assert.rejects(() => h.director.saveSkill(bad, '随便'), /没有这一份导演 Skill/);
+      await assert.rejects(() => h.director.getSkill(bad), /没有这一份导演 Skill/);
+      await assert.rejects(() => h.director.resetSkill(bad), /没有这一份导演 Skill/);
+    }
+    assert.equal(await h.vfs.readText('ws:/skills/director-planner/SKILL.md'), null, '被拒绝的保存什么都没写');
+  } finally { h.dispose(); }
+});
+
+test('跑起来也不串活：总导演的请求只带总导演那一份，场记的请求只带场记那一份；改一份不动另一份的静态前缀', async () => {
+  const h = makeHost();
+  try {
+    await h.director.ready();
+    /* 两份都改得面目全非：没有标题、没有任何内置章节。 */
+    const plannerMine = '编纲口诀（一个标题都没有）：甲乙丙丁，先查后写。{{user}} 是主角。';
+    const patrolMine = '## 我的巡检规矩\n- 只看最新两楼。\n- 口令：子丑寅卯。';
+    await h.director.saveSkill('planner', plannerMine);
+    await h.director.saveSkill('patrol', patrolMine);
+    assert.deepEqual(plain(await h.director.activate()), { done: true });
+    const planSystem = h.model.of('plan')[0].system;
+    assert.ok(planSystem.startsWith('编纲口诀（一个标题都没有）：甲乙丙丁，先查后写。林渡 是主角。\n\n---\n\n## 运行环境补充（Reader-II 分卷导演 · 总导演）'), '总导演的 System 以用户写的原文开头');
+    assert.ok(!planSystem.includes('子丑寅卯') && !planSystem.includes('我的巡检规矩'), '场记的 Skill 不进总导演的提示词');
+    for (const builtin of ['全景勘察', '十条 AI 弊病', '叙事引擎', '铁血自检', '十条红线速记', '三级偏移判定']) assert.ok(!planSystem.includes(builtin), '没有被内置段落替换或补齐：' + builtin);
+
+    await h.turn('我接过毛巾。', '她朝窗外抬了抬下巴。');
+    await h.turn('我问她镇上谁会修钟。', '「钟楼的莫师傅。」');
+    const judges = () => h.model.of('judge');
+    assert.equal(judges().length, 2);
+    const patrolPrefix = judges()[0].system;
+    assert.ok(patrolPrefix.startsWith(patrolMine + '\n\n---\n\n## 运行环境补充（Reader-II 分卷导演 · 场记）'), '场记的 System 以用户写的原文开头');
+    assert.ok(!patrolPrefix.includes('甲乙丙丁') && !patrolPrefix.includes('编纲口诀'), '总导演的 Skill 不进场记的提示词');
+    /* （大纲样例的板块 A 标题里本来就有「全景勘察」四个字，所以这里拿只在内置 Skill 里才有的说法来验。） */
+    for (const builtin of ['十条红线速记', '三级偏移判定', '完结判定（双保险）', '反平直叙事引擎', '8 道拷问', '铁血自检']) assert.ok(!patrolPrefix.includes(builtin), '没有被内置段落替换或补齐：' + builtin);
+    assert.equal(judges()[1].system, patrolPrefix, '场记的静态前缀逐字节稳定');
+    assert.equal(judges()[0].prompts.length, 2, '场记还是无状态单轮');
+
+    /* 改了总导演那一份：场记的前缀一个字节都不变（它的缓存不受牵连）。 */
+    await h.director.saveSkill('planner', plannerMine + '\n补一条：多写吃饭。');
+    await h.turn('我在柜台边坐下。', '她把灯拨亮了些。');
+    assert.equal(judges()[2].system, patrolPrefix);
+    /* 改了场记那一份：下一轮巡检用新的；总导演的重构仍然只用它自己那一份。 */
+    await h.director.saveSkill('patrol', patrolMine + '\n- 口令二：辰巳午未。');
+    await h.turn('我看了一眼座钟。', '座钟慢了七分钟。');
+    assert.ok(judges()[3].system.startsWith(patrolMine + '\n- 口令二：辰巳午未。\n\n---\n\n') && judges()[3].system !== patrolPrefix);
+    assert.equal((await h.director.restructureNow('手动重构')).version, 2);
+    const restructure = h.model.of('restructure')[0].system;
+    assert.ok(restructure.startsWith('编纲口诀') && restructure.includes('补一条：多写吃饭。'), '重构用的是总导演当前那一份');
+    assert.ok(!restructure.includes('辰巳午未') && !restructure.includes('子丑寅卯') && !restructure.includes('我的巡检规矩'));
+
+    /* 恢复默认各恢复各的：场记回到内置，总导演还是用户那一份。 */
+    await h.director.resetSkill('patrol');
+    await h.turn('我起身去看门外。', '雨小了一些。');
+    assert.ok(judges().at(-1).system.startsWith(core.expandUser(core.skillBody(PATROL_SKILL), '林渡') + '\n\n---\n\n## 运行环境补充（Reader-II 分卷导演 · 场记）'));
+    assert.ok(!judges().at(-1).system.includes('甲乙丙丁') && !judges().at(-1).system.includes('## 阶段一'));
+    assert.deepEqual([(await h.director.getSkill('planner')).source, (await h.director.getSkill('patrol')).source], ['user', 'builtin']);
   } finally { h.dispose(); }
 });
 
@@ -547,20 +669,22 @@ test('判定解析与状态迁移：L0 只推进，L1 留补丁不动大纲，L2
 
 test('场记与总导演 Skill 严格隔离且前缀静态；单会话编纲消息、插话与自动质检校验完备', () => {
   assert.equal(core.normalizeSettings({ planMode: 'review' }).planMode, 'auto', '编纲模式只保留 auto');
-  const base = { skillRaw: SKILL, preferences: '日常多一些', userName: '林渡', profile: '主角「林渡」：修表匠', outline: OUTLINE, index: core.normalizeIndex(INDEX, OUTLINE) };
+  const base = { skillRaw: PATROL_SKILL, preferences: '日常多一些', userName: '林渡', profile: '主角「林渡」：修表匠', outline: OUTLINE, index: core.normalizeIndex(INDEX, OUTLINE) };
   const first = core.buildJudgeMessages({ ...base, state: core.initialState(), brief: '简报一', turn: 3, recent: [{ floor: 4, role: 'assistant', name: '艾琳', text: '她递来毛巾。' }] });
   const state = { ...core.initialState(), phaseCursor: 2, progress: '上了钟楼', facts: ['林渡没接毛巾'], patches: [{ phase: 2, turn: 5, text: '艾琳改从后门送他上钟楼' }], turn: 5 };
   const second = core.buildJudgeMessages({ ...base, state, brief: '简报二', turn: 6, recent: [{ floor: 6, role: 'user', name: '林渡', text: '我绕到后门。' }, { floor: 7, role: 'assistant', name: '艾琳', text: '后门没有锁。' }] });
   assert.equal(first[0].content, second[0].content, '场记 System 逐字节相同');
-  assert.ok(first[0].content.includes(OUTLINE) && first[0].content.includes('## 阶段五') && !first[0].content.includes('## 阶段四') && !first[0].content.includes('## 阶段六'), '场记只读运行期协议，不串大纲编撰段');
+  assert.ok(first[0].content.includes(OUTLINE) && first[0].content.includes('## 三级偏移判定') && first[0].content.includes('## 完结判定（双保险）')
+    && !first[0].content.includes('## 阶段四') && !first[0].content.includes('8 道拷问') && !first[0].content.includes('叙事引擎'), '场记只读它自己的巡检协议，不串大纲编撰段');
   assert.ok(first[0].content.includes('日常多一些') && first[0].content.includes('输出契约'));
   assert.ok(!first[0].content.includes('{{user}}') && first[0].content.includes('林渡'), 'Skill 里的主角占位已经换成实名');
   assert.ok(!second[0].content.includes('艾琳改从后门送他上钟楼'), 'L1 的补丁不进静态前缀');
   assert.ok(second[1].content.includes('艾琳改从后门送他上钟楼') && second[1].content.includes('林渡没接毛巾') && second[1].content.includes('[#7 艾琳]') && second[1].content.includes('游标：Phase 2 / 3（钟楼的夹层）'));
   assert.notEqual(core.buildJudgeSystem({ ...base, outline: OUTLINE_V2 }), first[0].content, '只有大纲换了版本，前缀才变');
 
-  const system = core.buildPlannerSystem(SKILL, '日常多一些', '林渡');
-  assert.ok(system.includes('## 阶段一') && system.includes('## 阶段四') && system.includes('## 阶段六') && !system.includes('## 阶段五'), '总导演只读大纲创作与自检切片，不串场记协议');
+  const system = core.buildPlannerSystem(PLANNER_SKILL, '日常多一些', '林渡');
+  assert.ok(system.includes('## 阶段一') && system.includes('## 阶段四') && system.includes('## 阶段五：交付前铁血自检闭环')
+    && !system.includes('三级偏移判定') && !system.includes('Turn Director Brief'), '总导演只读它自己的编纲与自检方法论，不串场记协议');
   assert.ok(system.includes('用户长期偏好') && system.includes('日常多一些') && system.includes('主角实名：「林渡」'));
   assert.match(system, /角色卡的标题、世界书的书名只是资料的出处，不是人物/);
 
@@ -791,7 +915,8 @@ test('完结归档：进入待完结 → 沉淀档案 → 一次性条目只关�
     const result = await g.director.finish({ keepEntryIds: entries.filter((item) => item.roleKind === 'npc').map((item) => item.id) });
     assert.deepEqual([result.volumeNo, result.disabled, result.fallback, plain(result.hooks)], [1, 1, false, ['莫师傅徒弟留下的怀表', '港务司的旧册子少了一页']]);
     const archiveCall = g.model.of('archive')[0];
-    assert.ok(archiveCall.system.includes('丙、完结判定与资产沉淀协议') && !archiveCall.system.includes('## 阶段一'), '归档只带阶段五·丙');
+    assert.ok(archiveCall.system.startsWith(core.ARCHIVE_PROTOCOL) && archiveCall.system.includes('### 归档与清理原则')
+      && !archiveCall.system.includes('## 阶段一') && !archiveCall.system.includes('三级偏移判定') && !archiveCall.system.includes('十条红线速记'), '归档用写死的短协议，不带任何一份 Skill');
     assert.ok(archiveCall.last.includes('账本摆上了桌面') && archiveCall.last.includes('莫师傅（新角色）') && archiveCall.last.includes('港务司书记（一次性事件 / 龙套）'));
 
     /* 档案沉淀；活跃卷、大纲、快照、简报清空。 */
@@ -1259,7 +1384,7 @@ test('自动质检与自查打回重写：发现未过关项或截断时在同�
     await hCap.director.ready();
     await assert.rejects(() => hCap.director.activate(), /自动修订 2 次后仍未通过质检/);
     const status = hCap.director.getStatus();
-    assert.deepEqual([status.state, status.plan.state, status.plan.revisions, status.plan.hasCheckpoint], ['draft', 'failed', 2, true]);
+    assert.deepEqual([status.state, status.plan.state, status.plan.revisions, status.plan.hasCheckpoint, status.plan.activity, status.plan.activityLabel], ['draft', 'failed', 2, true, '', '出错待续']);
     assert.equal(await hCap.readJson(hCap.dir() + '/active.json'), null, '质检未过绝不落盘提交');
     hCap.model.table.plan = okDelivery;
     assert.deepEqual(plain(await hCap.director.resume()), { done: true });
@@ -1296,7 +1421,7 @@ test('切走聊天时在途的编纲存成断点草稿并标为中断；回来�
     await h.emit('CHAT_CHANGED');
     await h.director.ready();
     const status = h.director.getStatus();
-    assert.deepEqual([status.state, status.plan.state, status.plan.hasCheckpoint], ['draft', 'interrupted', true]);
+    assert.deepEqual([status.state, status.plan.state, status.plan.hasCheckpoint, status.plan.activityLabel], ['draft', 'interrupted', true, '已中断']);
     h.model.table.plan = delivery(OUTLINE, INDEX, brief('Phase 1 · 雨夜'));
     assert.deepEqual(plain(await h.director.resume()), { done: true });
 
@@ -1410,16 +1535,18 @@ test('后台任务看板、设置与偏好：牌子的生命周期、按级别�
   const seen = [];
   const off = board.onChange((job, reason) => seen.push(reason + ':' + job.state));
   let cancelled = 0;
-  const job = board.start({ owner: 'director', kind: 'plan', title: '导演 · 编纲', steps: 4, cancel: () => { cancelled += 1; } });
+  /* 步数是看板的通用能力：归档、建档这类真有固定几步的活在用；编纲与重构不带步数（见第 7 组）。 */
+  const job = board.start({ owner: 'director', kind: 'archive', title: '导演 · 完结归档', steps: 3, step: 1, cancel: () => { cancelled += 1; } });
   const minor = board.start({ owner: 'director', kind: 'patrol', level: 'minor', title: '导演 · 后台巡检' });
-  job.update({ stage: '第 2 步', step: 2 });
-  job.log('第 1 步完成');
-  assert.deepEqual(plain(board.list().map((item) => [item.kind, item.level, item.state, item.step, item.canCancel])), [['patrol', 'minor', 'running', 0, false], ['plan', 'major', 'running', 2, true]], '从新到旧');
+  job.update({ stage: '保存恢复点', step: 2 });
+  job.log('档案已沉淀');
+  assert.deepEqual(plain(board.list().map((item) => [item.kind, item.level, item.state, item.step, item.steps, item.canCancel])),
+    [['patrol', 'minor', 'running', 0, 0, false], ['archive', 'major', 'running', 2, 3, true]], '从新到旧；没给步数的就是 0（浮窗据此显示循环脉冲条）');
   assert.equal(board.busy(), true);
   assert.deepEqual([board.cancel(job.id), cancelled, board.cancel(minor.id)], [true, 1, false]);
   minor.done('L0 顺轨');
   job.fail(new Error('模型没有回复'));
-  assert.deepEqual(plain(board.list().map((item) => [item.kind, item.state, item.result])), [['patrol', 'done', 'L0 顺轨'], ['plan', 'failed', '模型没有回复']]);
+  assert.deepEqual(plain(board.list().map((item) => [item.kind, item.state, item.result])), [['patrol', 'done', 'L0 顺轨'], ['archive', 'failed', '模型没有回复']]);
   assert.equal(board.busy(), false);
   assert.deepEqual([board.dismiss(job.id), board.list().length], [true, 1]);
   off();
@@ -1666,7 +1793,7 @@ test('总导演真 Agent 单会话原生工具循环：并行查阅世界书与�
     const declared = h.backendCalls[0].body.tools.map((t) => t.function.name);
     assert.ok(declared.includes('ls') && declared.includes('read') && declared.includes('grep'));
     assert.ok(!declared.some((n) => ['write', 'edit', 'remove', 'run_js', 'toolbox', 'delegate_task'].includes(n)));
-    assert.equal(h.backendCalls.length, 2, '单会话两轮（工具查阅 + 完整交付）直接定稿，不拆四步');
+    assert.equal(h.backendCalls.length, 2, '单会话两轮（工具查阅 + 完整交付）直接定稿，中间没有固定的步数');
 
     /* 3. 验证 append-only 前缀缓存：第 2 轮请求严格保留第 1 轮的 System 与初始 User 前缀 */
     assert.deepEqual(plain(h.backendCalls[1].body.messages.slice(0, 2)), plain(h.backendCalls[0].body.messages.slice(0, 2)));
@@ -1691,6 +1818,103 @@ test('总导演真 Agent 单会话原生工具循环：并行查阅世界书与�
     const revised = await h.director.submitFeedback('先查一下 var:/mvu.json 的资金，再把后续改成渡口改道');
     assert.equal(revised.version, 2);
     off();
+  } finally { h.dispose(); }
+});
+
+test('编纲与重构不再有「4 步」：任务牌不带步数（steps: 0），状态里是只读 Agent 的真实工作态与实时动作', async () => {
+  /* 第 1 稿自检没过（软问题）→ 自动打回 → 第 2 稿通过。查完第一轮资料后的那个请求先挂住，好看一眼途中的工作态。 */
+  const softFail = '<self_check>\n1. 通过\n2. 命名嗅探：未通过，有罐头名\n</self_check>\n'
+    + `<volume_outline>\n${OUTLINE}\n</volume_outline>\n<volume_index>\n${JSON.stringify(INDEX)}\n</volume_index>\n<first_brief>\n${brief('Phase 1')}\n</first_brief>`;
+  let replies = 0;
+  const h = makeNativeDirectorHost({
+    backend: async (body, seq, signal) => {
+      if (String(body.messages[0].content).includes('分卷导演 · 场记')) return nativeReply({ content: judge() });
+      const restructuring = body.messages.some((m) => String(m.content || '').includes('## 结构重构'));
+      const looked = body.messages.some((m) => m.role === 'tool');
+      if (!looked) return nativeReply({ tool_calls: [toolCall('read', { path: 'wb:/命定之诗/格温' }, restructuring ? 'c_rs' : 'c_plan')] }, 'tool_calls');
+      if (restructuring) return nativeReply({ content: delivery(OUTLINE_V2, { title: '雨季的钟', phases: [{ n: 1, title: '渡口改道' }, { n: 2, title: '对岸的钟' }], new_characters: [] }, brief('重构后的 Phase 1'), '改走渡口') });
+      replies += 1;
+      if (replies === 1) {
+        await new Promise((resolve, reject) => {
+          const abort = () => reject(Object.assign(new Error('Aborted'), { name: 'AbortError' }));
+          if (signal && signal.aborted) abort();
+          else if (signal) signal.addEventListener('abort', abort, { once: true });
+        });
+      }
+      if (!body.messages.some((m) => m.role === 'user' && String(m.content).includes('自动质检打回'))) return nativeReply({ content: softFail });
+      return nativeReply({ content: delivery(OUTLINE, INDEX, brief('Phase 1 · 雨夜')) });
+    },
+  });
+  const AGENT_KEYS = ['state', 'activity', 'activityLabel', 'stage', 'rounds', 'toolCalls', 'revisions', 'maxRevisions', 'hasCheckpoint', 'canForceCommit', 'feedback', 'lastOutput', 'error', 'updatedAt'];
+  const jobsSeen = [], planSeen = [], restructureSeen = [];
+  let restructureShape = null;
+  try {
+    await h.director.ready();
+    const offJobs = h.api.jobs.onChange((job) => { if (job.owner === 'director') jobsSeen.push({ kind: job.kind, title: job.title, stage: job.stage, step: job.step, steps: job.steps }); });
+    const offDirector = h.director.onChange(() => {
+      const s = h.director.getStatus();
+      if (s.plan) planSeen.push([s.plan.activity, s.plan.activityLabel, s.plan.state].join('|'));
+      if (s.restructureDraft) {
+        restructureSeen.push([s.restructureDraft.activity, s.restructureDraft.activityLabel, s.restructureDraft.state].join('|'));
+        if (s.restructureDraft.state === 'running') restructureShape = plain(s.restructureDraft);
+      }
+    });
+
+    /* 编纲途中：查完一轮资料，下一个请求在途。 */
+    const running = h.director.activate();
+    await until(() => replies === 1, '查完第一轮资料，第二个请求在途');
+    const mid = h.director.getStatus();
+    assert.deepEqual([mid.state, mid.work.kind, mid.work.stage], ['planning', 'plan', '自主查阅与编纲（已查 1 项资料）']);
+    assert.deepEqual(Object.keys(plain(mid.plan)).sort(), [...AGENT_KEYS, 'hasMaterials'].sort(), 'status.plan 只有 Agent 的工作态字段');
+    for (const gone of ['step', 'steps', 'names', 'phase', 'mode']) assert.ok(!(gone in mid.plan), 'status.plan 不再有 ' + gone);
+    assert.deepEqual([mid.plan.state, mid.plan.activity, mid.plan.activityLabel, mid.plan.stage, mid.plan.rounds, mid.plan.toolCalls, mid.plan.revisions, mid.plan.maxRevisions,
+      mid.plan.hasCheckpoint, mid.plan.hasMaterials, mid.plan.canForceCommit, mid.plan.error, plain(mid.plan.feedback), mid.plan.lastOutput],
+    ['running', 'exploring', '自主查阅与编纲中', '自主查阅与编纲（已查 1 项资料）', 1, 1, 0, 2, true, true, false, '', [], '']);
+    assert.ok(mid.plan.updatedAt > 0);
+    const card = h.api.jobs.list().find((job) => job.owner === 'director' && job.state === 'running');
+    assert.deepEqual([card.kind, card.title, card.steps, card.step, card.stage], ['plan', '导演 · 编纲', 0, 0, '自主查阅与编纲（已查 1 项资料）'], '牌子不带步数：浮窗据此显示循环脉冲条，不显示「2/4」');
+
+    /* 暂停：停着的时候没有「当前动作」，只有「已暂停」；草稿文件里也没有旧的四步字段。 */
+    assert.equal(await h.director.pause(), 'plan');
+    assert.deepEqual(plain(await running), { paused: true });
+    const paused = h.director.getStatus();
+    assert.deepEqual([paused.state, paused.work, paused.plan.state, paused.plan.activity, paused.plan.activityLabel, paused.plan.stage, paused.plan.hasCheckpoint, paused.plan.toolCalls],
+      ['draft', null, 'paused', '', '已暂停', '', true, 1]);
+    const draft = await h.readJson(h.dir() + '/draft.json');
+    assert.ok(!('phase' in draft) && !('step' in draft) && draft.activity === 'exploring', 'draft.json 记的是 activity，没有 phase');
+
+    /* 续编：自检软失败 → 自动打回 → 通过定稿。 */
+    assert.deepEqual(plain(await h.director.resume()), { done: true });
+    const planJobs = jobsSeen.filter((job) => job.kind === 'plan');
+    assert.ok(planJobs.length >= 8 && planJobs.every((job) => job.steps === 0 && job.step === 0), '编纲的任务牌从头到尾不带步数');
+    const planStages = [...new Set(planJobs.map((job) => job.stage))];
+    for (const stage of ['准备', '构建世界书与变量地图', '自主查阅与编纲', '查阅世界书 wb:/命定之诗/格温', '自主查阅与编纲（已查 1 项资料）', '质检：校验大纲结构、索引与防剧透简报',
+      '自检打回重写（第 1/2 次）', '定稿落盘：写入大纲、索引与首轮简报']) {
+      assert.ok(planStages.includes(stage), '任务牌上应出现过：' + stage + '（实际：' + planStages.join(' / ') + '）');
+    }
+    for (const seen of ['mapping|建图中|running', 'exploring|自主查阅与编纲中|running', 'checking|质检中|running', 'revising|自检重写中|running', 'committing|定稿落盘中|running', '|已暂停|paused']) {
+      assert.ok(planSeen.includes(seen), '工作态应经过：' + seen + '（实际：' + [...new Set(planSeen)].join(' , ') + '）');
+    }
+    assert.deepEqual([h.director.getStatus().state, h.director.getStatus().plan], ['running', null]);
+
+    /* 结构重构同样是一个只读 Agent 会话：牌子不带步数，状态的形状与编纲断点一致。 */
+    assert.equal((await h.director.restructureNow('手动重构')).version, 2);
+    const rsJobs = jobsSeen.filter((job) => job.kind === 'restructure');
+    assert.ok(rsJobs.length >= 5 && rsJobs.every((job) => job.steps === 0 && job.step === 0), '重构的任务牌从头到尾不带步数');
+    const rsStages = [...new Set(rsJobs.map((job) => job.stage))];
+    for (const stage of ['整理既成事实', '自主查阅与重写后续', '查阅世界书 wb:/命定之诗/格温', '自主查阅与重写后续（已查 1 项资料）', '质检：校验重构稿的结构、索引与防剧透简报', '重构落盘：新大纲与下一轮简报']) {
+      assert.ok(rsStages.includes(stage), '任务牌上应出现过：' + stage + '（实际：' + rsStages.join(' / ') + '）');
+    }
+    for (const seen of ['exploring|自主查阅与重写中|running', 'checking|质检中|running', 'committing|重构落盘中|running']) {
+      assert.ok(restructureSeen.includes(seen), '重构的工作态应经过：' + seen + '（实际：' + [...new Set(restructureSeen)].join(' , ') + '）');
+    }
+    assert.deepEqual(Object.keys(restructureShape).sort(), [...AGENT_KEYS, 'stale', 'reason'].sort());
+    assert.deepEqual([restructureShape.maxRevisions, restructureShape.stale, restructureShape.reason], [2, false, '手动重构']);
+    assert.equal(h.director.getStatus().restructureDraft, null, '落盘之后重构断点清掉');
+    /* 所有文案里都没有「第几步 / 共 4 步」这类说法。 */
+    for (const job of jobsSeen) assert.doesNotMatch(job.stage, /\d\s*\/\s*4(?!\d)|第\s*\d\s*步|共\s*\d\s*步/);
+    offJobs();
+    offDirector();
   } finally { h.dispose(); }
 });
 

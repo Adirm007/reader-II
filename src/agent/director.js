@@ -24,6 +24,9 @@
    *
    * 每轮正文要注入的简报不是临时算的：巡检在上一轮收楼之后就把它预写好、连同状态存成锚在那一楼的快照；
    * 生成时只要按楼层指纹取出对得上的那一条。所以注入不等模型，Swipe、删楼、改楼之后取到的也是对应那一楼的状态。
+   *
+   * 方法论是两份物理独立的 Skill（名字见 director-core.js 的 SKILL_NAMES）：总导演读 planner 那一份，场记读 patrol 那一份。
+   * 各自先看工作区 ws:/skills/<名>/SKILL.md（用户改过的），没有才用随包内置的；各有各的缓存，改一份不动另一份。
    */
   var modules = root.__ReaderIIModules = root.__ReaderIIModules || {};
   var SETTINGS_NAMESPACE = 'reader_ii';
@@ -31,12 +34,20 @@
   var CHAT_SWITCH_KEY = 'reader_ii_director';
   var CHAT_REF_KEY = 'reader_ii_director_ref';
   var ROOT = 'ws:/director';
-  var SKILL_PATH = 'ws:/skills/volume-director/SKILL.md';
   var ACTIVE_STATES = ['running', 'restructuring', 'pending_finish'];
   var DEBOUNCE_MS = 1500;          /* 收楼之后等这么久再巡检：别的扩展补写变量、群聊里下一位角色接着回复，都在这段时间里 */
   var FAIL_LIMIT = 3;              /* 巡检连续失败这么多次就自动暂停 */
   var MAX_SELF_REVISIONS = 2;      /* 自动质检/自查未通过时，同一会话内最多自动打回重写次数 */
-  var PHASE_INDEX = { recon: 1, explore: 2, draft: 3, check: 4, commit: 4 };
+  /*
+   * 总导演这个只读 Agent 此刻在做什么（编纲与重构共用）。它是一个会话里自己决定查什么、写什么，
+   * 没有固定的步数，所以界面上只有「当前动作 + 指标」，任务牌也不带步数（steps: 0，浮窗显示循环脉冲条）。
+   */
+  var ACTIVITIES = ['mapping', 'exploring', 'revising', 'checking', 'committing'];
+  var ACTIVITY_LABEL = {
+    plan: { mapping: '建图中', exploring: '自主查阅与编纲中', revising: '自检重写中', checking: '质检中', committing: '定稿落盘中' },
+    restructure: { mapping: '整理既成事实中', exploring: '自主查阅与重写中', revising: '自检重写中', checking: '质检中', committing: '重构落盘中' }
+  };
+  var IDLE_LABEL = { paused: '已暂停', interrupted: '已中断', failed: '出错待续' };
   var MODEL_CACHE_MS = 10 * 60 * 1000;
   var GENERATING_STALE_MS = 5 * 60 * 1000;
   var WORK_LABEL = { plan: '编纲', patrol: '巡检', restructure: '重构大纲', archive: '归档', entry: '给新角色建档' };
@@ -67,7 +78,8 @@
     var generatingAt = 0;          /* 酒馆正在生成（任何类型）的起始时间；0 = 没在生成 */
     var patrolTimer = null;
     var slotOwner = null;          /* 已经登记过槽位的那个提示词模块 */
-    var skillCache = null;
+    var skillCache = Object.create(null);   /* 角色（planner / patrol）→ { text, source }；两份各记各的 */
+    var skillStamp = Object.create(null);   /* 角色 → 这一份被作废过几次（读的途中又被改了，就不把旧的记进缓存） */
     var viewCache = null;
     var unwatch = null;
     var unwatchAgent = null;
@@ -188,23 +200,19 @@
 
     function normalizeDraft(raw) {
       if (!modules.isObject(raw)) return null;
-      var rawState = raw.state === 'review' ? 'paused' : raw.state;
-      var phase = Object.prototype.hasOwnProperty.call(PHASE_INDEX, raw.phase) ? raw.phase : 'recon';
       var feedback = (Array.isArray(raw.feedback) ? raw.feedback : []).filter(modules.isObject).map(function (item) {
         return { at: Number(item.at) || Date.now(), text: str(item.text).trim() };
       }).filter(function (item) { return item.text; });
-      /* 兼容历史 v1 四步草稿：保留勘察资料与用户意见，消息重置由单会话重新起跑。 */
       var proto = ['native', 'text'].indexOf(raw.protocol) >= 0 ? raw.protocol : '';
-      var messages = raw.v === 2 && Array.isArray(raw.messages) ? normalizeConversationMessages(raw.messages, proto || 'native') : [];
       return {
         v: 2, epoch: str(raw.epoch) || randomId('ep'), mode: 'auto',
-        state: ['running', 'paused', 'interrupted', 'failed'].indexOf(rawState) >= 0 ? rawState : 'interrupted',
-        phase: phase,
+        state: ['running', 'paused', 'interrupted', 'failed'].indexOf(raw.state) >= 0 ? raw.state : 'interrupted',
+        activity: ACTIVITIES.indexOf(raw.activity) >= 0 ? raw.activity : 'mapping',
         materials: str(raw.materials),
         protocol: proto,
         protocolKey: str(raw.protocolKey),
         protocolFallback: raw.protocolFallback === true,
-        messages: messages,
+        messages: Array.isArray(raw.messages) ? normalizeConversationMessages(raw.messages, proto || 'native') : [],
         rounds: Math.max(0, Math.trunc(Number(raw.rounds) || 0)),
         stepRounds: Math.max(0, Math.trunc(Number(raw.stepRounds) || 0)),
         toolCalls: Math.max(0, Math.trunc(Number(raw.toolCalls) || 0)),
@@ -234,6 +242,7 @@
         reason: str(raw.reason),
         manual: raw.manual !== false,
         state: ['running', 'paused', 'interrupted', 'failed'].indexOf(raw.state) >= 0 ? raw.state : 'interrupted',
+        activity: ACTIVITIES.indexOf(raw.activity) >= 0 ? raw.activity : 'exploring',
         protocol: proto,
         protocolKey: str(raw.protocolKey),
         protocolFallback: raw.protocolFallback === true,
@@ -410,17 +419,40 @@
 
     /* ---------- Skill 与偏好 ---------- */
 
-    /* 生效的导演 Skill：工作区里有就用工作区的（用户改过的），否则用内置的。读过之后记着，工作区那份被改动时作废。 */
-    async function skillText() {
-      if (skillCache) return skillCache;
-      var user = await readText(SKILL_PATH);
-      if (typeof user === 'string' && user.trim()) { skillCache = { text: user, source: 'user' }; return skillCache; }
-      var builtin = '';
-      try { builtin = skills && typeof skills.builtinText === 'function' ? await skills.builtinText(core.SKILL_NAME) : ''; } catch (error) { builtin = ''; }
-      if (!builtin && typeof modules.inlineBuiltinSkill === 'function') builtin = modules.inlineBuiltinSkill(core.SKILL_NAME);
-      if (!str(builtin).trim()) throw new Error('读不到导演 Skill 的正文：内置的没有随包带上，工作区里也没有。');
-      skillCache = { text: builtin, source: 'builtin' };
-      return skillCache;
+    function skillName(role) {
+      if (core.SKILL_ROLES.indexOf(role) < 0) throw new Error('没有这一份导演 Skill：' + str(role) + '（只有 planner 总导演、patrol 场记两份）');
+      return core.SKILL_NAMES[role];
+    }
+    function skillPath(role) { return 'ws:/skills/' + skillName(role) + '/SKILL.md'; }
+
+    /*
+     * 某个角色此刻生效的 Skill 原文：工作区里有就用工作区的（用户改过的），否则用内置的。
+     * 两份各读各的、各记各的缓存；工作区那份被改动时只作废它自己的。读到什么就用什么——
+     * 用户把其中一份改得面目全非，也不会去拿另一份或内置正文来补。
+     */
+    async function skillText(role) {
+      var name = skillName(role);
+      if (skillCache[role]) return skillCache[role];
+      var stamp = skillStamp[role] || 0;
+      var result = null;
+      var user = await readText(skillPath(role));
+      if (typeof user === 'string' && user.trim()) result = { text: user, source: 'user' };
+      else {
+        var builtin = '';
+        try { builtin = skills && typeof skills.builtinText === 'function' ? await skills.builtinText(name) : ''; } catch (error) { builtin = ''; }
+        if (!builtin && typeof modules.inlineBuiltinSkill === 'function') builtin = modules.inlineBuiltinSkill(name);
+        if (!str(builtin).trim()) throw new Error('读不到' + core.SKILL_LABELS[role] + '的正文：内置的没有随包带上，工作区里也没有。');
+        result = { text: builtin, source: 'builtin' };
+      }
+      /* 读的途中这一份又被改了：这次读到的照样返回，但不记进缓存，下一次重新读。 */
+      if ((skillStamp[role] || 0) === stamp) skillCache[role] = result;
+      return result;
+    }
+
+    /* 作废某一份的缓存（只动这一份）。 */
+    function dropSkill(role) {
+      skillCache[role] = null;
+      skillStamp[role] = (skillStamp[role] || 0) + 1;
     }
 
     function cardPreferencePath(target) { return ROOT + '/cards/' + core.hashId(target.owner) + '/preferences.md'; }
@@ -1083,7 +1115,8 @@
         return messages.slice(1).map(cleanTraceMessage);
       }
 
-      async function checkpoint(phase) {
+      /* 把会话落成断点。它「此刻在做什么」由调用方（编纲 / 重构）自己记，这里只交会话与计数。 */
+      async function checkpoint() {
         if (typeof options.onCheckpoint !== 'function') return;
         await options.onCheckpoint({
           messages: snapshotMessages(),
@@ -1092,9 +1125,17 @@
           protocolFallback: proto.fallback === true,
           rounds: rounds,
           stepRounds: stepRounds,
-          toolCalls: toolCount,
-          phase: phase || 'explore'
+          toolCalls: toolCount
         });
+      }
+
+      /*
+       * 等模型回话时任务牌上写什么。它是自己决定「接着查」还是「开始写」的，所以平时只写调用方给的那句
+       * （带已查项数）；工具被收走之后（空转拦截、轮数用尽）它只能动笔，这时才写「正在撰写与自检」。
+       */
+      function waitingStage() {
+        if (forced) return '正在撰写与自检';
+        return typeof options.stageOf === 'function' ? str(options.stageOf(toolCount)) : '自主查阅与撰稿';
       }
 
       async function drainInbox() {
@@ -1113,7 +1154,7 @@
         nudged = false;
         if (stepRounds >= cfg.maxSteps) stepRounds = 0;
         if (job) job.log('收到用户实时插话：' + merged.replace(/\s+/g, ' ').slice(0, 80));
-        await checkpoint('explore');
+        await checkpoint();
         return true;
       }
 
@@ -1123,7 +1164,7 @@
         var norm = normalizeConversationMessages(messages.slice(1), 'text');
         messages = [{ role: 'system', content: makeSystem('text') }].concat(norm);
         if (job) job.log('模型接口不支持原生工具调用，已自动切换文本工具协议');
-        await checkpoint('explore');
+        await checkpoint();
       }
 
       async function askOnce(reqMessages, maxTokens, reqSignal) {
@@ -1192,10 +1233,9 @@
             ok: true, reused: true, summary: '重复调用，复用上下文已有结果'
           };
         }
-        if (job) {
-          job.update({ stage: options.stepStage + ' · ' + label, detail: label, step: options.stepNumber });
-          job.log(label);
-        }
+        /* 任务牌上直接写正在查的那一项（「查阅世界书 wb:/…」），日志里再留一行。 */
+        setStage(entry, label, label);
+        if (job) job.log(label);
         try {
           /* 只读工具仅响应任务级中止，不被插话打断；且不在执行阶段提前写 seen/toolCount，待整批原子落入会话后再提交。 */
           var value = await def.run(args, { signal: taskSignal, resultCap: cfg.resultCap });
@@ -1244,6 +1284,7 @@
           messages = fitted.messages;
           rebuildSeenFromMessages();
         }
+        setStage(entry, waitingStage(), '');
         var req = makeRequestSignal(entry);
         var turn;
         try {
@@ -1275,7 +1316,7 @@
             seqRetried = true;
             messages = [messages[0]].concat(normalizeConversationMessages(messages.slice(1), proto.mode));
             if (job) job.log('检测到消息序列不兼容，已自动规范化会话序列后重试');
-            await checkpoint('explore');
+            await checkpoint();
             continue;
           }
           /* 仅对明确由网关识别的 no_native_tools 才降级为文本协议；风控/鉴权/5xx 上游故障一律直报并完整保留原生断点。 */
@@ -1300,14 +1341,14 @@
             nudged = true;
             messages.push({ role: 'assistant', content: said });
             appendUserTurn(messages, '（系统提示：你已配备只读 VFS 工具 ls / read / grep，可直接查阅 wb:/、var:/、chat:/、card:/ 的完整原文与变量结构。请立即调用只读工具查证后再交付产出，不要推说看不了。）', false);
-            await checkpoint('explore');
+            await checkpoint();
             continue;
           }
           if (!forced && !nudged && localRounds === 0 && protocol.stalled(said, turn.reasoning)) {
             nudged = true;
             messages.push({ role: 'assistant', content: said });
             appendUserTurn(messages, '（系统提示：上一条回复没有发出任何工具调用。如需查阅世界书、变量或历史，请立即调用只读工具；若已查证充分，请直接交付完整产出。）', false);
-            await checkpoint('explore');
+            await checkpoint();
             continue;
           }
           if (!forced && nudged && localRounds === 0 && proto.mode === 'native' && cfg.toolProtocol === 'auto' && protocol.stalled(said, turn.reasoning)) {
@@ -1429,8 +1470,7 @@
         } else {
           messages.push({ role: 'user', content: (textBlocks.length ? textBlocks.join('\n') + '\n' : '') + tail, toolResult: true });
         }
-        await checkpoint('explore');
-        if (job) job.update({ stage: options.stepStage + (toolCount ? '（已查阅 ' + toolCount + ' 项资料）' : ''), step: options.stepNumber });
+        await checkpoint();
       }
     }
 
@@ -1440,6 +1480,13 @@
 
     function quietJob() {
       return { id: '', update: noop, log: noop, done: noop, fail: noop, cancelled: noop, running: function () { return false; } };
+    }
+
+    /* 任务牌上的「当前动作」（编纲与重构的实时文案都走这里）。 */
+    function setStage(entry, text, detail) {
+      var patch = { stage: str(text) };
+      if (detail !== undefined) patch.detail = str(detail);
+      entry.job.update(patch);
     }
 
     function begin(kind, spec) {
@@ -1455,10 +1502,17 @@
         inbox: [],
         committing: false,
         closing: false,
-        job: null, reason: '',
+        job: null, reason: '', stage: str(spec && spec.stage),
         settled: settled, resolveSettled: resolveSettled
       };
-      entry.job = jobs ? jobs.start(Object.assign({ owner: 'director', kind: kind, level: 'major', cancel: function () { abortWork(entry, 'user'); }, open: openPage }, spec)) : quietJob();
+      var job = jobs ? jobs.start(Object.assign({ owner: 'director', kind: kind, level: 'major', cancel: function () { abortWork(entry, 'user'); }, open: openPage }, spec)) : quietJob();
+      /* 牌子上写了什么，这件活自己也记一份（entry.stage）：状态快照（getStatus）把它交给界面与调用方。 */
+      entry.job = Object.assign({}, job, {
+        update: function (patch) {
+          if (patch && patch.stage !== undefined) entry.stage = str(patch.stage);
+          job.update(patch);
+        }
+      });
       work = entry;
       emit('work');
       return entry;
@@ -1582,6 +1636,12 @@
       return { brief: brief, active: active };
     }
 
+    /* 编纲时等模型回话，任务牌上写的那一句。 */
+    function planStage(draft, toolCount) {
+      if (draft.revisions > 0) return '自检打回重写（第 ' + draft.revisions + '/' + MAX_SELF_REVISIONS + ' 次）';
+      return '自主查阅与编纲' + (toolCount ? '（已查 ' + toolCount + ' 项资料）' : '');
+    }
+
     /*
      * 单会话连贯编纲：
      * 1. 建图（若草稿尚无轻索引地图）：一次生成世界书分级全量目录、变量全景与近期正文；
@@ -1590,6 +1650,7 @@
      * 4. 自动质检与自查闭环：校验大纲闭合/结构、索引 JSON、首轮简报防泄密与 <self_check> 全过关；
      *    若发现问题自动在同一会话内打回重写（最多 MAX_SELF_REVISIONS 次）；
      * 5. 全部校验通过且无待处理插话时才落盘提交并清空 draft.json，绝不留给后台场记。
+     * 这几样不是固定的步数：查几轮、写几稿都由它自己和质检决定。draft.activity 只记「此刻在做什么」，给界面看。
      */
     async function runPlan(target, entry) {
       var draft = target.draft;
@@ -1601,7 +1662,7 @@
       draft.state = 'running';
       draft.error = '';
       draft.canForceCommit = false;
-      var skill = await skillText();
+      var skill = await skillText('planner');
       var prefs = await loadPreferences(target);
       var model = null;
       try { model = await llm.resolveTaskModel('director', { cacheMs: MODEL_CACHE_MS, signal: signal }); } catch (error) { if (isAbort(error)) throw error; }
@@ -1611,8 +1672,8 @@
       var system = core.buildPlannerSystem(skill.text, prefs.merged, userName, { toolMode: probeProto.mode, tools: directorTools(), mounts: safeMounts() });
 
       if (!draft.materials) {
-        draft.phase = 'recon';
-        job.update({ stage: '构建地图：世界书全量目录与变量全景探测', step: 1 });
+        draft.activity = 'mapping';
+        setStage(entry, '构建世界书与变量地图');
         emit('plan');
         var budget = core.reconBudget(modelWindow, kernel.tokenEstimate(system), settings.plannerMaxTokens);
         var gathered = await gatherMaterials(target, budget, signal, job);
@@ -1635,7 +1696,7 @@
           core.buildPlannerMessages({ system: '', materials: draft.materials, feedback: draft.feedback }).slice(1),
           draft.protocol || 'native'
         );
-        draft.phase = 'explore';
+        draft.activity = 'exploring';
         await saveDraft(target, draft, epoch);
       } else {
         draft.messages = normalizeConversationMessages(draft.messages, draft.protocol || 'native');
@@ -1651,12 +1712,8 @@
       for (;;) {
         assertCurrent(target);
         if (taskAborted(entry) || target.draft !== draft || draft.epoch !== epoch) throw staleError('已停止');
-        var revising = draft.revisions > 0;
-        var stageLabel = revising
-          ? '自检打回重写（第 ' + draft.revisions + '/' + MAX_SELF_REVISIONS + ' 次）'
-          : (draft.toolCalls ? '查阅资料与撰稿（已查 ' + draft.toolCalls + ' 项）' : '查阅资料与撰稿');
-        draft.phase = revising ? 'draft' : 'explore';
-        job.update({ stage: stageLabel, step: revising ? 3 : 2 });
+        draft.activity = draft.revisions > 0 ? 'revising' : 'exploring';
+        setStage(entry, planStage(draft, draft.toolCalls));
         emit('plan');
 
         var outcome = await runDirectorAgent({
@@ -1664,13 +1721,14 @@
           skillText: skill.text, preferences: prefs.merged, userName: userName,
           baseMessages: [{ role: 'system', content: '' }].concat(draft.messages),
           preferredProtocol: draft.protocol, preferredProtocolKey: draft.protocolKey, preferredProtocolFallback: draft.protocolFallback,
-          stepStage: stageLabel, stepNumber: revising ? 3 : 2,
+          stageOf: function (toolCount) { return planStage(draft, toolCount); },
           generationId: 'reader-director-plan', modelWindow: modelWindow,
           initialRounds: draft.rounds, initialStepRounds: draft.stepRounds, initialToolCalls: draft.toolCalls,
           onInbox: async function (batch) {
             if (target.draft !== draft || draft.epoch !== epoch) return;
             batch.forEach(function (item) { draft.feedback.push({ at: item.at || Date.now(), text: str(item.text).trim() }); });
             draft.revisions = 0;
+            draft.activity = 'exploring';
             draft.canForceCommit = false;
             draft.softPending = false;
             draft.error = '';
@@ -1685,7 +1743,6 @@
             draft.rounds = cp.rounds;
             draft.stepRounds = cp.stepRounds;
             draft.toolCalls = cp.toolCalls;
-            draft.phase = cp.phase || 'explore';
             await saveDraft(target, draft, epoch);
             emit('plan');
           }
@@ -1707,8 +1764,8 @@
           job.log('总导演只重交了自检段，已换进上一稿重新质检');
         }
         draft.lastOutput = delivery;
-        draft.phase = 'check';
-        job.update({ stage: '质检自查：校验大纲结构、索引与防剧透简报', step: 3 });
+        draft.activity = 'checking';
+        setStage(entry, '质检：校验大纲结构、索引与防剧透简报');
         emit('plan');
 
         /* 若校验瞬间收到新的实时插话，优先纳入本稿并按用户新意见修订。 */
@@ -1729,7 +1786,7 @@
           if (draft.revisions < MAX_SELF_REVISIONS) {
             draft.revisions += 1;
             if (draft.stepRounds >= cfg.maxSteps) draft.stepRounds = Math.max(0, cfg.maxSteps - 4);
-            draft.phase = 'draft';
+            draft.activity = 'revising';
             job.log('质检未通过（' + checked.issues[0] + '），自动打回总导演重写（第 ' + draft.revisions + '/' + MAX_SELF_REVISIONS + ' 次）');
             await saveDraft(target, draft, epoch);
             emit('plan');
@@ -1739,15 +1796,16 @@
           throw new Error('自动修订 ' + MAX_SELF_REVISIONS + ' 次后仍未通过质检：' + checked.issues[0]);
         }
 
-        draft.phase = 'commit';
+        draft.activity = 'committing';
         draft.canForceCommit = false;
         draft.softPending = false;
-        job.update({ stage: '定稿落盘：写入大纲、索引与首轮简报并清理会话', step: 4 });
+        setStage(entry, '定稿落盘：写入大纲、索引与首轮简报');
+        emit('plan');
         var committed = await commitVolume(target, checked.final, userName, entry);
         if (committed && committed.interjected) {
           draft.messages.push({ role: 'assistant', content: str(outcome.text).trim() || '（上一次回复为空）' });
           draft.revisions = 0;
-          draft.phase = 'explore';
+          draft.activity = 'exploring';
           job.log('定稿前收到用户实时插话，继续按新意见修订');
           await saveDraft(target, draft, epoch);
           continue;
@@ -1762,8 +1820,8 @@
       var draft = target.draft;
       if (!draft) throw new Error('没有可以继续的编纲草稿');
       var epoch = draft.epoch;
-      var initStep = PHASE_INDEX[draft.phase] || 1;
-      var entry = begin('plan', { title: '导演 · 编纲', stage: '准备', steps: 4, step: initStep });
+      /* 不带步数：总导演在一个会话里自己决定查几轮、写几稿，牌子上只写它此刻在做什么。 */
+      var entry = begin('plan', { title: '导演 · 编纲', stage: '准备', steps: 0 });
       try {
         await runPlan(target, entry);
         entry.job.done('《' + (target.active.title || '第 ' + target.active.volumeNo + ' 卷') + '》大纲已定稿，开始执导');
@@ -1807,7 +1865,7 @@
       var userName = kit.names().user;
       var checked = core.validateFinalDelivery(draft.lastOutput, { userName: userName });
       if (checked.hardFailure) throw new Error('当前草稿存在结构硬伤，不能直接定稿：' + checked.hardIssues[0]);
-      var entry = begin('plan', { title: '导演 · 定稿落盘', stage: '按当前草稿定稿落盘', steps: 1, step: 1 });
+      var entry = begin('plan', { title: '导演 · 定稿落盘', stage: '按当前草稿定稿落盘', steps: 0 });
       entry.committing = true;
       try {
         await commitVolume(target, checked.final, userName, entry);
@@ -1838,7 +1896,7 @@
       if (work) throw new Error('导演正在' + (WORK_LABEL[work.kind] || '忙') + '，等它做完，或先点「停止」');
       if (!isEnabled()) setChatEnabled(true);
       var now = Date.now();
-      target.draft = normalizeDraft({ v: 2, epoch: randomId('ep'), mode: 'auto', state: 'running', phase: 'recon', messages: [], feedback: [], startedAt: now, updatedAt: now });
+      target.draft = normalizeDraft({ v: 2, epoch: randomId('ep'), mode: 'auto', state: 'running', activity: 'mapping', messages: [], feedback: [], startedAt: now, updatedAt: now });
       if (str(opts.feedback).trim()) target.draft.feedback.push({ at: now, text: str(opts.feedback).trim() });
       return drivePlan(target);
     }
@@ -2018,7 +2076,8 @@
         var adopted = await adoptOutlineEdit(target);
         var version = adopted || picked.entry.outlineVersion;
         var record = versionRecord(target, version);
-        var skill = await skillText();
+        /* 场记只读它自己那一份 Skill；总导演的编纲方法论不进巡检的提示词。 */
+        var skill = await skillText('patrol');
         var prefs = await loadPreferences(target);
         var userName = kit.names().user;
         var count = Math.min(9, Math.max(3, settings.patrolEvery * 2 + 1));
@@ -2160,6 +2219,12 @@
       return rsDraftMatchesContext(target.rsDraft, target, version, core.anchorOf(view, floor));
     }
 
+    /* 重构时等模型回话，任务牌上写的那一句。 */
+    function restructureStage(rsDraft, toolCount) {
+      if (rsDraft.revisions > 0) return '自检打回重写后续（第 ' + rsDraft.revisions + '/' + MAX_SELF_REVISIONS + ' 次）';
+      return '自主查阅与重写后续' + (toolCount ? '（已查 ' + toolCount + ' 项资料）' : '');
+    }
+
     /*
      * 重写后续大纲。options: { reason, feedback, manual, auto, resume }。
      * - 支持持久化断点（restructure-draft.json）：遇到上游 5xx / 超时 / 暂停 / 刷新 / 质检打回超限，均可沿断点续跑，不重查已读资料；
@@ -2170,7 +2235,8 @@
       var opts = options || {};
       var target = await ensureSession();
       if (!target.key || !volumeActive(target)) throw new Error('这个聊天里没有正在执导的分卷');
-      var entry = begin('restructure', { title: '导演 · 结构重构', stage: '整理既成事实', steps: 2 });
+      /* 和编纲一样不带步数：同一个只读 Agent 会话，查几轮、写几稿由它自己和质检决定。 */
+      var entry = begin('restructure', { title: '导演 · 结构重构', stage: '整理既成事实', steps: 0 });
       var previousStatus = target.active.status;
       var rsDraft = null;
       var rsEpoch = '';
@@ -2184,7 +2250,7 @@
         var base = picked.entry;
         var version = base.outlineVersion;
         var record = versionRecord(target, version);
-        var skill = await skillText();
+        var skill = await skillText('planner');
         var prefs = await loadPreferences(target);
         var userName = kit.names().user;
         var guard = core.anchorOf(view, floor);
@@ -2255,14 +2321,14 @@
         for (;;) {
           assertCurrent(target);
           if (taskAborted(entry) || target.rsDraft !== rsDraft || rsDraft.epoch !== rsEpoch) throw staleError('已停止');
-          var stageLabel = rsDraft.revisions > 0
-            ? '自检打回重写后续阶段（第 ' + rsDraft.revisions + '/' + MAX_SELF_REVISIONS + ' 次）'
-            : (rsDraft.toolCalls ? '总导演重写后续阶段（已查 ' + rsDraft.toolCalls + ' 项）' : '总导演重写后续阶段');
-          entry.job.update({ stage: stageLabel, step: 1 });
+          rsDraft.activity = rsDraft.revisions > 0 ? 'revising' : 'exploring';
+          setStage(entry, restructureStage(rsDraft, rsDraft.toolCalls));
+          emit('volume');
           var outcome = await runDirectorAgent({
             target: target, entry: entry, settings: settings,
             skillText: skill.text, preferences: prefs.merged, userName: userName,
-            stepStage: stageLabel, stepNumber: 1, generationId: 'reader-director-restructure',
+            stageOf: function (toolCount) { return restructureStage(rsDraft, toolCount); },
+            generationId: 'reader-director-restructure',
             modelWindow: modelWindow,
             preferredProtocol: rsDraft.protocol, preferredProtocolKey: rsDraft.protocolKey, preferredProtocolFallback: rsDraft.protocolFallback,
             initialRounds: rsDraft.rounds, initialStepRounds: rsDraft.stepRounds, initialToolCalls: rsDraft.toolCalls,
@@ -2271,6 +2337,7 @@
               if (target.rsDraft !== rsDraft || rsDraft.epoch !== rsEpoch) return;
               batch.forEach(function (item) { rsDraft.feedback.push({ at: item.at || Date.now(), text: str(item.text).trim() }); });
               rsDraft.revisions = 0;
+              rsDraft.activity = 'exploring';
               rsDraft.canForceCommit = false;
               rsDraft.softPending = false;
               rsDraft.error = '';
@@ -2304,6 +2371,9 @@
             entry.job.log('总导演只重交了自检段，已换进上一版重构稿重新质检');
           }
           rsDraft.lastOutput = delivery;
+          rsDraft.activity = 'checking';
+          setStage(entry, '质检：校验重构稿的结构、索引与防剧透简报');
+          emit('volume');
 
           if (entry.inbox.length > 0) {
             rsDraft.messages.push({ role: 'assistant', content: str(outcome.text).trim() || '（上一次回复为空）' });
@@ -2322,6 +2392,7 @@
             if (rsDraft.revisions < MAX_SELF_REVISIONS) {
               rsDraft.revisions += 1;
               if (rsDraft.stepRounds >= cfg.maxSteps) rsDraft.stepRounds = Math.max(0, cfg.maxSteps - 4);
+              rsDraft.activity = 'revising';
               entry.job.log('重构质检未通过（' + checked.issues[0] + '），自动打回重写（第 ' + rsDraft.revisions + '/' + MAX_SELF_REVISIONS + ' 次）');
               await saveRsDraft(target, rsDraft, rsEpoch);
               continue;
@@ -2330,7 +2401,9 @@
             throw new Error(checked.issues[0]);
           }
 
-          entry.job.update({ stage: '落盘：新大纲与下一轮简报', step: 2 });
+          rsDraft.activity = 'committing';
+          setStage(entry, '重构落盘：新大纲与下一轮简报');
+          emit('volume');
           var committed = await commitRestructure(target, checked.final, {
             view: view, floor: floor, base: base, version: version, guard: guard,
             reason: rsDraft.reason, userName: userName
@@ -2338,6 +2411,7 @@
           if (committed && committed.interjected) {
             rsDraft.messages.push({ role: 'assistant', content: str(outcome.text).trim() || '（上一次回复为空）' });
             rsDraft.revisions = 0;
+            rsDraft.activity = 'exploring';
             entry.job.log('重构落盘前收到用户实时插话，继续按新意见修订');
             await saveRsDraft(target, rsDraft, rsEpoch);
             continue;
@@ -2416,7 +2490,7 @@
       var userName = kit.names().user;
       var checked = core.validateFinalDelivery(rsDraft.lastOutput, { userName: userName });
       if (checked.hardFailure) throw new Error('当前重构草稿存在结构硬伤，不能直接落盘：' + checked.hardIssues[0]);
-      var entry = begin('restructure', { title: '导演 · 重构落盘', stage: '按当前重构草稿落盘', steps: 1, step: 1 });
+      var entry = begin('restructure', { title: '导演 · 重构落盘', stage: '按当前重构草稿落盘', steps: 0 });
       entry.committing = true;
       var committed;
       try {
@@ -2616,13 +2690,13 @@
         try { entries = await wb.listVolumeEntries(active.volumeId, createdBooks(target)); } catch (error) { entries = []; }
         var note = null;
         try {
-          var skill = await skillText();
+          /* 归档用写死的短协议（core.ARCHIVE_PROTOCOL），不读任何一份 Skill。 */
           var prefs = await loadPreferences(target);
           var reply = await llm.chatTask({
             kind: 'director_judge', maxTokens: Math.min(2048, settings.judgeMaxTokens), timeoutMs: settings.timeoutMs, signal: signalOf(entry), retries: 1, cacheMs: MODEL_CACHE_MS,
             generationId: 'reader-director-archive',
             messages: core.buildArchiveMessages({
-              skillRaw: skill.text, preferences: prefs.merged, userName: kit.names().user, outline: record.outline, index: record.index, state: state,
+              preferences: prefs.merged, userName: kit.names().user, outline: record.outline, index: record.index, state: state,
               recent: clippedRecent(now.view, now.view.lastVisible(), 4, -1, 1600, 500), entries: entries
             })
           });
@@ -2908,37 +2982,45 @@
       return getPreferences();
     }
 
-    async function getSkill() {
-      var current = await skillText();
-      var detail = core.sliceDirectorSkillDetailed(current.text, 'planner');
-      var runtime = core.sliceDirectorSkillDetailed(current.text, 'runtime');
-      function unique(item, index, list) { return list.indexOf(item) === index; }
-      var missing = detail.missing.concat(runtime.missing).filter(unique);
-      var filled = (detail.filled || []).concat(runtime.filled || []).filter(unique);
-      return {
-        text: current.text, source: current.source, path: SKILL_PATH,
-        degraded: detail.degraded || runtime.degraded, missing: missing,
-        /* 全部缺段都用内置同名段补上了；为 false 时说明退回了整篇照发。 */
-        patched: missing.length > 0 && missing.every(function (item) { return filled.indexOf(item) >= 0; })
-      };
+    /*
+     * 两份 Skill 的读、写、恢复默认。role 取 'planner'（总导演：编纲与重构）或 'patrol'（场记：每轮巡检与简报）。
+     * 一份的保存、恢复、作废都只动它自己：另一份的文件、缓存与知识库登记原样不动。
+     */
+    async function getSkill(role) {
+      var current = await skillText(role);
+      return { role: role, name: skillName(role), label: core.SKILL_LABELS[role], text: current.text, source: current.source, path: skillPath(role) };
     }
 
-    /* 保存到工作区：知识库那边（skills.js）监听着这个文件，助手读到的也同步换成新的。 */
-    async function saveSkill(text) {
+    async function getSkills() {
+      var out = {};
+      for (var index = 0; index < core.SKILL_ROLES.length; index += 1) out[core.SKILL_ROLES[index]] = await getSkill(core.SKILL_ROLES[index]);
+      return out;
+    }
+
+    /* 知识库那边（skills.js）也登记着这两份：改完让它当场换成新的，助手用 skill / kb:/ 读到的与导演用的是同一份。 */
+    async function reloadKnowledge(role) {
+      if (!skills || typeof skills.reload !== 'function') return;
+      try { await skills.reload(skillName(role)); } catch (error) { /* 下次启动会再扫一遍 */ }
+    }
+
+    /* 保存到工作区。写什么就是什么：不核对标题、不补段；只拦「什么都没写」。 */
+    async function saveSkill(role, text) {
+      var path = skillPath(role);
       var body = str(text);
-      if (!body.trim()) throw new Error('Skill 不能是空的；要回到内置的那份，请点「恢复内置默认」');
-      await vfs.write(SKILL_PATH, body);
-      skillCache = null;
+      if (!core.skillBody(body)) throw new Error(core.SKILL_LABELS[role] + '不能是空的；要回到内置的那份，请点「恢复内置默认」');
+      await vfs.write(path, body);
+      dropSkill(role);
+      await reloadKnowledge(role);
       emit('skill');
-      return getSkill();
+      return getSkill(role);
     }
 
-    async function resetSkill() {
-      await removeFile(SKILL_PATH);
-      skillCache = null;
-      if (skills && typeof skills.reload === 'function') { try { await skills.reload(core.SKILL_NAME); } catch (error) { /* 下次启动会再扫一遍 */ } }
+    async function resetSkill(role) {
+      await removeFile(skillPath(role));
+      dropSkill(role);
+      await reloadKnowledge(role);
       emit('skill');
-      return getSkill();
+      return getSkill(role);
     }
 
     /* ---------- 正文注入 ---------- */
@@ -3035,11 +3117,16 @@
     listen('CHAT_CHANGED', onChatChanged);
 
     if (typeof vfs.onWrite === 'function') {
+      /*
+       * 工作区里某一份 Skill 被写入或删掉（不管是面板、助手，还是用户让助手改的）：只作废这一份的缓存，
+       * 并让知识库把这一份重新登记；另一份不受影响。别的文件、别的知识一概不理。
+       */
       unwatch = vfs.onWrite(function (event) {
-        if (event.mount === 'ws' && event.segs.length === 3 && event.segs[0] === 'skills' && event.segs[1] === core.SKILL_NAME && event.segs[2] === 'SKILL.md') {
-          skillCache = null;
-          emit('skill');
-        }
+        if (event.mount !== 'ws' || event.segs.length !== 3 || event.segs[0] !== 'skills' || event.segs[2] !== 'SKILL.md') return;
+        var role = core.SKILL_ROLES.filter(function (item) { return core.SKILL_NAMES[item] === event.segs[1]; })[0];
+        if (!role) return;
+        dropSkill(role);
+        reloadKnowledge(role).then(function () { emit('skill'); }, function () { emit('skill'); });
       });
     }
     if (deps.agent && typeof deps.agent.onChange === 'function') {
@@ -3053,6 +3140,33 @@
 
     /* ---------- 状态快照（界面用，同步） ---------- */
 
+    /*
+     * 总导演这个只读 Agent 的工作态（编纲断点与重构断点同一个形状）：
+     *   state          running / paused / interrupted / failed
+     *   activity       在跑的时候它此刻在做什么（mapping / exploring / revising / checking / committing）；没在跑是空串
+     *   activityLabel  给人看的那句：在跑时是「建图中 / 自主查阅与编纲中 / 自检重写中…」，停着时是「已暂停 / 已中断 / 出错待续」
+     *   stage          任务牌上实时的那一句（「查阅世界书 wb:/…」「自检打回重写（第 1/2 次）」）；没在跑是空串
+     *   rounds / toolCalls / revisions / maxRevisions   工具轮次、已查阅的资料项数、自动重写了几次、最多几次
+     *   hasCheckpoint / canForceCommit / feedback / lastOutput / error / updatedAt
+     * 它在一个会话里自己决定查几轮、写几稿，所以这里没有「第几步、共几步」。
+     */
+    function agentState(draft, kind, running, stale) {
+      var state = running ? 'running' : draft.state;
+      var labels = ACTIVITY_LABEL[kind];
+      return {
+        state: state,
+        activity: running ? draft.activity : '',
+        activityLabel: running ? (labels[draft.activity] || labels.exploring) : (IDLE_LABEL[state] || IDLE_LABEL.interrupted),
+        stage: running && work ? str(work.stage) : '',
+        rounds: draft.rounds, toolCalls: draft.toolCalls,
+        revisions: draft.revisions, maxRevisions: MAX_SELF_REVISIONS,
+        hasCheckpoint: Array.isArray(draft.messages) && draft.messages.length > 0,
+        canForceCommit: !running && !stale && draft.canForceCommit === true && !!str(draft.lastOutput).trim(),
+        feedback: draft.feedback.slice(), lastOutput: draft.lastOutput,
+        error: draft.error, updatedAt: draft.updatedAt
+      };
+    }
+
     function getStatus() {
       registerSlot();
       var current = owner();
@@ -3062,7 +3176,7 @@
         hasChat: !!current.key, chatLabel: current.label, group: current.group, ready: true,
         enabled: current.key ? (own === null ? settings.enabled : own) : settings.enabled, globalEnabled: settings.enabled, chatSwitch: own,
         slot: !!slotOwner, state: 'nochat', paused: false, pausedBy: '', lastError: '', failStreak: 0,
-        work: work ? { kind: work.kind, label: WORK_LABEL[work.kind] || work.kind, id: work.job.id, here: work.key === current.key } : null,
+        work: work ? { kind: work.kind, label: WORK_LABEL[work.kind] || work.kind, id: work.job.id, here: work.key === current.key, stage: str(work.stage) } : null,
         generating: generating(), volume: null, plan: null, restructureDraft: null, pending: [], created: 0,
         canUndoRestructure: false, canRestoreArchive: false, hasArchive: false, forked: false
       };
@@ -3080,16 +3194,7 @@
         var draft = target.draft;
         var planning = !!(work && work.kind === 'plan' && work.key === target.key);
         status.state = planning ? 'planning' : 'draft';
-        status.plan = {
-          state: planning ? 'running' : draft.state, mode: 'auto',
-          step: PHASE_INDEX[draft.phase] || 1, steps: 4, names: core.PLANNER_PHASES.slice(),
-          phase: draft.phase, rounds: draft.rounds, toolCalls: draft.toolCalls,
-          revisions: draft.revisions, maxRevisions: MAX_SELF_REVISIONS,
-          feedback: draft.feedback.slice(), lastOutput: draft.lastOutput,
-          canForceCommit: !planning && draft.canForceCommit === true && !!str(draft.lastOutput).trim(),
-          hasCheckpoint: Array.isArray(draft.messages) && draft.messages.length > 0,
-          error: draft.error, hasMaterials: !!draft.materials, updatedAt: draft.updatedAt
-        };
+        status.plan = Object.assign(agentState(draft, 'plan', planning, false), { hasMaterials: !!draft.materials });
         return status;
       }
       if (!volumeActive(target)) {
@@ -3112,17 +3217,9 @@
       status.failStreak = active.failStreak;
       status.forked = now.picked.forked;
       status.canUndoRestructure = !!active.undo;
-      status.restructureDraft = rsDraft ? {
-        state: restructuringHere ? 'running' : rsDraft.state,
-        stale: rsStale,
-        rounds: rsDraft.rounds, toolCalls: rsDraft.toolCalls,
-        revisions: rsDraft.revisions, maxRevisions: MAX_SELF_REVISIONS,
-        reason: rsDraft.reason, feedback: rsDraft.feedback.slice(),
-        lastOutput: rsDraft.lastOutput,
-        canForceCommit: !restructuringHere && !rsStale && rsDraft.canForceCommit === true && !!str(rsDraft.lastOutput).trim(),
-        hasCheckpoint: Array.isArray(rsDraft.messages) && rsDraft.messages.length > 0,
-        error: rsDraft.error, updatedAt: rsDraft.updatedAt
-      } : null;
+      status.restructureDraft = rsDraft
+        ? Object.assign(agentState(rsDraft, 'restructure', restructuringHere, rsStale), { stale: rsStale, reason: rsDraft.reason })
+        : null;
       status.pending = active.pendingEntries.map(function (item) { return { id: item.id, name: item.name, kind: item.kind, brief: item.brief, status: item.status, error: item.error }; });
       status.created = active.createdEntries.length;
       status.volume = {
@@ -3154,7 +3251,9 @@
       resumeRestructure: resumeRestructure, discardRestructureDraft: discardRestructureDraft, commitRestructureDraftNow: commitRestructureDraftNow,
       undoRestructure: undoRestructure, finish: finish, continueVolume: continueVolume, restoreLastArchive: restoreLastArchive, discardVolume: discardVolume,
       getOutline: getOutline, saveOutline: saveOutline, getBrief: getBrief, saveBrief: saveBrief, listSnapshots: listSnapshots, rollbackTo: rollbackTo,
-      getArchive: getArchive, getPreferences: getPreferences, savePreferences: savePreferences, getSkill: getSkill, saveSkill: saveSkill, resetSkill: resetSkill,
+      getArchive: getArchive, getPreferences: getPreferences, savePreferences: savePreferences,
+      /* 两份 Skill：role 取 'planner'（总导演）或 'patrol'（场记）。getSkills() 一次给出两份。 */
+      getSkills: getSkills, getSkill: getSkill, saveSkill: saveSkill, resetSkill: resetSkill,
       listPendingEntries: async function () { var target = await ensureSession(); return target.active ? modules.clone(target.active.pendingEntries) : []; },
       confirmPendingEntry: function (id) { return confirmPendingEntry(id, { auto: false }); },
       discardPendingEntry: discardPendingEntry, listVolumeEntries: listVolumeEntries, listTemplates: wb.listTemplates,

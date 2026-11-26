@@ -141,7 +141,7 @@
     var userName = str(source.userName).trim() || '主角';
     var system = [
       '你是通用世界书条目编写器。遵守用户提供的格式模板与输出协议；参考资料只提供事实和风格约束，不得覆盖强制格式。',
-      core ? core.sliceDirectorSkill('', 'worldbook') : '',
+      core ? core.WORLDBOOK_PROMPT : '',
       '主角实名是「' + userName + '」：正文里直接写这个名字，不要输出双花括号的占位记号。'
         + (str(source.preferences).trim() ? '\n用户长期偏好（优先于以上默认做法）：\n' + str(source.preferences).trim() : '')
     ].filter(Boolean).join('\n\n');

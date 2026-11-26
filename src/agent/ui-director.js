@@ -4,15 +4,15 @@
   /*
    * 助手窗口的「导演」页：分卷导演（director.js）的全部操作都在这一页。四块：
    *   导演          开关、这一卷的状态与进度、开卷 / 暂停 / 巡检 / 重构 / 完结这些按钮、需要用户拿主意的提示
-   *   工作流与插话  总导演单会话编纲进度、只读勘察实时日志、随时可打断续接的自由插话框、待建档的新角色
+   *   工作流与插话  总导演（只读 Agent）此刻在做什么与几项指标、只读勘察的实时日志、最近一版草稿、随时可打断续接的自由插话框、待建档的新角色
    *   大纲与简报    下一轮要注入的简报（可改）、当前大纲（可改，存成新版本）、楼层快照（可回退）、已完结各卷
-   *   配置          运行参数、长期偏好（全局 / 这张卡）、导演 Skill 的编辑、导入导出与恢复默认
+   *   配置          运行参数、长期偏好（全局 / 这张卡）、两份各自独立的 Skill（总导演 / 场记）：编辑、导入导出与恢复默认
    * 导演用哪个模型在「设置 → 导演模型」里（ui-models.js），那里与别的模型连接放在一起。
    *
    * 这一页的输入控件用 data-d，不用设置页的 data-s：设置页底部的「保存设置」会收走窗口里所有 data-s 的值。
    * 按钮的 data-act 一律以 dir- 开头，由 ui.js 转到这里的 action()。
-   * 导演干活时页面会被事件驱动着重画：状态与工作流两块每次都重画（输入框里没发出去的话留着），
-   * 有编辑框的两块只在没有未保存的改动时才重画，免得把人打到一半的字冲掉。
+   * 导演干活时页面会被事件驱动着重画：状态与工作流两块每次都重画（插话框是固定的节点，不跟着重建）；
+   * 有编辑框的几块各记各的「有没有没保存的改动」，只在没有时才重画，免得把人打到一半的字冲掉。
    */
   var modules = root.__ReaderIIModules = root.__ReaderIIModules || {};
 
@@ -24,6 +24,19 @@
     paused: '编纲已暂停，已查到的资料与当前断点都已保存，随时可以续编或插话。',
     interrupted: '上一次编纲被打断了（刷新了页面，或中途切走了聊天），断点与已查资料仍在。',
     failed: '编纲在上游请求或质检中停止了，断点与已查资料已保留：处理好原因后可沿断点继续，或直接插话调整。'
+  };
+  var RS_NOTE = {
+    paused: '重构已暂停，已查到的资料与当前断点都已保存，随时可以续传或插话。',
+    interrupted: '上一次重构被打断了（刷新了页面，或中途切走了聊天），断点与已查资料仍在。',
+    failed: '重构在上游请求或质检中停止了，断点与已查资料已保留：处理好原因后可沿断点继续，或直接插话调整。'
+  };
+  var SKILL_ROLES = ['planner', 'patrol'];
+  var SKILL_TITLE = { planner: '总导演 Skill（编纲与重构）', patrol: '场记 Skill（每轮巡检与简报）' };
+  var SKILL_NOTE = {
+    planner: '总导演只读这一份：第 0 原则与叙事底座、全景勘察、十条红线、叙事引擎、五板块大纲规范、交付前自检。开卷编纲与结构重构时整篇带上（开头的 frontmatter 除外），交付格式由程序另行追加，不必写在这里。'
+      + '怎么改写都行——删标题、换结构、整篇重写——写成什么样就按什么样用，也不会影响场记那一份。保存后下一次编纲或重构起生效，助手读到的同步更新。',
+    patrol: '场记只读这一份：第 0 原则与核心约束、十条红线速记、《导演简报》五栏与防剧透、L0 / L1 / L2 偏移判定、完结判定。每轮巡检整篇带上（开头的 frontmatter 除外），输出契约由程序另行追加，不必写在这里。'
+      + '它在巡检提示词的静态前缀里：每保存一次，下一轮巡检的缓存要重建一次，建议改好再存。怎么改写都不会影响总导演那一份，助手读到的同步更新。'
   };
   var KIND_LABEL = { base: '开卷', patrol: '巡检', manual: '手动', restructure: '重构', undo: '撤回重构', edit: '手动修订' };
   var DRIFT_LABEL = ['L0 顺轨', 'L1 局部绕道', 'L2 结构破局'];
@@ -41,10 +54,11 @@
     var doc = env.document;
     var core = modules.directorCore;
     var visible = false, stops = [], sayTimer = null;
-    var dirty = { brief: false, outline: false, config: false, prefs: false, skill: false };
+    var dirty = { brief: false, outline: false, config: false, prefs: false, skill: { planner: false, patrol: false } };
     var finishing = false;            /* 用户点了「完结本卷」，正在挑要留用的条目 */
     var volumeEntries = null;         /* 本卷建过档的条目（完结时列出来勾选） */
-    var docsSerial = 0, configSerial = 0, chatMark = '', lastChatLabel = '';
+    var docsSerial = 0, prefsSerial = 0, skillSerial = { planner: 0, patrol: 0 }, chatMark = '', lastChatLabel = '';
+    var kept = Object.create(null);   /* replaceBlock 的 sticky 块：上一次画进去的 HTML（没变就不重画） */
 
     function icon(name) { return view.icon ? view.icon(name) : ''; }
     function message(error) { return String(error && error.message || error); }
@@ -81,16 +95,26 @@
     function fold(id, title, body, openByDefault) {
       return '<details class="ra-fold" data-fold="' + id + '"' + (openByDefault ? ' open' : '') + '><summary>' + icon('chevron') + title + '</summary><div class="ra-fold-body">' + body + '</div></details>';
     }
+    /* 分卷大纲的 Phase 进度条（剧情分幕：走过的、当前的、还没到的）。只用在执导中的状态卡上。 */
     function track(items) {
       return '<ol class="rd-track">' + items.map(function (item, index) {
         return '<li data-on="' + esc(item.on) + '" title="' + esc(item.title) + '"><i>' + (index + 1) + '</i><span>' + esc(item.title) + '</span></li>';
       }).join('') + '</ol>';
     }
 
-    /* 换掉一块的内容：折叠面板开没开照原样留着。 */
-    function replaceBlock(id, html) {
+    /*
+     * 换掉一块的内容：折叠面板开没开照原样留着。
+     * sticky 为 true 的块，内容与上一次画的一样就不动它：总导演每查一轮资料页面都会被叫来重画，
+     * 草稿预览里正往下翻的位置、展开着的折叠面板不该因此被打回原样。
+     */
+    function replaceBlock(id, html, sticky) {
       var node = $('#' + id);
       if (!node) return null;
+      if (sticky) {
+        var last = kept[id];
+        if (last && last.node === node && last.html === html) return node;
+        kept[id] = { node: node, html: html };
+      }
       var opened = {};
       if (typeof node.querySelectorAll === 'function') {
         Array.prototype.forEach.call(node.querySelectorAll('details[data-fold]'), function (item) { opened[item.getAttribute('data-fold')] = item.open; });
@@ -107,12 +131,12 @@
     }
 
     /*
-     * 「再点一次」的确认状态按按钮身份（data-act + 条目 / 快照 id）记着，不挂在按钮节点上：
+     * 「再点一次」的确认状态按按钮身份（data-act + 条目 / 快照 id / 哪一份 Skill）记着，不挂在按钮节点上：
      * 后台每轮写断点都会重画状态卡，节点换了，确认期照样认，三秒后在当时的节点上恢复原文。
      */
     var armedState = Object.create(null);
     function armedKey(node) {
-      return [node.getAttribute('data-act') || '', node.getAttribute('data-entry') || '', node.getAttribute('data-snap') || ''].join('|');
+      return [node.getAttribute('data-act') || '', node.getAttribute('data-entry') || '', node.getAttribute('data-snap') || '', node.getAttribute('data-skill') || ''].join('|');
     }
     function armedButtons(root, key) {
       var scope = root || $('[data-pane="director"]');
@@ -153,7 +177,7 @@
       var busy = !!s.work;
       var title = '';
       if (s.volume) title = volumeTitle(s.volume);
-      else if (s.plan) title = s.state === 'planning' ? '总导演正在勘察并编纲' : '编纲断点待续' + (s.plan.toolCalls ? '（已查 ' + esc(s.plan.toolCalls) + ' 项资料）' : '');
+      else if (s.plan) title = s.state === 'planning' ? '总导演正在勘察并编纲' : '这一卷的大纲还没有定稿';
       else if (s.state === 'idle') title = '这个聊天还没有开卷' + (s.volumeNo ? '（已完结 ' + esc(s.volumeNo) + ' 卷）' : '');
       else if (s.state === 'loading') title = '正在读取这个聊天的导演档案…';
       else title = '打开一个聊天，就可以让导演开卷';
@@ -188,8 +212,7 @@
           + (s.pausedBy === 'failures' ? '<p>先到「设置 → 导演模型」检查连接，再点「恢复」。</p>' : '') + '</div>';
       }
       if (s.plan && s.state === 'draft') {
-        var phaseName = s.plan.names && s.plan.names[(s.plan.step || 1) - 1] || '编纲';
-        html += '<div class="rd-banner' + (s.plan.state === 'failed' ? ' is-bad' : '') + '"><h4>编纲停在「' + esc(phaseName) + '」断点'
+        html += '<div class="rd-banner' + (s.plan.state === 'failed' ? ' is-bad' : '') + '"><h4>编纲断点待续'
           + (s.plan.toolCalls ? '（已查 ' + esc(s.plan.toolCalls) + ' 项资料）' : '') + '</h4><p>'
           + esc(DRAFT_NOTE[s.plan.state] || '') + (s.plan.error ? '<br>' + esc(s.plan.error) : '') + '</p></div>';
       }
@@ -205,7 +228,7 @@
         } else {
           html += '<div class="rd-banner' + (rs.state === 'failed' ? ' is-bad' : '') + '"><h4>结构重构断点待续'
             + (rs.toolCalls ? '（已查 ' + esc(rs.toolCalls) + ' 项资料）' : '') + '</h4><p>'
-            + esc(DRAFT_NOTE[rs.state] || '') + (rs.error ? '<br>' + esc(rs.error) : '') + '</p>'
+            + esc(RS_NOTE[rs.state] || '') + (rs.error ? '<br>' + esc(rs.error) : '') + '</p>'
             + '<div class="rd-acts">'
             + button('dir-rs-resume', '继续重构', 'is-main is-small', busy)
             + (rs.canForceCommit ? button('dir-rs-force', '按当前重构稿落盘', 'is-small', busy) : '')
@@ -267,40 +290,48 @@
       return '';
     }
 
+    /*
+     * 总导演的工作态（编纲与重构同一个样子）：一行「此刻在做什么」，一排指标徽章。
+     * 它是在一个会话里自己决定查什么、写什么的只读 Agent，没有固定的步数，所以这里不画步骤条；
+     * 正在查的那一项、每一步的过程在紧挨着的实时日志（#rd-live）里。
+     */
+    function agentHtml(kind, a, note) {
+      var stale = a.stale === true;
+      var badges = [
+        '<span class="ra-badge">已查阅 ' + esc(a.toolCalls || 0) + ' 项资料</span>',
+        '<span class="ra-badge">工具 ' + esc(a.rounds || 0) + ' 轮</span>'
+      ];
+      if (a.revisions) badges.push('<span class="ra-badge is-warn">自动重写 ' + esc(a.revisions) + ' / ' + esc(a.maxRevisions || 2) + ' 次</span>');
+      if (!stale) badges.push(a.hasCheckpoint ? '<span class="ra-badge is-ok">断点已保存</span>' : '<span class="ra-badge">尚无断点</span>');
+      return '<div class="rd-agent" data-kind="' + kind + '" data-state="' + esc(stale ? 'stale' : a.state) + '">'
+        + '<div class="rd-agent-top"><span class="rd-agent-dot" aria-hidden="true"></span>'
+        + '<b class="rd-agent-label">' + esc(stale ? '断点已过期' : a.activityLabel || '') + '</b>'
+        + '<span class="rd-agent-kind">' + (kind === 'plan' ? '总导演 · 编纲' : '总导演 · 结构重构') + '</span></div>'
+        + '<div class="rd-agent-stats">' + badges.join('') + '</div>'
+        + (note ? '<p class="rd-agent-note">' + note + '</p>' : '') + '</div>';
+    }
+
     function flowHeadHtml(s) {
-      var html = '';
-      if (s.plan) {
-        var curStep = Math.max(1, Math.min(4, Number(s.plan.step) || 1));
-        html += track(s.plan.names.map(function (name, index) {
-          var n = index + 1;
-          return { title: name, on: n < curStep ? 'done' : n === curStep ? 'now' : 'todo' };
-        }));
-        html += '<div class="rd-meta">'
-          + '<span>只读查阅 ' + esc(s.plan.toolCalls || 0) + ' 项</span>'
-          + '<span>工具轮次 ' + esc(s.plan.rounds || 0) + ' 轮</span>'
-          + (s.plan.revisions ? '<span>自动重写 ' + esc(s.plan.revisions) + ' / ' + esc(s.plan.maxRevisions || 2) + ' 次</span>' : '')
-          + '<span>' + (s.plan.hasCheckpoint ? '断点已自动保存' : '正在准备地图') + '</span></div>';
-        if (s.plan.lastOutput) {
-          html += fold('last-out', '最近一版草稿预览（' + esc(s.plan.lastOutput.length) + ' 字）', '<div class="rd-pre">' + esc(s.plan.lastOutput) + '</div>', false);
-        }
-        if (s.plan.feedback.length) {
-          html += '<p class="ra-note">已插话的意见：' + s.plan.feedback.map(function (item) { return '「' + esc(item.text) + '」'; }).join('；') + '</p>';
-        }
-      } else if (s.restructureDraft) {
-        var rs = s.restructureDraft;
-        html += '<div class="rd-meta">'
-          + '<span>重构只读查阅 ' + esc(rs.toolCalls || 0) + ' 项</span>'
-          + '<span>工具轮次 ' + esc(rs.rounds || 0) + ' 轮</span>'
-          + (rs.revisions ? '<span>自动重写 ' + esc(rs.revisions) + ' / ' + esc(rs.maxRevisions || 2) + ' 次</span>' : '')
-          + '<span>' + (rs.hasCheckpoint ? '重构断点已自动保存' : '正在准备重构') + '</span></div>';
-        if (rs.lastOutput) {
-          html += fold('rs-last-out', '最近一版重构草稿预览（' + esc(rs.lastOutput.length) + ' 字）', '<div class="rd-pre">' + esc(rs.lastOutput) + '</div>', false);
-        }
-        if (rs.feedback.length) {
-          html += '<p class="ra-note">重构插话意见：' + rs.feedback.map(function (item) { return '「' + esc(item.text) + '」'; }).join('；') + '</p>';
-        }
-      } else if (s.state === 'idle') {
-        html += '<p class="ra-note">开卷之后，总导演会在同一个只读 Agent 会话里主动查阅世界书、变量与前文，一气呵成编出完整动态大纲并通过铁血自检（发现问题自动打回重写，通过后才定稿清对话）；中途随时可以打开本页查看实时工作日志并自由插话，意外中断也可沿断点续编。</p>';
+      if (s.plan) return agentHtml('plan', s.plan, '');
+      if (s.restructureDraft) return agentHtml('restructure', s.restructureDraft, s.restructureDraft.reason ? '重构原因：' + esc(s.restructureDraft.reason) : '');
+      /* 重构刚发起、断点还没建起来的那一小会儿。 */
+      if (s.state === 'restructuring') return agentHtml('restructure', { state: 'running', activityLabel: '整理既成事实中', toolCalls: 0, rounds: 0, revisions: 0, hasCheckpoint: false }, '');
+      if (s.state === 'idle') {
+        return '<p class="ra-note">开卷之后，总导演会在同一个只读 Agent 会话里主动查阅世界书、变量与前文，一气呵成编出完整动态大纲并通过铁血自检（发现问题自动打回重写，通过后才定稿清对话）；中途随时可以打开本页查看实时工作日志并自由插话，意外中断也可沿断点续编。</p>';
+      }
+      return '';
+    }
+
+    /* 实时日志下面：最近一版草稿（折叠着）与已经插过的话。 */
+    function flowDraftHtml(s) {
+      var a = s.plan || s.restructureDraft;
+      if (!a) return '';
+      var plan = !!s.plan, html = '';
+      if (a.lastOutput) {
+        html += fold(plan ? 'last-out' : 'rs-last-out', (plan ? '最近一版草稿预览（' : '最近一版重构草稿预览（') + esc(a.lastOutput.length) + ' 字）', '<div class="rd-pre">' + esc(a.lastOutput) + '</div>', false);
+      }
+      if (a.feedback.length) {
+        html += '<p class="ra-note">' + (plan ? '已插话的意见：' : '重构插话意见：') + a.feedback.map(function (item) { return '「' + esc(item.text) + '」'; }).join('；') + '</p>';
       }
       return html;
     }
@@ -354,9 +385,17 @@
       }
     }
 
+    /*
+     * 工作流卡从上到下：工作态摘要 → 活动条 → 实时日志 → 草稿预览 → 插话框 → 待建档的角色。
+     * 摘要与草稿两块内容没变就不重画（sticky）；日志只换文字；插话框是固定的节点（见 updateSayBox）。
+     */
     function renderFlow(s) {
-      replaceBlock('rd-flow-head', flowHeadHtml(s));
+      replaceBlock('rd-flow-head', flowHeadHtml(s), true);
+      /* 导演在这个聊天里有活在跑：一条循环的活动条（不是进度——它没有固定的步数）。 */
+      var bar = $('#rd-flow-bar');
+      if (bar) bar.hidden = !(s.work && s.work.here);
       updateLive();
+      replaceBlock('rd-flow-draft', flowDraftHtml(s), true);
       updateSayBox(s);
       replaceBlock('rd-flow-pending', flowPendingHtml(s));
     }
@@ -428,17 +467,26 @@
 
     /* ---------- 配置 ---------- */
 
-    async function renderConfig() {
+    /*
+     * 配置卡分四块：运行参数、长期偏好、总导演 Skill、场记 Skill。各画各的、各记各的「有没有没保存的改动」：
+     * 一块重画不碰另外三块——存了总导演 Skill，场记 Skill 编辑框里打到一半的字还在。
+     * 折叠面板的外壳只建一次，之后只换各自面板里面的那一块，所以面板开没开也不会被重画打回去。
+     */
+    function configSkeleton() {
       var body = $('#rd-config-body');
-      if (!body) return;
-      var serial = ++configSerial;
+      if (!body) return false;
+      if ($('#rd-cfg-run')) return true;
+      body.innerHTML = fold('cfg-run', '运行参数', '<div id="rd-cfg-run"></div>') + fold('cfg-pref', '长期偏好', '<div id="rd-cfg-pref"></div>')
+        + SKILL_ROLES.map(function (role) { return fold('cfg-skill-' + role, SKILL_TITLE[role], '<div id="rd-cfg-skill-' + role + '"></div>'); }).join('');
+      return true;
+    }
+
+    function renderRun() {
+      if (!configSkeleton()) return;
       var settings = director.getSettings();
-      var templates = [], prefs = { global: '', card: '', hasCard: false, cardLabel: '' }, skill = null, skillError = '';
+      var templates = [];
       try { templates = director.listTemplates(); } catch (error) { templates = []; }
-      try { prefs = await director.getPreferences(); } catch (error) { /* 读不到偏好就当没有 */ }
-      try { skill = await director.getSkill(); } catch (error) { skillError = message(error); }
-      if (serial !== configSerial || !$('#rd-config-body')) return;
-      var run = '<div class="ra-nums">'
+      replaceBlock('rd-cfg-run', '<div class="ra-nums">'
         + numberField('injectEvery', '每几个回合注入一次', settings.injectEvery, 1, 20)
         + numberField('patrolEvery', '每几个回合巡检一次', settings.patrolEvery, 1, 20)
         + numberField('l2Cooldown', '重构后冷却几个回合', settings.l2Cooldown, 0, 20)
@@ -452,24 +500,55 @@
         + switchField('cfg.autoArchive', settings.autoArchive, '满足完结条件后自动归档', '关着时会停在「待完结」等你确认；自动归档时新角色条目全部保留，一次性条目照常停用')
         + '<div class="ra-row ra-mt">' + button('dir-config-save', '保存配置', 'is-small is-main')
         + '<button type="button" class="ra-btn is-small" data-act="guide-jump" data-tab-target="settings" data-section="ra-director-model-card">导演用哪个模型</button>'
-        + '<button type="button" class="ra-btn is-small" data-act="guide-jump" data-tab-target="settings" data-section="ra-placement-card">简报注入在哪</button></div>';
-      var pref = '<p class="ra-note">偏好的优先级高于 Skill 的一切默认规则：题材与气质、甜度与虐度、想看与不想看的套路、角色的去留、指定的关系底线……编纲、巡检、重构、归档都会带上。</p>'
+        + '<button type="button" class="ra-btn is-small" data-act="guide-jump" data-tab-target="settings" data-section="ra-placement-card">简报注入在哪</button></div>');
+      dirty.config = false;
+    }
+
+    /* force 为 false 时，读回来之前用户已经动手改了就不再覆盖。 */
+    async function renderPrefs(force) {
+      if (!configSkeleton()) return;
+      var serial = ++prefsSerial;
+      var prefs = { global: '', card: '', hasCard: false, cardLabel: '' };
+      try { prefs = await director.getPreferences(); } catch (error) { /* 读不到偏好就当没有 */ }
+      if (serial !== prefsSerial || !$('#rd-cfg-pref') || (!force && dirty.prefs)) return;
+      replaceBlock('rd-cfg-pref', '<p class="ra-note">偏好的优先级高于两份 Skill 的一切默认规则：题材与气质、甜度与虐度、想看与不想看的套路、角色的去留、指定的关系底线……编纲、巡检、重构、归档都会带上。</p>'
         + '<div class="ra-stack"><div class="ra-field-stack"><label for="rd-pref-global">全局偏好（所有聊天）</label>'
         + '<textarea id="rd-pref-global" data-d="pref" rows="5" placeholder="例如：不要为了显得深刻硬凑代价；日常戏多一些。">' + esc(prefs.global) + '</textarea></div>'
         + '<div class="ra-field-stack"><label for="rd-pref-card">这张卡的偏好' + (prefs.cardLabel ? ' · ' + esc(prefs.cardLabel) : '') + '<span class="ra-hint">跟着角色卡（或群）走，换一个聊天还在；与全局冲突时以这里为准</span></label>'
         + '<textarea id="rd-pref-card" data-d="pref" rows="5"' + (prefs.hasCard ? '' : ' disabled') + ' placeholder="' + (prefs.hasCard ? '例如：这张卡里她和主角已经是过命的交情，不许写猜忌。' : '打开一个聊天后可以填写') + '">' + esc(prefs.card) + '</textarea></div></div>'
-        + '<div class="ra-row">' + button('dir-pref-save', '保存偏好', 'is-small is-main') + '</div>';
-      var skillBody = skillError ? '<p class="ra-tip is-bad">' + esc(skillError) + '</p>'
-        : '<p class="ra-note">导演的方法论：勘察定性、十条红线、大纲规范、运行期协议、交付自检。现在生效的是<b>' + (skill.source === 'user' ? '工作区里你改过的这一份' : '内置的默认版本') + '</b>'
-          + '（<code>' + esc(skill.path) + '</code>）。保存后立刻生效，助手读到的也同步更新。七个二级标题（最高原则、阶段一至阶段六）的开头几个字请保留：导演按它们把正文切成编纲、运行期、归档三份提示词。</p>'
-          + (skill.degraded ? '<p class="ra-tip is-bad">这份 Skill 里找不到「' + esc(skill.missing.join('、')) + '」的标题：'
-            + (skill.patched ? '缺的段已用内置 Skill 的同名段补上（你改了标题的那段会作为自定义段带给总导演）；想让你的版本生效，请把标题开头改回原样。' : '切片已经退回整篇照发，功能可用但更费 token。') + '</p>' : '')
-          + '<textarea id="rd-skill" class="rd-skill is-code" data-d="skill" rows="18" spellcheck="false">' + esc(skill.text) + '</textarea>'
-          + '<div class="ra-row ra-mt">' + button('dir-skill-save', '保存 Skill', 'is-small is-main') + button('dir-skill-reset', '恢复内置默认', 'is-small', skill.source !== 'user')
-          + button('dir-skill-export', '导出 .md', 'is-small') + button('dir-skill-import', '导入 .md', 'is-small')
-          + '<input type="file" id="rd-skill-file" accept=".md,.markdown,.txt,text/markdown,text/plain" hidden></div>';
-      replaceBlock('rd-config-body', fold('cfg-run', '运行参数', run) + fold('cfg-pref', '长期偏好', pref) + fold('cfg-skill', '导演 Skill', skillBody));
-      dirty.config = dirty.prefs = dirty.skill = false;
+        + '<div class="ra-row">' + button('dir-pref-save', '保存偏好', 'is-small is-main') + '</div>');
+      dirty.prefs = false;
+    }
+
+    /* 一份 Skill 的编辑区：生效来源与路径、正文、保存 / 恢复内置默认 / 导出 / 导入。按钮上的 data-skill 说明是哪一份。 */
+    function skillHtml(role, skill) {
+      var custom = skill.source === 'user';
+      var which = ' data-skill="' + role + '"';
+      return '<div class="rd-skill-head"><span class="ra-badge' + (custom ? ' is-ok' : '') + '">' + (custom ? '工作区自定义' : '内置默认') + '</span>'
+        + '<span>' + (custom ? '现在生效的是工作区里你改过的这一份：' : '现在生效的是随包内置的默认版本；保存后存到：') + '<code>' + esc(skill.path) + '</code></span></div>'
+        + '<p class="ra-note">' + SKILL_NOTE[role] + '</p>'
+        + '<textarea id="rd-skill-' + role + '" class="rd-skill is-code" data-d="skill.' + role + '" rows="16" spellcheck="false" aria-label="' + SKILL_TITLE[role] + '">' + esc(skill.text) + '</textarea>'
+        + '<div class="ra-row ra-mt">' + button('dir-skill-save', '保存', 'is-small is-main', false, which) + button('dir-skill-reset', '恢复内置默认', 'is-small', !custom, which)
+        + button('dir-skill-export', '导出 .md', 'is-small', false, which) + button('dir-skill-import', '导入 .md', 'is-small', false, which)
+        + '<input type="file" id="rd-skill-file-' + role + '" data-skill-file="' + role + '" accept=".md,.markdown,.txt,text/markdown,text/plain" hidden></div>';
+    }
+
+    async function renderSkill(role, force) {
+      if (!configSkeleton()) return;
+      var serial = ++skillSerial[role];
+      var skill = null, failed = '';
+      try { skill = await director.getSkill(role); } catch (error) { failed = message(error); }
+      if (serial !== skillSerial[role] || !$('#rd-cfg-skill-' + role) || (!force && dirty.skill[role])) return;
+      replaceBlock('rd-cfg-skill-' + role, failed ? '<p class="ra-tip is-bad">' + esc(failed) + '</p>' : skillHtml(role, skill));
+      dirty.skill[role] = false;
+    }
+
+    /* 整张配置卡：每一块只在没有未保存的改动时重画。 */
+    function renderConfig() {
+      if (!configSkeleton()) return;
+      if (!dirty.config) renderRun();
+      if (!dirty.prefs) renderPrefs(false);
+      SKILL_ROLES.forEach(function (role) { if (!dirty.skill[role]) renderSkill(role, false); });
     }
 
     /* ---------- 整页 ---------- */
@@ -479,7 +558,8 @@
       if (!pane || $('#rd-status-card')) return !!pane;
       pane.innerHTML = view.card('rd-status-card', '导演', '<div id="rd-status-body"></div>')
         + view.card('rd-flow-card', '工作流与插话',
-          '<div id="rd-flow-body"><div id="rd-flow-head"></div><div class="rd-live" id="rd-live" aria-live="polite"></div><div id="rd-flow-say"></div><div id="rd-flow-pending"></div></div>')
+          '<div id="rd-flow-body"><div id="rd-flow-head"></div><div class="rd-agent-bar" id="rd-flow-bar" aria-hidden="true" hidden><i></i></div>'
+          + '<div class="rd-live" id="rd-live" aria-live="polite"></div><div id="rd-flow-draft"></div><div id="rd-flow-say"></div><div id="rd-flow-pending"></div></div>')
         + view.card('rd-docs-card', '大纲与简报', '<div id="rd-docs-body"></div>')
         + view.card('rd-config-card', '配置', '<div id="rd-config-body"></div>', '单独保存');
       return true;
@@ -516,10 +596,11 @@
       renderFlow(s);
       var all = reason === 'all' || reason === undefined;
       if ((all || /^(volume|patrol|chat|session|entries|work)$/.test(reason)) && !dirty.brief && !dirty.outline) renderDocs(s);
-      if (all || (reason === 'settings' && !dirty.config) || (reason === 'preferences' && !dirty.prefs) || (reason === 'skill' && !dirty.skill)) {
-        if (all && (dirty.config || dirty.prefs || dirty.skill) && $('#rd-config-body') && $('#rd-config-body').children && $('#rd-config-body').children.length) return;
-        renderConfig();
-      }
+      /* 配置卡的四块各管各的：哪一块有没保存的改动，哪一块就不重画。 */
+      if (all) renderConfig();
+      else if (reason === 'settings') { if (!dirty.config) renderRun(); }
+      else if (reason === 'preferences') { if (!dirty.prefs) renderPrefs(false); }
+      else if (reason === 'skill') SKILL_ROLES.forEach(function (role) { if (!dirty.skill[role]) renderSkill(role, false); });
     }
 
     function show() {
@@ -589,13 +670,20 @@
       return patch;
     }
 
-    function exportSkill(text) {
+    /* 按钮上的 data-skill 说的是哪一份 Skill（planner 总导演 / patrol 场记）。 */
+    function skillRole(actor) {
+      var role = actor && typeof actor.getAttribute === 'function' ? actor.getAttribute('data-skill') : '';
+      if (SKILL_ROLES.indexOf(role) < 0) throw new Error('不知道要操作哪一份 Skill');
+      return role;
+    }
+
+    function exportSkill(role, text) {
       var Blob = host.Blob, urls = host.URL;
       if (!Blob || !urls || typeof urls.createObjectURL !== 'function') throw new Error('这个环境不支持导出文件：可以直接全选复制编辑框里的内容');
       var url = urls.createObjectURL(new Blob([text], { type: 'text/markdown;charset=utf-8' }));
       var link = doc.createElement('a');
       link.href = url;
-      link.download = 'volume-director.SKILL.md';
+      link.download = (core && core.SKILL_NAMES ? core.SKILL_NAMES[role] : 'director-' + role) + '.SKILL.md';
       link.hidden = true;
       /* 放在窗口里再点：助手窗口是模态的，外面的元素点不动。 */
       scroller().appendChild(link);
@@ -721,37 +809,41 @@
           dirty.prefs = false;
           say('偏好已保存，下一次编纲与巡检起生效');
         } else if (name === 'dir-skill-save') {
-          await director.saveSkill($('#rd-skill').value);
-          dirty.skill = false;
-          await renderConfig();
-          say('Skill 已保存到工作区，立刻生效');
+          /* 只存这一份、只重画这一份：另一份编辑框里没保存的字不受影响。 */
+          var saveRole = skillRole(actor);
+          await director.saveSkill(saveRole, $('#rd-skill-' + saveRole).value);
+          await renderSkill(saveRole, true);
+          say(SKILL_TITLE[saveRole] + '已保存到工作区，立刻生效');
         } else if (name === 'dir-skill-reset') {
+          var resetRole = skillRole(actor);
           if (!armed(actor, '再点一次：丢掉修改')) return;
-          await director.resetSkill();
-          dirty.skill = false;
-          await renderConfig();
-          say('已恢复内置的默认 Skill');
+          await director.resetSkill(resetRole);
+          await renderSkill(resetRole, true);
+          say(SKILL_TITLE[resetRole] + '已恢复成内置的默认版本');
         } else if (name === 'dir-skill-export') {
-          exportSkill($('#rd-skill').value);
+          var exportRole = skillRole(actor);
+          exportSkill(exportRole, $('#rd-skill-' + exportRole).value);
         } else if (name === 'dir-skill-import') {
-          $('#rd-skill-file').click();
+          $('#rd-skill-file-' + skillRole(actor)).click();
         }
       } catch (error) {
         say(message(error), true);
       }
     }
 
+    /* 导入只是把文件内容放进这一份的编辑框：要点「保存」才生效。 */
     function importSkill(input) {
+      var role = input.getAttribute('data-skill-file');
       var file = input.files && input.files[0];
       input.value = '';
-      if (!file) return;
+      if (!file || SKILL_ROLES.indexOf(role) < 0) return;
       if (file.size > 400000) { say('这个文件太大了，不像一份 Skill', true); return; }
       var done = function (text) {
-        var editor = $('#rd-skill');
+        var editor = $('#rd-skill-' + role);
         if (!editor) return;
         editor.value = String(text || '');
-        dirty.skill = true;
-        say('已载入「' + file.name + '」：检查一遍，点「保存 Skill」才生效');
+        dirty.skill[role] = true;
+        say('已载入「' + file.name + '」到' + SKILL_TITLE[role] + '：检查一遍，点「保存」才生效');
       };
       if (typeof file.text === 'function') file.text().then(done, function (error) { say('读取文件失败：' + message(error), true); });
       else {
@@ -765,7 +857,7 @@
     /* 开关与下拉框：改了立刻生效的那两个（总开关、这个聊天的开关）；别的只是记下「有没保存的改动」。 */
     function change(target) {
       if (!director || !target || typeof target.closest !== 'function' || !target.closest('[data-pane="director"]')) return false;
-      if (target.id === 'rd-skill-file') { importSkill(target); return true; }
+      if (typeof target.getAttribute === 'function' && target.getAttribute('data-skill-file')) { importSkill(target); return true; }
       var key = target.getAttribute('data-d') || '';
       try {
         if (key === 'global') { director.saveSettings({ enabled: target.checked }); say(target.checked ? '导演总开关已打开' : '导演总开关已关闭'); }
@@ -784,7 +876,7 @@
         if (count) count.textContent = target.value.length + ' / ' + (core ? core.BRIEF_LIMIT : 550) + ' 字' + (target.value.length > (core ? core.BRIEF_LIMIT : 550) ? '（保存时会自动缩短）' : '');
       } else if (key === 'outline') dirty.outline = true;
       else if (key === 'pref') dirty.prefs = true;
-      else if (key === 'skill') dirty.skill = true;
+      else if (key.indexOf('skill.') === 0) { if (dirty.skill[key.slice(6)] !== undefined) dirty.skill[key.slice(6)] = true; }
       else if (key.indexOf('cfg.') === 0) dirty.config = true;
     }
 

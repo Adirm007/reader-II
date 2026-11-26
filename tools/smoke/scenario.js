@@ -629,7 +629,35 @@ async function main() {
     $('#reader-agent-overlay [data-tab="director"]').click();
     await until(() => $('#rd-status-card') && $('#rd-flow-card') && $('#rd-config-card') && $('[data-act="dir-activate"]'), '导演页的几块内容');
     assert(/空闲/.test($('#rd-status-card').textContent), '还没开卷时应显示空闲');
-    await until(() => ($('#rd-skill')?.value || '').includes('## 阶段五'), 'Skill 编辑器载入内置正文');
+    /* 配置里是两块各自独立的 Skill 编辑区：总导演与场记各有来源、路径与一套按钮，内容互不相同。 */
+    await until(() => ($('#rd-skill-planner')?.value || '').includes('## 阶段一：全景勘察') && ($('#rd-skill-patrol')?.value || '').includes('## 三级偏移判定'), '两份 Skill 编辑器载入各自的内置正文');
+    assert(!$('#rd-skill') && !/三级偏移判定/.test($('#rd-skill-planner').value) && !/全景勘察/.test($('#rd-skill-patrol').value), '两份 Skill 不该混在一个编辑器里');
+    for (const role of ['planner', 'patrol']) {
+      const box = $('#rd-cfg-skill-' + role);
+      assert(/内置默认/.test(box.querySelector('.rd-skill-head')?.textContent || '') && box.textContent.includes('ws:/skills/director-' + role + '/SKILL.md'), role + ' 的 Skill 应标明生效来源与路径');
+      for (const act of ['dir-skill-save', 'dir-skill-reset', 'dir-skill-export', 'dir-skill-import']) {
+        assert(box.querySelector('[data-act="' + act + '"][data-skill="' + role + '"]'), role + ' 的 Skill 缺少按钮 ' + act);
+      }
+      assert(box.querySelector('[data-act="dir-skill-reset"]').disabled, '还是内置默认时「恢复内置默认」应是灰的');
+    }
+    assert(!/七个二级标题|缺的段已用内置/.test($('#rd-config-card').textContent), '配置里不该再有标题切片与缺段降级的提示');
+    /* 只改场记那一份并保存：总导演编辑框里没保存的字、它的来源都不受影响；再把场记恢复成内置。 */
+    const plannerBox = $('#rd-skill-planner'), patrolBox = $('#rd-skill-patrol');
+    plannerBox.value += '\n（总导演这边打到一半、还没保存的字）';
+    plannerBox.dispatchEvent(new Event('input', { bubbles: true }));
+    patrolBox.value = '我的巡检规矩：只看最新两楼。';
+    patrolBox.dispatchEvent(new Event('input', { bubbles: true }));
+    $('[data-act="dir-skill-save"][data-skill="patrol"]').click();
+    await until(() => /工作区自定义/.test($('#rd-cfg-skill-patrol .rd-skill-head')?.textContent || ''), '场记 Skill 保存后标成工作区自定义');
+    assert((await director.getSkill('patrol')).text === '我的巡检规矩：只看最新两楼。' && (await director.getSkill('planner')).source === 'builtin', '只该存下场记那一份');
+    assert($('#rd-skill-planner').value.endsWith('（总导演这边打到一半、还没保存的字）') && /内置默认/.test($('#rd-cfg-skill-planner .rd-skill-head').textContent), '保存场记不该冲掉总导演编辑框里没保存的字');
+    const resetPatrol = $('[data-act="dir-skill-reset"][data-skill="patrol"]');
+    resetPatrol.click();
+    assert(resetPatrol.getAttribute('data-armed') === '1' && $('[data-act="dir-skill-reset"][data-skill="planner"]').getAttribute('data-armed') !== '1', '恢复默认的确认只该落在点的那一份上');
+    $('[data-act="dir-skill-reset"][data-skill="patrol"]').click();
+    await until(() => ($('#rd-skill-patrol')?.value || '').includes('## 三级偏移判定') && /内置默认/.test($('#rd-cfg-skill-patrol .rd-skill-head')?.textContent || ''), '场记 Skill 恢复成内置');
+    assert($('#rd-skill-planner').value.endsWith('（总导演这边打到一半、还没保存的字）'), '恢复场记也不该动总导演的编辑框');
+    $('#rd-skill-planner').value = (await director.getSkill('planner')).text;
     assert(!/undefined|\[object /.test($('[data-pane="director"]').textContent), '导演页文字里出现了 undefined');
 
     /*
@@ -644,13 +672,27 @@ async function main() {
     try {
       $('#rd-say-text').value = '这一卷不要阴谋';
       $('[data-act="dir-activate"]').click();
-      await until(() => /编纲中/.test($('#rd-status-card')?.textContent || '') && $('#rd-flow-card .rd-track li[data-on="now"]'), '编纲中的进度');
+      /* 编纲中：工作流卡是只读 Agent 的工作态（当前动作 + 指标徽章 + 活动条），没有「4 步」的步骤条。 */
+      await until(() => /编纲中/.test($('#rd-status-card')?.textContent || '') && $('#rd-flow-card .rd-agent[data-kind="plan"][data-state="running"]'), '编纲中的工作态');
+      assert(!$('#rd-flow-card .rd-track'), '工作流卡里不该再有步骤条');
+      const sayBox = $('#rd-say-text');
+      sayBox.value = '打到一半的插话';
       /* 建图不调模型：等第一个编纲请求真的发出去，再看交代的话在不在里面。 */
       const first = await until(() => mock.llmCalls[before], '第一个编纲请求', 15000);
       assert(/总导演/.test(String(first[0] && first[0].content)), '第一个模型请求不是总导演的编纲请求');
       assert(first.some((message) => message.role === 'user' && /【用户意见[\s\S]*这一卷不要阴谋/.test(String(message.content))), '开卷前交代的话没有带进第一个编纲请求');
       const second = await until(() => mock.llmCalls[before + 1], '带着查阅结果的第二个编纲请求', 15000);
       assert(second.some((message) => message.role === 'user' && /<action_result name="read" status="ok">[\s\S]*王都位于北方/.test(String(message.content))), '只读查阅的结果没有交回编纲会话');
+      /* 查完一轮资料、第二个请求在途：摘要行写着此刻的动作，徽章是真实的指标，活动条在走，日志里是查阅的过程。 */
+      await until(() => /自主查阅与编纲中/.test($('#rd-flow-card .rd-agent-label')?.textContent || '') && /已查阅 1 项资料/.test($('#rd-flow-card .rd-agent-stats')?.textContent || ''), '工作态摘要跟上了查阅');
+      const stats = $('#rd-flow-card .rd-agent-stats').textContent;
+      assert(/工具 1 轮/.test(stats) && /断点已保存/.test(stats) && !/自动重写/.test(stats), '指标徽章不对：' + stats);
+      assert(!$('#rd-flow-bar').hidden && getComputedStyle($('#rd-flow-bar')).display !== 'none', '有活在跑时活动条应显示');
+      assert(/导演 · 编纲 · 自主查阅与编纲（已查 1 项资料）/.test($('#rd-live').textContent) && /查阅世界书 wb:\/设定集\/王都/.test($('#rd-live').textContent), '实时日志应写着当前动作与查阅过程：' + $('#rd-live').textContent.slice(0, 160));
+      assert(!/\d\s*\/\s*4/.test($('#rd-flow-card').textContent), '工作流卡里不该再出现「几/4」的步数');
+      /* 页面被事件驱动着重画了好几轮：插话框还是同一个节点，里面打到一半的字还在。 */
+      assert($('#rd-say-text') === sayBox && sayBox.value === '打到一半的插话', '插话框在重画中被重建了，或者打到一半的字丢了');
+      sayBox.value = '';
       await sleep(80);
       assert(!floatNode()?.isConnected, '助手窗口停在导演页时不该再摆一个浮窗');
 
@@ -658,7 +700,9 @@ async function main() {
       $('#reader-agent-overlay [data-tab="chat"]').click();
       const docked = await until(() => (floatNode()?.dataset.dock === 'dialog' && floatNode().parentElement === $('#reader-agent-overlay .ra-shell') ? floatNode() : null), '浮窗停靠在窗口里');
       assert(docked.previousElementSibling === $('#reader-agent-overlay .ra-head'), '窗口里的浮窗应紧跟在标题栏后面');
-      await until(() => /导演 · 编纲/.test(docked.textContent) && /查阅资料与撰稿/.test(docked.textContent) && docked.querySelector('.rf-step')?.textContent === '2/4', '浮窗显示编纲的当前阶段（查阅资料与撰稿，2/4）', 3000);
+      /* 浮窗写着此刻的动作；编纲没有固定步数，所以没有「2/4」，进度条是循环的脉冲条。 */
+      await until(() => /导演 · 编纲/.test(docked.textContent) && /自主查阅与编纲（已查 1 项资料）/.test(docked.textContent), '浮窗显示编纲此刻的动作', 3000);
+      assert(!docked.querySelector('.rf-step') && docked.querySelector('.rf-bar.is-loop'), '编纲的浮窗不该有步数，进度条应是循环脉冲条');
       assert(docked.dataset.theme === $('#reader-agent-overlay').dataset.theme, '浮窗的主题应与助手窗口一致');
 
       /*
@@ -681,7 +725,10 @@ async function main() {
     } finally { release(); }
 
     await until(() => /执导中/.test($('#rd-status-card')?.textContent || ''), '定稿后进入执导', 15000);
+    /* 执导中的状态卡照旧画大纲的 Phase 进度条（剧情分幕）；工作流卡里的 Agent 工作态与活动条收起。 */
     assert($('#rd-status-card .rd-track li[data-on="now"]')?.textContent.includes('雨夜来客'), '阶段进度条没有标出当前阶段');
+    assert($('#rd-status-card .rd-track').querySelectorAll('li').length === 3, '大纲有三个 Phase，进度条应有三格');
+    await until(() => !$('#rd-flow-card .rd-agent') && $('#rd-flow-bar').hidden, '定稿后工作态与活动条收起');
     await until(() => ($('#rd-brief')?.value || '').includes('Phase 1 · 雨夜。我刚在酒馆坐下'), '首轮简报（主角名已换成实名）');
     assert(director.injectable() && (await director.briefFor('normal')).includes('我刚在酒馆坐下'), '导演应当可以注入简报');
     return '第 ' + director.getStatus().volume.no + ' 卷《' + director.getStatus().volume.title + '》';

@@ -14,7 +14,7 @@ Reader-II 是「读者系统」：九十九夜梦作为故事外的读者，给�
 
 需要记住与用户在助手窗口的交流时，使用 `toolbox memory`。记忆存在当前聊天或《夜之洋》世界书（跨存档）。前文剧情由用户选择的外部插件提供，只供本次助手回答参考。开启「助手夜梦 = 正文夜梦」后，正文夜梦可以回忆与现实用户的交流。
 
-**分卷导演**：助手窗口「导演」页的后台子功能，不随「这张卡」的开关走。它为当前聊天编一卷动态大纲，每轮正文前注入一份《导演简报》，正文后由场记判定偏移并预写下一份；开卷、暂停、重构、完结都在那一页操作，模型在「设置 → 导演模型」。它的档案在工作区，可以直接读、按用户的要求改：`ws:/director/preferences.md`（全局偏好）、`ws:/director/cards/<哈希>/preferences.md`（这张卡的偏好）、`ws:/director/chats/<哈希>/` 下的 `active.json`（运行状态）、`outline.md`（当前大纲，改了它下一次巡检会收成新的一版）、`snapshots.json`（大纲各版本与楼层快照）、`archive.json`（已完结各卷）。`ls ws:/director/chats` 能看到各聊天的目录，`active.json` 里的 `label` 写着是哪张卡的哪个聊天。大纲板块 C 的「后台完整实情」是只给导演看的，不要转述进正文或世界书。方法论见 `skill volume-director`；用户改过的那份在 `ws:/skills/volume-director/SKILL.md`。
+**分卷导演**：助手窗口「导演」页的后台子功能，不随「这张卡」的开关走。它为当前聊天编一卷动态大纲，每轮正文前注入一份《导演简报》，正文后由场记判定偏移并预写下一份；开卷、暂停、重构、完结都在那一页操作，模型在「设置 → 导演模型」。它的档案在工作区，可以直接读、按用户的要求改：`ws:/director/preferences.md`（全局偏好）、`ws:/director/cards/<哈希>/preferences.md`（这张卡的偏好）、`ws:/director/chats/<哈希>/` 下的 `active.json`（运行状态）、`outline.md`（当前大纲，改了它下一次巡检会收成新的一版）、`snapshots.json`（大纲各版本与楼层快照）、`archive.json`（已完结各卷）。`ls ws:/director/chats` 能看到各聊天的目录，`active.json` 里的 `label` 写着是哪张卡的哪个聊天。大纲板块 C 的「后台完整实情」是只给导演看的，不要转述进正文或世界书。方法论是两份各自独立的 Skill：总导演（编纲与重构）见 `skill director-planner`，场记（每轮巡检与简报）见 `skill director-patrol`；用户改过的分别在 `ws:/skills/director-planner/SKILL.md` 与 `ws:/skills/director-patrol/SKILL.md`，写入即生效，改一份不影响另一份。
 
 **出问题看哪里**
 - 信没显示：当前卡是否启用、正文里有没有 `<dream>`、`page:/errors`；显示由扩展格式化钩子或两条内置正则处理。

@@ -2,12 +2,12 @@
   'use strict';
 
   /*
-   * 分卷导演的纯逻辑：Skill 切片、简报净化、楼层指纹与快照环、判定解析与三级路由、编纲 / 巡检 / 重构 / 归档的提示词。
+   * 分卷导演的纯逻辑：两份 Skill 的正文、简报净化、楼层指纹与快照环、判定解析与三级路由、编纲 / 巡检 / 重构 / 归档的提示词。
    * 这里不碰 DOM、不读写存储、不发请求——那些在 director.js；这里只做「给定输入算出输出」，所以能在 Node 里直接测。
    *
    * 几条贯穿全文件的约定：
    *   · 提示词一律「静态在前、动态在后」。总导演单会话探索与撰稿全程共用同一份 System 与初始轻索引地图；场记每轮的 System
-   *     （Skill 运行期切片 + 偏好 + 角色简介 + 大纲）在两次结构重构之间一字不变，变的只有末尾那条 User。
+   *     （场记 Skill 原文 + 偏好 + 角色简介 + 大纲）在两次结构重构之间一字不变，变的只有末尾那条 User。
    *   · 大纲（outline）在两次 L2 之间只读。L1 的局部改写是一条「补丁」，跟着楼层快照走、只出现在动态尾部，
    *     所以既不打掉前缀缓存，也会随 Swipe / 删楼自动回滚。
    *   · 交给正文模型的简报是「惰性文本」：主角名已经换成实名，其余宏与 EJS 记号全部失活。酒馆的两条注入通道
@@ -15,10 +15,20 @@
    */
   var modules = root.__ReaderIIModules = root.__ReaderIIModules || {};
 
-  var SKILL_NAME = 'volume-director';
-  var BRIEF_LIMIT = 550;      /* 每轮导演简报的字数上限（Skill 阶段五·甲） */
+  /*
+   * 导演的方法论是两份物理独立的 Skill，各管各的角色，谁也不引用谁：
+   *   planner  总导演（编纲与结构重构）  内置正文 knowledge/director-planner/SKILL.md
+   *   patrol   场记（每轮巡检与简报）    内置正文 knowledge/director-patrol/SKILL.md
+   * 进提示词的是「去掉 frontmatter 之后的原文」（skillBody）：不认标题、不切段、不补齐，也不拿内置正文去替换哪一段。
+   * 用户怎么改写其中一份（删标题、换结构、整篇重写），生效的就是他写的那一份，另一份丝毫不受影响。
+   * 归档与新角色建档不读 Skill：各有一段写死的短协议（ARCHIVE_PROTOCOL / WORLDBOOK_PROMPT）。
+   */
+  var SKILL_ROLES = ['planner', 'patrol'];
+  var SKILL_NAMES = { planner: 'director-planner', patrol: 'director-patrol' };
+  var SKILL_LABELS = { planner: '总导演 Skill（编纲与重构）', patrol: '场记 Skill（每轮巡检与简报）' };
+  var BRIEF_LIMIT = 550;      /* 每轮导演简报的字数上限（场记 Skill 的简报规范与两处输出契约都按它写） */
   var RING_LIMIT = 20;        /* 快照环留多少条 */
-  var ARCHIVE_LIMIT = 400;    /* 已完结卷档案的字数上限（Skill 阶段五·丙） */
+  var ARCHIVE_LIMIT = 400;    /* 已完结卷档案的字数上限（归档协议） */
   var TAIL_WINDOW = 4;        /* 指纹里带上前面几楼 */
   var LEAK_SPAN = 18;         /* 简报与「后台完整实情」连续重合到这么多字，就当成泄密 */
   var FACT_LIMIT = 48;
@@ -89,44 +99,16 @@
     return pad8(hash32('rd\u0001' + source)) + pad8(hash32(source + '\u0002' + source.length));
   }
 
-  /* ---------- Skill 切片 ---------- */
+  /* ---------- Skill 正文与两段固定协议 ---------- */
 
-  /*
-   * 导演 Skill 的七个必需段。heading 是内置正文里的原样标题（构建时核对，见 build.mjs 的 DIRECTOR_SKILL_HEADINGS）；
-   * 切片时只认开头几个字（test）：用户改了标题后半句、加了副标题，照样切得开。
-   */
-  var SECTION_DEFS = [
-    { key: 'principles', test: /^最高原则/, heading: '## 最高原则与第一性原理' },
-    { key: 'stage1', test: /^阶段一/, heading: '## 阶段一：全景勘察与工况定性（动笔前必做）' },
-    { key: 'stage2', test: /^阶段二/, heading: '## 阶段二：十条 AI 弊病绝杀红线（针对抽象劣质特质，不限题材）' },
-    { key: 'stage3', test: /^阶段三/, heading: '## 阶段三：反平直叙事引擎工具箱（发散菜单，按需组合）' },
-    { key: 'stage4', test: /^阶段四/, heading: '## 阶段四：单卷动态大纲产出规范' },
-    { key: 'stage5', test: /^阶段五/, heading: '## 阶段五：后台运行期执导协议（适用于多轮互动实时导演）' },
-    { key: 'stage6', test: /^阶段六/, heading: '## 阶段六：交付前铁血自检闭环（以不违背用户偏好为前提）' }
-  ];
-  var REQUIRED_HEADINGS = SECTION_DEFS.map(function (item) { return item.heading; });
-  var SECTION_LABEL = { principles: '最高原则', stage1: '阶段一', stage2: '阶段二', stage3: '阶段三', stage4: '阶段四', stage5: '阶段五', stage6: '阶段六' };
-
-  /* 阶段二的十条红线读不出来时用的速记（运行期只需要标题那一行）。 */
-  var FALLBACK_REDLINES = [
-    '严禁为剧情量身定做的塑料道具、机制与体质',
-    '严禁功能拼接式命名与高频罐头人名',
-    '严禁旁白解说潜台词、角色喊口号',
-    '严禁凑天数硬拉时间轴、一笔跳过高压余波',
-    '严禁机械降神式补丁与全员硬塞打卡',
-    '严禁零阻力过场与反派降智站桩',
-    '严禁没活硬整内部冲突、为显深刻硬凑代价',
-    '严禁演技透风（提前写破心思）与转眼失忆翻篇',
-    '严禁全员围着主角公转、只会对主角做反应',
-    '严禁百科式注水建档与无必要的世界书污染'
-  ];
-  var ARCHIVE_HEAD = '你是单卷群像导演的归档员：一卷落幕之后，把它沉淀成一份简短、可靠、下一卷拿来就能用的档案。\n'
-    + '只写正文里已经发生的事，不新编剧情、不替角色补心理；用户偏好与显式指令永远优先。';
-  var ARCHIVE_FALLBACK = ARCHIVE_HEAD + '\n\n'
+  /* 归档不读 Skill：一卷落幕之后要做的事是固定的，协议也就写死在这里。 */
+  var ARCHIVE_PROTOCOL = '你是单卷群像导演的归档员：一卷落幕之后，把它沉淀成一份简短、可靠、下一卷拿来就能用的档案。\n'
+    + '只写正文里已经发生的事，不新编剧情、不替角色补心理；用户偏好与显式指令永远优先。\n\n'
     + '### 归档与清理原则\n'
     + '- 产出不超过 ' + ARCHIVE_LIMIT + ' 字的《已完结卷档案》：发生过的硬事实 + 人物关系变化；\n'
     + '- 另列 2–3 条沉淀进跨卷钩子库的具体伏笔（一笔未清的人情、一件转手的旧物、一条传开的风声、一个尚未深究的异常）；\n'
     + '- 本卷新建的世界书条目：一次性场景 / 事件 / 龙套条目建议停用（只关不删）；与主角结下真实羁绊或留有长线余波的新角色条目建议保留启用，交由用户确认。';
+  /* 新角色建档同样不读 Skill（director-wb.js 用）。 */
   var WORLDBOOK_PROMPT = '你在为分卷导演新引入的角色写世界书条目，它会在后续聊天里被关键词触发、交给正文模型看。\n'
     + '- 只写这位角色在前台已经公开、或一登场就看得见的东西：身份与生活质感、性格与矛盾、说话习惯、与旁人的关系。\n'
     + '- 严禁写进后台尚未揭晓的秘密、隐藏身份、真实目的与结局安排——条目一旦触发，等于直接剧透给正文。\n'
@@ -134,140 +116,11 @@
     + '- 不为了填满字段去发明新的组织、地名与世界规则；资料没有的宁可写得朴素。';
 
   function stripFrontmatter(text) {
-    return str(text).replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n').replace(/^---\n[\s\S]*?\n---[ \t]*(?:\n|$)/, '');
+    return str(text).replace(/^﻿/, '').replace(/\r\n?/g, '\n').replace(/^---\n[\s\S]*?\n---[ \t]*(?:\n|$)/, '');
   }
 
-  /* 去掉一段末尾的空行与分隔线（--- 只是段与段之间的装饰，拼接时我们自己加）。 */
-  function trimSection(text) {
-    var out = str(text).replace(/\s+$/, '');
-    var rule = /(?:^|\n)[ \t]*(?:-{3,}|\*{3,}|_{3,})[ \t]*$/;
-    while (rule.test(out)) out = out.replace(rule, '').replace(/\s+$/, '');
-    return out.replace(/^\n+/, '');
-  }
-
-  /* 按代码块之外的二级标题切段。返回 { body, preamble, sections: [{ key, heading, title, text }] }。 */
-  function splitSkill(raw) {
-    var body = stripFrontmatter(raw);
-    var chunks = [{ heading: '', lines: [] }];
-    var fence = '';
-    body.split('\n').forEach(function (line) {
-      var mark = /^\s{0,3}(`{3,}|~{3,})/.exec(line);
-      if (mark) {
-        if (!fence) fence = mark[1].charAt(0);
-        else if (mark[1].charAt(0) === fence) fence = '';
-      } else if (!fence && /^##[ \t]+\S/.test(line)) {
-        chunks.push({ heading: line.trim(), lines: [] });
-        return;
-      }
-      chunks[chunks.length - 1].lines.push(line);
-    });
-    var sections = chunks.slice(1).map(function (chunk) {
-      var title = chunk.heading.replace(/^##[ \t]+/, '');
-      var def = SECTION_DEFS.filter(function (item) { return item.test.test(title); })[0];
-      return { key: def ? def.key : '', heading: chunk.heading, title: title, text: trimSection(chunk.heading + '\n' + chunk.lines.join('\n')) };
-    });
-    return { body: body.trim(), preamble: trimSection(chunks[0].lines.join('\n')), sections: sections };
-  }
-
-  /* 阶段二里「1. **严禁……**」这样的编号加粗标题。 */
-  function redlineTitles(sectionText) {
-    var titles = [];
-    str(sectionText).split('\n').forEach(function (line) {
-      var match = /^\s*\d{1,2}[.、．)）]\s*\*\*(.+?)\*\*\s*$/.exec(line);
-      if (match && titles.length < 12) titles.push(match[1].trim());
-    });
-    return titles;
-  }
-
-  /* 一个二级段里的某个三级小节：从匹配的 ### 行到下一个 ### / ## 之前。 */
-  function subsection(sectionText, test) {
-    var lines = str(sectionText).split('\n'), picked = [], on = false;
-    for (var index = 0; index < lines.length; index += 1) {
-      var line = lines[index];
-      if (/^#{2,3}[ \t]+/.test(line)) {
-        if (on) break;
-        if (/^###[ \t]+/.test(line) && test.test(line.replace(/^###[ \t]+/, ''))) on = true;
-      }
-      if (on) picked.push(line);
-    }
-    return trimSection(picked.join('\n'));
-  }
-
-  /*
-   * 按用途切出 Skill 的一部分。返回 { text, degraded, missing }：
-   *   planner    编纲：导语 + 最高原则 + 阶段一～四 + 阶段六 + 用户自己加的段（不带阶段五：那是运行期的协议）
-   *   runtime    巡检：最高原则 + 阶段五 + 十条红线的标题（细则在编纲时已经用过，每轮都带太费）
-   *   archive    归档：只要阶段五·丙那一小节
-   *   worldbook  建档：一段固定的短提示
-   * 必需的段缺了（用户把标题改得认不出来）就降级：先从内置 Skill 里取同一段补上（返回的 filled 列出补了哪几段），
-   * 这样总导演拿不到阶段五、场记拿不到阶段一～四，分工不串；连内置正文也拿不到（单独加载本文件的环境）时，
-   * planner / runtime 才退回整篇正文——宁可多花些 token，也不让导演在缺了半本手册的情况下干活。
-   * archive 用内置的短提示，绝不回退全文（归档是个小活，不值得带一整本）。
-   */
-  function builtinSkillSections() {
-    var text = '';
-    try {
-      if (typeof modules.inlineBuiltinSkill === 'function') text = str(modules.inlineBuiltinSkill(SKILL_NAME));
-      else if (modules.READER_BUILTIN_SKILLS && typeof modules.READER_BUILTIN_SKILLS[SKILL_NAME] === 'string') text = modules.READER_BUILTIN_SKILLS[SKILL_NAME];
-    } catch (error) { text = ''; }
-    if (!text.trim()) return null;
-    var by = {};
-    splitSkill(text).sections.forEach(function (section) { if (section.key && !by[section.key]) by[section.key] = section; });
-    return by;
-  }
-
-  function sliceDirectorSkillDetailed(raw, mode) {
-    var parts = splitSkill(raw);
-    var by = {};
-    parts.sections.forEach(function (section) { if (section.key && !by[section.key]) by[section.key] = section; });
-    function lack(keys) { return keys.filter(function (key) { return !by[key]; }).map(function (key) { return SECTION_LABEL[key]; }); }
-    /* 用内置 Skill 的同一段补齐缺的段；内置里也没有就补不了。返回补上的段名，补不了返回 null。 */
-    function fill(keys) {
-      var absent = keys.filter(function (key) { return !by[key]; });
-      if (!absent.length) return [];
-      var builtin = builtinSkillSections();
-      if (!builtin || absent.some(function (key) { return !builtin[key]; })) return null;
-      absent.forEach(function (key) { by[key] = builtin[key]; });
-      return absent.map(function (key) { return SECTION_LABEL[key]; });
-    }
-    var missing, filled;
-
-    if (mode === 'worldbook') return { text: WORLDBOOK_PROMPT, degraded: false, missing: [], filled: [] };
-
-    if (mode === 'archive') {
-      var protocol = by.stage5 ? subsection(by.stage5.text, /^丙/) : '';
-      if (!protocol) return { text: ARCHIVE_FALLBACK, degraded: true, missing: ['阶段五·丙'], filled: [] };
-      return { text: ARCHIVE_HEAD + '\n\n' + protocol, degraded: false, missing: [], filled: [] };
-    }
-
-    if (mode === 'runtime') {
-      missing = lack(['principles', 'stage5']);
-      filled = fill(['principles', 'stage5']);
-      if (!filled) return { text: parts.body, degraded: true, missing: missing, filled: [] };
-      var titles = by.stage2 ? redlineTitles(by.stage2.text) : [];
-      var redlines = titles.length >= 3 ? titles : FALLBACK_REDLINES;
-      return {
-        text: [by.principles.text, by.stage5.text,
-          '## 红线速记（运行期只列标题）\n' + redlines.map(function (title, index) { return (index + 1) + '. ' + title; }).join('\n')].join('\n\n---\n\n'),
-        degraded: missing.length > 0, missing: missing, filled: filled
-      };
-    }
-
-    var required = ['principles', 'stage1', 'stage2', 'stage3', 'stage4', 'stage6'];
-    missing = lack(required);
-    if (!missing.length) {
-      var kept = parts.sections.filter(function (section) { return section.key !== 'stage5'; }).map(function (section) { return section.text; });
-      return { text: (parts.preamble ? [parts.preamble] : []).concat(kept).join('\n\n---\n\n'), degraded: false, missing: [], filled: [] };
-    }
-    filled = fill(required);
-    if (!filled) return { text: parts.body, degraded: true, missing: missing, filled: [] };
-    /* 补过段：必需的段按手册顺序排（用户的版本优先，缺的用内置的），用户自己加的段（含改了标题认不出的那段）接在后面；阶段五始终不带。 */
-    var ordered = required.map(function (key) { return by[key].text; });
-    var custom = parts.sections.filter(function (section) { return !section.key; }).map(function (section) { return section.text; });
-    return { text: (parts.preamble ? [parts.preamble] : []).concat(ordered, custom).join('\n\n---\n\n'), degraded: true, missing: missing, filled: filled };
-  }
-
-  function sliceDirectorSkill(raw, mode) { return sliceDirectorSkillDetailed(raw, mode).text; }
+  /* 一份 Skill 进提示词的正文：去掉 frontmatter 与首尾的空白，其余一字不动。 */
+  function skillBody(raw) { return stripFrontmatter(raw).trim(); }
 
   /* ---------- 主角名与宏 ---------- */
 
@@ -728,7 +581,7 @@
   }
 
   /*
-   * 编纲第 4 步（以及结构重构）的交付物 → { ok, outline, index, firstBrief, note } 或 { ok: false, truncated, error }。
+   * 编纲（以及结构重构）的最终交付物 → { ok, outline, index, firstBrief, note } 或 { ok: false, truncated, error }。
    * <volume_outline> 只有开头没有结尾 = 回复被截断：不能把半截大纲当定稿，直接报错并提示调大上限。
    * 模型忘了套标签、但正文里确实是一份带 Phase 标题的大纲时，整段当大纲收下（lenient）。
    */
@@ -1065,15 +918,16 @@
   }
 
   /*
-   * 编纲与重构共用的 System：Skill 的编纲切片 + 运行环境补充（+ 只读工具指引）。
+   * 编纲与重构共用的 System：总导演 Skill 的原文 + 运行环境补充（+ 只读工具指引）。
    * 整轮探索、撰稿、插话修订与自动打回重修全程共用同一份 System，吃满前缀缓存。
+   * skillRaw 是总导演那一份 Skill（去掉 frontmatter 后原样使用）；场记的协议不在这里，也不会被带进来。
    */
   function buildPlannerSystem(skillRaw, preferences, userName, options) {
     var parts = [
-      expandUser(sliceDirectorSkill(skillRaw, 'planner'), userName),
+      expandUser(skillBody(skillRaw), userName),
       '---',
       '## 运行环境补充（Reader-II 分卷导演 · 总导演）',
-      environmentNotes('- 你正以「插件运行模式」工作：先用只读工具充分勘察，再一气呵成完成本卷动态大纲、阶段六铁血自检与最终交付；不寒暄、不复述要求、不解释你用了什么写作技巧。', userName, preferences)
+      environmentNotes('- 你正以「插件运行模式」工作：先用只读工具充分勘察，再一气呵成完成本卷动态大纲、交付前自检与最终交付；不寒暄、不复述要求、不解释你用了什么写作技巧。', userName, preferences)
     ];
     var toolGuide = buildPlannerToolGuide(options);
     if (toolGuide) parts.push(toolGuide);
@@ -1095,18 +949,19 @@
     'volume_index 必须是合法 JSON：phases 与板块 D 的 Phase 一一对应；new_characters 只列板块 B 里标了 [新增] 的角色，kind 取 npc（会长期留在这个世界里的人物）或 temp_event（只为本卷某个场面服务的龙套、一次性事件），没有新增就给空数组。'
   ].join('\n');
 
-  /* UI 展示的单会话工作阶段（不再把 LLM 强拆成四次割裂请求）。 */
-  var PLANNER_PHASES = ['构建地图', '查阅资料', '撰稿自检', '定稿落盘'];
-
+  /*
+   * 编纲任务。这里只按「做什么」引用 Skill（方法论、交付前自检），不提它的章节编号：
+   * 总导演 Skill 可以被用户整篇重写，任务说明不能依赖某个标题还在。交付格式由下面的标签与程序的质检钉死。
+   */
   var PLANNER_TASK = [
     '## 编纲与交付任务（单会话连贯完成）',
     '1. **充分勘察（不偷懒、无盲区）**：先依据上方世界书目录地图、变量全景探测与楼层提示，主动调用只读工具（read / grep / ls 及可用只读查询工具）深入查阅与本卷舞台、核心人物、关键规则、关系细节及现状相关的世界书原文、完整变量结构与必要早期楼层，直到对世界与现状没有明显信息盲区。',
-    '2. **一气呵成构思与撰稿**：按 Skill 的「阶段一 → 阶段二 → 阶段三 → 阶段四」在同一条完整思路下连贯完成工况定性、原件锚定、卷核立意、3–5 位核心人物独立关系网，并直接写出颗粒度饱满、现场能直接演起来的单卷动态大纲（板块 A–E，3–5 个弹性 Phase，每个 Phase 写齐五项；板块 B 有 [新增] 角色时在末尾附「待建档角色要点」）。',
-    '3. **交付前铁血自检**：按 Skill「阶段六」的 8 道拷问逐条审视自己的草稿；**凡查出任何破绽或触发红线，立刻在正文中直接推翻重写到位**，直到全部过关再输出最终稿。',
+    '2. **一气呵成构思与撰稿**：按上方 Skill 的方法论，在同一条完整思路下连贯完成工况定性、原件锚定、卷核立意、3–5 位核心人物独立关系网，并直接写出颗粒度饱满、现场能直接演起来的单卷动态大纲（板块 A–E，3–5 个弹性 Phase，每个 Phase 写齐五项；板块 B 有 [新增] 角色时在末尾附「待建档角色要点」）。',
+    '3. **交付前自检**：按上方 Skill 的交付前自检清单逐条审视自己的草稿；**凡查出任何破绽或触发红线，立刻在正文中直接推翻重写到位**，直到全部过关再输出最终稿。',
     '4. **最终交付格式**（只输出以下四段，标签之外不要有任何寒暄或多余解释）：',
     '',
     '<self_check>',
-    '（8 行以内：对应阶段六的 8 项，每项一行写「通过」或「已修正：改了什么」）',
+    '（逐项对应 Skill 的交付前自检清单，每项一行：写「通过」或「已修正：改了什么」）',
     '</self_check>',
     DELIVERY_NOTES
   ].join('\n');
@@ -1156,13 +1011,14 @@
   ].join('\n');
 
   /*
-   * 场记的 System（静态）：Skill 运行期切片 + 环境补充 + 角色简介 + 大纲 + 输出契约。
+   * 场记的 System（静态）：场记 Skill 的原文 + 环境补充 + 角色简介 + 大纲 + 输出契约。
    * 只要 Skill、偏好、主角名、角色简介、大纲这五样没变，它就逐字节相同；L1 的补丁、进度、最新正文都不在这里。
+   * skillRaw 是场记那一份 Skill（去掉 frontmatter 后原样使用）；总导演的编纲方法论不在这里，也不会被带进来。
    */
   function buildJudgeSystem(input) {
     var source = input || {};
     return [
-      expandUser(sliceDirectorSkill(source.skillRaw, 'runtime'), source.userName),
+      expandUser(skillBody(source.skillRaw), source.userName),
       '---',
       '## 运行环境补充（Reader-II 分卷导演 · 场记）',
       environmentNotes('- 你是这一卷的场记：每轮读最新正文，对照大纲判定偏移，并预写下一轮的《导演简报》。你不写正文，也不替玩家做决定。', source.userName, source.preferences),
@@ -1250,7 +1106,7 @@
         '- 重写前若涉及核实世界书设定、完整变量结构或更早历史楼层（特别是用户意见中要求查看或核实的内容），必须先主动调用只读工具（read / grep / ls 等）查阅原文，消除信息盲区后再落笔；严禁凭空猜测或推说看不了。',
         '- 完全尊重既成事实，严禁把玩家拗回原来的轨道；保留仍有活力的角色关系与客观时钟，顺着玩家的选择长出新的展开。',
         '- 板块 A、B、C、E 只改必须改的地方；板块 D 从当前时点起重新推演，Phase 从 1 重新连续编号（已经演完的阶段不再列入，在板块 A 用两三句交代前情）。',
-        '- 仍按 Skill「阶段四」的格式与「阶段六」的自检标准。只输出下面四段，标签之外不要有任何内容：'
+        '- 仍按 Skill 的大纲产出规范与交付前自检标准。只输出下面四段，标签之外不要有任何内容：'
       ].join('\n')),
       ['<restructure_note>', '（80 字以内：为什么改、改了什么）', '</restructure_note>', DELIVERY_NOTES].join('\n')
     ]);
@@ -1259,13 +1115,13 @@
 
   /* ---------- 提示词：归档 ---------- */
 
-  /* input: { skillRaw, preferences, userName, outline, index, state, recent, entries: [{ name, roleKind }] } */
+  /* input: { preferences, userName, outline, index, state, recent, entries: [{ name, roleKind }] }。归档用固定协议，不读任何一份 Skill。 */
   function buildArchiveMessages(input) {
     var source = input || {};
     var state = normalizeState(source.state);
     var entries = (Array.isArray(source.entries) ? source.entries : []).filter(function (item) { return item && item.name; });
     var system = [
-      expandUser(sliceDirectorSkill(source.skillRaw, 'archive'), source.userName),
+      ARCHIVE_PROTOCOL,
       '---',
       environmentNotes('- 你正在给刚刚落幕的这一卷归档。', source.userName, source.preferences),
       '## 输出契约',
@@ -1838,10 +1694,10 @@
   }
 
   modules.directorCore = {
-    SKILL_NAME: SKILL_NAME, BRIEF_LIMIT: BRIEF_LIMIT, RING_LIMIT: RING_LIMIT, ARCHIVE_LIMIT: ARCHIVE_LIMIT, TAIL_WINDOW: TAIL_WINDOW, LEAK_SPAN: LEAK_SPAN,
-    BRIEF_COLUMNS: BRIEF_COLUMNS, DEFAULT_SETTINGS: DEFAULT_SETTINGS, REQUIRED_HEADINGS: REQUIRED_HEADINGS, PLANNER_PHASES: PLANNER_PHASES,
-    normalizeSettings: normalizeSettings, hashId: hashId,
-    splitSkill: splitSkill, sliceDirectorSkill: sliceDirectorSkill, sliceDirectorSkillDetailed: sliceDirectorSkillDetailed,
+    SKILL_ROLES: SKILL_ROLES, SKILL_NAMES: SKILL_NAMES, SKILL_LABELS: SKILL_LABELS, ARCHIVE_PROTOCOL: ARCHIVE_PROTOCOL, WORLDBOOK_PROMPT: WORLDBOOK_PROMPT,
+    BRIEF_LIMIT: BRIEF_LIMIT, RING_LIMIT: RING_LIMIT, ARCHIVE_LIMIT: ARCHIVE_LIMIT, TAIL_WINDOW: TAIL_WINDOW, LEAK_SPAN: LEAK_SPAN,
+    BRIEF_COLUMNS: BRIEF_COLUMNS, DEFAULT_SETTINGS: DEFAULT_SETTINGS,
+    normalizeSettings: normalizeSettings, hashId: hashId, skillBody: skillBody,
     expandUser: expandUser, neutralizeMacros: neutralizeMacros, hiddenTruth: hiddenTruth, removeLeaks: removeLeaks, clampBrief: clampBrief,
     sanitizeBrief: sanitizeBrief, sanitizeBriefDetailed: sanitizeBriefDetailed,
     createChatView: createChatView, injectionAnchor: injectionAnchor, anchorOf: anchorOf,

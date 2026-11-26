@@ -8,7 +8,7 @@
  * 浏览器里的功能在 dist/reader-ii.ext.js（由 index.js 在酒馆就绪后加载）：
  *   语义层（七槽路由、经济、事件）、常驻壳与读者控制器资源（大厅、轻信、抽卡；gzip + base64）、
  *   提示词模板（编译成函数）、记忆、夜梦助手（Agent 内核）、分卷导演与面板。
- *   随包内联的默认资料（reader-defaults）：导演 Skill 的内置正文与通用角色条目模板，离线时也读得到。
+ *   随包内联的默认资料（reader-defaults）：导演两份 Skill（总导演 / 场记）的内置正文与通用角色条目模板，离线时也读得到。
  * 4.1 之前另有「卡内组件」（酒馆助手脚本、世界书、三条正则的 JSON）与 CDN 加载器，现在都并进了扩展（交接 0.9）。
  * dist/reader-ii-companion.zip 单独供用户下载；发布清单记录两个文件的 SHA-256。
  * 版本号只有一个来源：manifest.json 的 version（语义化版本），构建把它写进 modules.BUILD_VERSION。
@@ -130,48 +130,35 @@ export function assetsModule(packed, version) {
 /* ---------- 随包默认资料（reader-defaults） ---------- */
 
 /*
- * 内联进扩展包的内置知识正文：名字 → 仓库里的文件。只收「功能本身要读」的那几份（导演每次编纲、巡检都要它），
+ * 内联进扩展包的内置知识正文：名字 → 仓库里的文件。只收「功能本身要读」的那几份，
  * 其余内置知识仍按需从扩展目录取（src/agent/skills.js）。有了内联，离线、被墙、单文件加载时功能照常。
+ * 导演的方法论是两份物理独立的 Skill，各管各的角色（名字与 src/agent/director-core.js 的 SKILL_NAMES 一致）：
+ *   director-planner  总导演：编纲与结构重构
+ *   director-patrol   场记：每轮巡检与简报
+ * 运行时拿到的是「去掉 frontmatter 之后的原文」，不按标题切段，所以这里不核对标题，只核对两份都在、都有正文。
  */
-export const INLINE_SKILLS = { 'volume-director': 'knowledge/volume-director/SKILL.md' };
+export const INLINE_SKILLS = {
+  'director-planner': 'knowledge/director-planner/SKILL.md',
+  'director-patrol': 'knowledge/director-patrol/SKILL.md',
+};
 
-/*
- * 导演 Skill 必须有的七个二级标题：src/agent/director-core.js 按它们把正文切成编纲 / 运行期 / 归档三份提示词。
- * 内置正文少了哪一个，切片就会退回「整篇照发」，所以构建时拦住（tests/director.test.mjs 核对它与运行时的表一致）。
- */
-export const DIRECTOR_SKILL_HEADINGS = [
-  '## 最高原则与第一性原理',
-  '## 阶段一：全景勘察与工况定性（动笔前必做）',
-  '## 阶段二：十条 AI 弊病绝杀红线（针对抽象劣质特质，不限题材）',
-  '## 阶段三：反平直叙事引擎工具箱（发散菜单，按需组合）',
-  '## 阶段四：单卷动态大纲产出规范',
-  '## 阶段五：后台运行期执导协议（适用于多轮互动实时导演）',
-  '## 阶段六：交付前铁血自检闭环（以不违背用户偏好为前提）',
-];
+/* 一份内置 Skill 去掉 frontmatter 之后的正文（与 director-core.js 的 skillBody 同一口径）。 */
+const skillBody = (text) => String(text).replace(/^---\n[\s\S]*?\n---[ \t]*(?:\n|$)/, '').trim();
 
-/* 代码块之外的二级标题。 */
-export function skillHeadings(text) {
-  const found = [];
-  let fence = '';
-  for (const line of String(text).split('\n')) {
-    const mark = /^\s{0,3}(```+|~~~+)/.exec(line);
-    if (mark) { if (!fence) fence = mark[1][0]; else if (mark[1][0] === fence) fence = ''; continue; }
-    if (!fence && /^## /.test(line)) found.push(line.trim());
-  }
-  return found;
+/* 读一份要内联的内置 Skill：文件非空、frontmatter 里的名字与登记的一致、去掉 frontmatter 之后还有正文。 */
+export function inlineSkill(name, text, file = name) {
+  const source = String(text == null ? '' : text).replace(/^﻿/, '').replace(/\r\n?/g, '\n');
+  if (!source.trim()) throw new Error(`${file} 是空的`);
+  const declared = /^---\n[\s\S]*?\n---/.exec(source);
+  const named = declared && /^name:[ \t]*(.+)$/m.exec(declared[0]);
+  if (!named || named[1].trim().replace(/^["']|["']$/g, '') !== name) throw new Error(`${file} 的 frontmatter 里应当写 name: ${name}`);
+  if (!skillBody(source)) throw new Error(`${file} 只有 frontmatter，没有正文`);
+  return source;
 }
 
 export function inlineDefaults() {
-  const strip = (text) => text.replace(/^﻿/, '');
   const skills = {};
-  for (const [name, file] of Object.entries(INLINE_SKILLS)) {
-    const text = strip(read(file));
-    if (!text.trim()) throw new Error(`${file} 是空的`);
-    skills[name] = text;
-  }
-  const headings = skillHeadings(skills['volume-director']);
-  const missing = DIRECTOR_SKILL_HEADINGS.filter((heading) => !headings.includes(heading));
-  if (missing.length) throw new Error(`${INLINE_SKILLS['volume-director']} 缺少导演切片要用的二级标题：${missing.join('；')}`);
+  for (const [name, file] of Object.entries(INLINE_SKILLS)) skills[name] = inlineSkill(name, read(file), file);
   /* 通用角色条目模板：与读者的条目模仿、抽卡的角色条目是同一份（模板/），形状照模板库里的一条模板。 */
   const { text, settings } = loadGenericTemplate();
   if (!text || !settings || !settings.id || !settings.output) throw new Error('通用角色条目模板不完整，无法内联');
@@ -191,12 +178,19 @@ export function defaultsModule(defaults) {
   const code = [
     '(function (root) {',
     "  'use strict';",
-    '  /* 构建生成（node build.mjs），不要手改：随包内联的默认资料。源头是 knowledge/volume-director/SKILL.md 与 模板/通用角色条目模板.*。 */',
+    '  /* 构建生成（node build.mjs），不要手改：随包内联的默认资料。源头是 ' + Object.values(INLINE_SKILLS).join('、') + ' 与 模板/通用角色条目模板.*。 */',
     '  var modules = root.__ReaderIIModules = root.__ReaderIIModules || {};',
     '  modules.READER_BUILTIN_SKILLS = ' + jsLiteral(value.skills) + ';',
     '  modules.READER_DEFAULT_ENTRY_TEMPLATE = ' + jsLiteral(value.template) + ';',
     "})(typeof globalThis !== 'undefined' ? globalThis : window);",
   ].join('\n');
+  /* 内联之后跑一遍读回来：每份正文都得与源文件一字不差（转义出了岔子的话，在这里就拦住，不带进产物）。 */
+  const sandbox = vm.createContext({});
+  vm.runInContext(syntax(code, DEFAULTS_MODULE), sandbox);
+  const inlined = sandbox.__ReaderIIModules.READER_BUILTIN_SKILLS;
+  for (const [name, text] of Object.entries(value.skills)) {
+    if (inlined[name] !== text) throw new Error(`内置 Skill「${name}」内联之后与源文件不一致`);
+  }
   if (!defaults) defaultsCode = code;
   return code;
 }

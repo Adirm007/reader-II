@@ -520,7 +520,7 @@
     '{A} .rd-title{flex:1 1 200px;min-width:0;font:700 17px/1.4 var(--rt-title);letter-spacing:.06em;overflow-wrap:anywhere}',
     '{A} .rd-switches{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,250px),1fr));gap:0 18px;margin:2px 0}',
     '{A} .rd-meta{display:flex;flex-wrap:wrap;gap:2px 14px;margin:8px 0 0;color:var(--rt-ink2);font-size:12.5px;line-height:1.7}',
-    /* 步骤与阶段的进度条：一排小签，走过的打勾色，当前的用主题的点缀色。 */
+    /* 分卷大纲的 Phase 进度条（剧情分幕）：一排小签，走过的打勾色，当前的用主题的点缀色。 */
     '{A} .rd-track{display:flex;flex-wrap:wrap;gap:6px;margin:12px 0 2px;padding:0;list-style:none}',
     '{A} .rd-track li{display:inline-flex;align-items:center;gap:6px;max-width:100%;min-height:28px;padding:2px 11px 2px 4px;border:1px solid var(--rt-line2);border-radius:var(--rt-pill);color:var(--rt-ink3);font-size:12.5px;line-height:1.3}',
     '{A} .rd-track li>i{flex:none;display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:var(--rt-pill);background:var(--rt-sunk);color:var(--rt-ink2);font:700 11px/1 var(--rt-mono)}',
@@ -537,6 +537,24 @@
     '{A} .rd-banner h4{margin:0 0 4px;font-size:14.5px;font-weight:700}',
     '{A} .rd-banner p{color:var(--rt-ink2);font-size:13px;line-height:1.65;overflow-wrap:anywhere}',
     '{A} .rd-keep{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,220px),1fr));gap:0 14px;margin:6px 0 0}',
+    /*
+     * 总导演的工作态（编纲与重构共用）：一行「此刻在做什么」（状态点 + 动作 + 是哪件活），下面一排指标徽章。
+     * 它没有固定的步数，所以不画步骤条；有活在跑时，摘要与实时日志之间走一条循环的活动条（与状态浮窗同一个动画）。
+     */
+    '{A} .rd-agent{display:flex;flex-direction:column;gap:7px}',
+    '{A} .rd-agent-top{display:flex;flex-wrap:wrap;align-items:center;gap:2px 9px}',
+    '{A} .rd-agent-dot{flex:none;width:9px;height:9px;border-radius:50%;background:var(--rt-ink3)}',
+    '{A} .rd-agent[data-state="running"] .rd-agent-dot{background:var(--rt-mark);box-shadow:0 0 0 3px color-mix(in srgb,var(--rt-mark) 24%,transparent)}',
+    '{A} .rd-agent:is([data-state="paused"],[data-state="interrupted"]) .rd-agent-dot{background:var(--rt-warn)}',
+    '{A} .rd-agent:is([data-state="failed"],[data-state="stale"]) .rd-agent-dot{background:var(--rt-bad)}',
+    '{A} .rd-agent-label{min-width:0;font:700 15px/1.45 var(--rt-title);letter-spacing:.05em;overflow-wrap:anywhere}',
+    '{A} .rd-agent-kind{margin-left:auto;color:var(--rt-ink3);font-size:12px;line-height:1.6;white-space:nowrap}',
+    '{A} .rd-agent-stats{display:flex;flex-wrap:wrap;gap:6px}',
+    '{A} .rd-agent-note{margin:0;color:var(--rt-ink2);font-size:12.5px;line-height:1.6;overflow-wrap:anywhere}',
+    '{A} .rd-agent-bar{height:3px;margin:10px 0 0;border-radius:2px;background:var(--rt-line);overflow:hidden}',
+    '{A} .rd-agent-bar>i{display:block;width:34%;height:100%;background:var(--rt-mark);animation:rf-slide 1.5s ease-in-out infinite}',
+    '{A} .rd-agent-bar:not([hidden])+.rd-live{margin-top:6px}',
+    '{A} #rd-flow-draft>details.ra-fold{margin-top:10px}',
     '{A} .rd-live{margin:10px 0 0;padding:8px 11px;max-height:150px;overflow:auto;border-radius:min(var(--rt-r),6px);background:var(--rt-sunk);color:var(--rt-ink2);font:12.5px/1.65 var(--rt-font);white-space:pre-wrap;word-break:break-word}',
     '{A} .rd-live:empty{display:none}',
     '{A} .rd-pre{max-height:320px;overflow:auto;padding:10px 12px;border-radius:min(var(--rt-r),6px);background:var(--rt-sunk);font:13px/1.7 var(--rt-font);white-space:pre-wrap;word-break:break-word}',
@@ -556,6 +574,10 @@
     '{A} .rd-vol h4{margin:0 0 2px;font-size:14px;font-weight:700}',
     '{A} textarea.rd-editor{min-height:210px}',
     '{A} textarea.rd-skill{min-height:300px}',
+    /* 一份 Skill 的生效来源（内置默认 / 工作区自定义）与路径。 */
+    '{A} .rd-skill-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 9px;margin:0 0 6px;color:var(--rt-ink2);font-size:12.5px;line-height:1.7}',
+    '{A} .rd-skill-head>span:last-child{min-width:0;overflow-wrap:anywhere}',
+    '{A} .rd-skill-head code{overflow-wrap:anywhere}',
     /* 标签里带的说明文字不跟着标签加粗。 */
     '{A} [data-pane="director"] .ra-field-stack>label .ra-hint{margin-top:2px;font-weight:400}',
     '{A} .rd-bar{flex:none;padding:8px 22px;border-top:1px solid var(--rt-line);background:var(--rt-card)}',
