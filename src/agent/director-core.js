@@ -255,8 +255,9 @@
   }
 
   /*
-   * 模型写的简报 → 可以注入的简报。options: { userName, outline, limit }。返回 { text, leaks }。
+   * 模型写的简报 → 可以注入的简报。options: { userName, limit }。返回 { text, leaks: 0 }。
    * 顺序有讲究：先去块、再认 <user>，然后才失活其余宏、剥掉别的标签——反过来的话 <user> 会被当成普通标签剥掉。
+   * 不再对简报做自动静默删句：帮助正文模型理解角色情绪爆发的必要后台真相允许写入简报，由提示词明确区分「给正文理解」与「直接给玩家看」。
    */
   function sanitizeBriefDetailed(text, options) {
     var opts = options || {};
@@ -264,8 +265,7 @@
     var body = stripBlocks(text).replace(/^[ \t]*```[A-Za-z0-9_-]*[ \t]*$/gm, '');
     body = neutralizeMacros(expandUser(body, opts.userName));
     body = tidy(body.replace(/<\/?[A-Za-z_][^<>\n]{0,120}>/g, ''));
-    var checked = opts.outline ? removeLeaks(body, opts.outline, opts.span) : { text: body, leaks: 0 };
-    return { text: clampBrief(checked.text, opts.limit || BRIEF_LIMIT), leaks: checked.leaks };
+    return { text: clampBrief(body, opts.limit || BRIEF_LIMIT), leaks: 0 };
   }
   function sanitizeBrief(text, options) { return sanitizeBriefDetailed(text, options).text; }
 
@@ -704,11 +704,8 @@
       hardIssues.push('<first_brief> 标签没有闭合（可能被输出长度截断）。');
     }
     var brief = str(final.firstBrief).trim()
-      ? sanitizeBriefDetailed(final.firstBrief, { userName: opts.userName, outline: final.outline })
+      ? sanitizeBriefDetailed(final.firstBrief, { userName: opts.userName })
       : { text: '', leaks: 0 };
-    if (str(final.firstBrief).trim() && brief.leaks > 0 && brief.text.length < 40) {
-      hardIssues.push('<first_brief> 与板块 C「后台完整实情」严重重合（触发防泄密后几乎清空），请重写一份严守信息隔离的首轮简报。');
-    }
     var failedChecks = inspectSelfCheck(final.selfCheck);
     if (failedChecks.length) {
       softIssues.push('你在 <self_check> 中标出了尚未修正的项：' + failedChecks.join('；') + '。请直接在正文中修改到位，确保全部通过后再交付。');
@@ -943,7 +940,7 @@
     INDEX_SAMPLE,
     '</volume_index>',
     '<first_brief>',
-    '（下一轮的《导演简报》，建议 800–1200 字左右、不超过 ' + BRIEF_LIMIT + ' 字，固定五栏，每栏以栏名开头单独成段：' + BRIEF_COLUMNS.join('') + '。可提炼与当下情绪直接相关的必要心理动因帮正文拿准情绪，但严禁泄露板块 C「后台完整实情」里尚未揭晓的核心剧情底牌与隐藏身份。）',
+    '（下一轮的《导演简报》，建议 800–1200 字左右、不超过 ' + BRIEF_LIMIT + ' 字，固定五栏，每栏以栏名开头单独成段：' + BRIEF_COLUMNS.join('') + '。凡帮助正文模型演活人物情绪、拿准态度分寸或埋好伏笔所需的必要后台真相皆可写入，但须明确区分「给正文模型帮助理解」与「直接给玩家看」，标注哪些仅作内在情绪支撑、不可直白提前向玩家说破。）',
     '</first_brief>',
     '',
     'volume_index 必须是合法 JSON：phases 与板块 D 的 Phase 一一对应；new_characters 只列板块 B 里标了 [新增] 的角色，kind 取 npc（会长期留在这个世界里的人物）或 temp_event（只为本卷某个场面服务的龙套、一次性事件），没有新增就给空数组。'
@@ -1006,7 +1003,7 @@
     '- state_delta：这一轮之后的进度摘要，120 字以内：走到哪了、谁的态度变了、哪条时钟动了。',
     '- facts_add：这一轮新发生、今后不能被推翻的硬事实，0–3 条，每条 40 字以内；没有就给空数组。',
     '- local_patch：只在 drift_level 为 1 时填，240 字以内：当前及下一个 Phase 的承接路径与 NPC 反应怎样局部改写；其余情况给空字符串。大纲原文不会改，补丁只在之后的巡检里生效。',
-    '- next_brief：下一轮《导演简报》全文，建议 800–1200 字左右、不超过 ' + BRIEF_LIMIT + ' 字，固定五栏、每栏以栏名开头单独成段：' + BRIEF_COLUMNS.join('') + '。可注入与当下情绪直接相关的必要后台心理动因，但不得泄露「后台完整实情」里尚未在正文中揭晓的核心剧情底牌与隐藏身份，忌口栏亦不得出现负向剧透句式。drift_level 为 2 时给一句克制的过渡提示即可。',
+    '- next_brief：下一轮《导演简报》全文，建议 800–1200 字左右、不超过 ' + BRIEF_LIMIT + ' 字，固定五栏、每栏以栏名开头单独成段：' + BRIEF_COLUMNS.join('') + '。凡帮助正文模型演活人物情绪或埋好伏笔所必要的后台实情与真相皆可写入，但须明确区分「仅供正文理解」与「直接给玩家看」，标注哪些未到揭牌时机、严禁直白向玩家说破。drift_level 为 2 时给一句克制的过渡提示即可。',
     '- volume_completed：只有三项同时成立才为 true——剧情已实际进入最后一个 Phase（或核心矛盾已在当前阶段提前彻底落定）；本卷的核心矛盾已有明确结果或实质转化；落地之后至少已有一轮情绪收束与余韵。否则为 false。'
   ].join('\n');
 

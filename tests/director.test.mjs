@@ -298,8 +298,8 @@ test('两份内置 Skill 内容各管各的：总导演只有编纲方法论，�
   for (const part of ['导演简报', 'Turn Director Brief', 'Anti-Leak', '【当前阶段与承接】', '三级偏移', 'L0', 'L1', 'L2', '巡检', '场记', 'volume_completed', '双保险', '已完结卷档案', '阶段六']) {
     assert.ok(!planner.includes(part), '总导演 Skill 不该带后台巡检协议：' + part);
   }
-  /* 场记：第 0 原则与核心约束 + 正文一线红线速记 + 简报五栏与分级信息隔离 + L0/L1/L2 + 双保险完结。 */
-  for (const part of ['### 第 0 原则：用户偏好与显式指令大于本 Skill', '### 核心约束', '## 正文一线红线速记', '## 每轮《导演简报（Turn Director Brief）》规范', '分级信息隔离',
+  /* 场记：第 0 原则与核心约束 + 正文一线红线速记 + 简报五栏与展示边界 + L0/L1/L2 + 双保险完结。 */
+  for (const part of ['### 第 0 原则：用户偏好与显式指令大于本 Skill', '### 核心约束', '## 正文一线红线速记', '## 每轮《导演简报（Turn Director Brief）》规范', '区分“给正文模型理解”与“直接给玩家看”',
     ...core.BRIEF_COLUMNS, '800–1200 字', '## 三级偏移判定', '`L0（顺轨 / 良性风味发散）`', '`L1（局部绕道 / 战术换路）`', '`L2（结构破局 / 彻底改线）`', '## 完结判定（双保险）', 'volume_completed = true']) {
     assert.ok(patrol.includes(part), '场记 Skill 缺：' + part);
   }
@@ -975,16 +975,18 @@ test('简报净化：主角名换成实名，{{char}} 不动手，其余宏与 E
   assert.ok(clean.text.includes('｛｛setvar::gold::999｝｝') && clean.text.includes('｛｛char｝｝') && clean.text.includes('＜% fetch("/x") %＞') && clean.text.includes('＜char＞'), '写了什么看得出来，但不会再被执行');
   assert.ok(!clean.text.includes('艾琳说') , '{{char}} 没有被换成卡的名字');
 
-  /* 防泄密：与「后台完整实情」连续重合 18 个字以上的那一句整句拿掉；公开的时钟节点不算。 */
+  /* 简报不再自动静默删句（帮助正文理解角色情绪的必要后台真相完整保留）；removeLeaks 仍保留给世界书条目建档使用。 */
   assert.equal(core.hiddenTruth(OUTLINE).includes('灯塔的旧账本其实被莫师傅藏在了钟楼的夹层里'), true);
   assert.equal(core.hiddenTruth(OUTLINE).includes('港务司会来清点'), false);
-  const leaky = '【当前阶段与承接】Phase 2。\n【在场角色状态与情绪动因】莫师傅守着楼梯。灯塔的旧账本其实被莫师傅藏在了钟楼的夹层里，他不想让人上去。他的手一直按着围裙。\n【人物火花与本轮暗压】第三天傍晚，港务司会来清点灯塔的库房；雨停之前渡船不开。';
-  const guarded = core.sanitizeBriefDetailed(leaky, { userName: '林渡', outline: OUTLINE });
-  assert.equal(guarded.leaks, 1);
-  assert.ok(!guarded.text.includes('旧账本其实被莫师傅藏在'));
-  assert.ok(guarded.text.includes('【在场角色状态与情绪动因】莫师傅守着楼梯。') && guarded.text.includes('他的手一直按着围裙。'), '只拿掉泄密的那一句，栏名与前后句都在');
-  assert.ok(guarded.text.includes('第三天傍晚，港务司会来清点灯塔的库房'), '时钟的节点可以露出');
-  assert.equal(core.sanitizeBriefDetailed('莫师傅藏了账本。', { outline: OUTLINE }).leaks, 0, '短的重合不算');
+  const withTruth = '【当前阶段与承接】Phase 2。\n【在场角色状态与情绪动因】莫师傅守着楼梯。灯塔的旧账本其实被莫师傅藏在了钟楼的夹层里，他不想让人上去（仅供正文理解情绪，不可提前向玩家说破）。他的手一直按着围裙。\n【人物火花与本轮暗压】第三天傍晚，港务司会来清点灯塔的库房；雨停之前渡船不开。';
+  const kept = core.sanitizeBriefDetailed(withTruth, { userName: '林渡', outline: OUTLINE });
+  assert.equal(kept.leaks, 0);
+  assert.ok(kept.text.includes('灯塔的旧账本其实被莫师傅藏在了钟楼的夹层里'), '简报不再静默删除后台情绪动因句');
+  assert.ok(kept.text.includes('第三天傍晚，港务司会来清点灯塔的库房'), '时钟的节点完整保留');
+  const wbFiltered = core.removeLeaks(withTruth, OUTLINE);
+  assert.equal(wbFiltered.leaks, 1);
+  assert.ok(!wbFiltered.text.includes('旧账本其实被莫师傅藏在'), 'removeLeaks 单独调用仍可供世界书建档过滤');
+  assert.equal(core.removeLeaks('莫师傅藏了账本。', OUTLINE).leaks, 0, '短的重合不算');
 
   /* 限长：从最长的一段缩起，各栏的开头都留得住。 */
   const long = core.BRIEF_COLUMNS.map((column, index) => column + '细节'.repeat(index === 1 ? 700 : 80) + '。').join('\n');
