@@ -722,18 +722,29 @@
    * 构造自动打回重写的质检反馈消息。options.softOnly：问题只出在 <self_check>（大纲、索引、简报的结构都合法），
    * 这时允许模型只重交一段 <self_check>，程序把它换进上一稿（mergeSelfCheck），不必为几行自检措辞整卷重写。
    */
+  /*
+   * options.workspace：草稿工作台里已经有这一稿（交付时回复里的标签都回填进去了）。这时要它用 draft_edit 局部修改，
+   * 而不是把几千字的大纲整篇重吐一遍。
+   */
   function buildRevisionPrompt(issues, options) {
     var list = (Array.isArray(issues) ? issues : []).map(function (item) { return str(item).trim(); }).filter(Boolean);
     var softOnly = !!(options && options.softOnly);
-    return [
-      '【自动质检打回 · 请直接修正并重新交付】',
-      '刚才提交的交付物存在以下问题，尚未落盘：',
-      list.map(function (item, idx) { return (idx + 1) + '. ' + item; }).join('\n'),
-      '',
-      softOnly
-        ? '以上只涉及 <self_check> 自检。如果正文确实还有没改到位的地方，请修改正文后重新输出完整、闭合的四段标签交付物；如果正文其实已经改好、只是自检那几行写得让人误会，只需重新输出一段 <self_check>…</self_check>（每项一行，写「通过」或「已修正：改了什么」），程序会把它换进上一稿，不必重写全文。'
-        : '请直接针对上述问题修改正文（如某项需要核实世界书、变量或前文，可继续调用只读工具查证），然后重新输出完整、闭合、全部自检通过的四段标签交付物，标签之外不要有任何多余文字。'
-    ].join('\n');
+    var drafted = !!(options && options.workspace);
+    var advice;
+    if (softOnly) {
+      advice = '以上只涉及 <self_check> 自检。如果正文确实还有没改到位的地方，请修改正文后重新交付'
+        + (drafted ? '（草稿已保留在工作台：用 draft_edit 改对应的几行即可）' : '（重新输出完整、闭合的四段标签交付物）')
+        + '；如果正文其实已经改好、只是自检那几行写得让人误会，只需重新输出一段 <self_check>…</self_check>（每项一行，写「通过」或「已修正：改了什么」）'
+        + (drafted ? '，或用 draft_write 重写 self_check.md' : '') + '，程序会把它换进上一稿，不必重写全文。';
+    } else if (drafted) {
+      advice = '草稿已保留在工作台（各段都在对应的槽位里）：请直接用 draft_edit 针对上述问题做局部修改，缺的段落用 draft_write 补上'
+        + '（需要核实世界书、变量或前文时可以继续调用只读工具查证），改完用 draft_check 复核；全部通过后回复一句简短的交付确认即可，不要把整份大纲在回复里重吐一遍。'
+        + '也可以在回复里只输出要整段替换的标签，没写的段落照旧从工作台取。';
+    } else {
+      advice = '请直接针对上述问题修改正文（如某项需要核实世界书、变量或前文，可继续调用只读工具查证），然后重新输出完整、闭合、全部自检通过的四段标签交付物，标签之外不要有任何多余文字。';
+    }
+    return ['【自动质检打回 · 请直接修正并重新交付】', '刚才提交的交付物存在以下问题，尚未落盘：',
+      list.map(function (item, idx) { return (idx + 1) + '. ' + item; }).join('\n'), '', advice].join('\n');
   }
 
   /* 回复里只有一段闭合的 <self_check>，没有大纲（模型按软打回的提示只重交了自检）。 */
@@ -752,6 +763,532 @@
     var prev = str(previous);
     if (/<self_check>[\s\S]*?<\/self_check>/i.test(prev)) return prev.replace(/<self_check>[\s\S]*?<\/self_check>/i, function () { return block; });
     return block + '\n' + prev;
+  }
+
+  /* ---------- 总导演的私有草稿工作台 ---------- */
+
+  /*
+   * 编纲草稿（draft.json）与结构重构草稿（restructure-draft.json）各带一个只属于这一份草稿的工作台：几个固定文件名的槽位，
+   * 随断点一起落盘（受 epoch 与聊天身份守卫），定稿、放弃、切卷时随断点一起删掉。它不是 VFS 挂载点：酒馆与工作区的资产照旧只读，
+   * 写它不经过权限确认、不进改动记录。槽位里放的就是最终交付里对应标签的内容（不带标签）；交付时与回复里的标签合并，
+   * 回复里写了（非空）的以回复为准并回填槽位，没写的从槽位取（composeDelivery）。
+   * 槽位名是固定的逻辑文件名，不是路径：带 / \ : 或 .. 的一律拒绝。
+   */
+  var DRAFT_SLOTS = [
+    { file: 'notes.md', tag: '', label: '勘察笔记与构思草纸', limit: 40000 },
+    { file: 'outline.md', tag: 'volume_outline', label: '本卷动态大纲（板块 A–E）', limit: 120000 },
+    { file: 'index.json', tag: 'volume_index', label: '阶段索引与新增角色 JSON', limit: 30000 },
+    { file: 'first_brief.md', tag: 'first_brief', label: '首轮导演简报', limit: 8000 },
+    { file: 'self_check.md', tag: 'self_check', label: '交付前自检记录', limit: 12000 },
+    { file: 'restructure_note.md', tag: 'restructure_note', label: '重构说明（80 字以内）', limit: 1000, restructure: true }
+  ];
+  var WORKSPACE_LIMIT = 240000;
+  var DELIVERY_ORDER = ['self_check', 'restructure_note', 'volume_outline', 'volume_index', 'first_brief'];
+
+  function draftSlots(kind) {
+    return DRAFT_SLOTS.filter(function (slot) { return !slot.restructure || kind === 'restructure'; });
+  }
+  function draftSlot(name, kind) {
+    var raw = str(name).trim();
+    if (!raw || /[\\\/:*?"<>|]|\.\./.test(raw)) return null;
+    var key = raw.toLowerCase();
+    return draftSlots(kind).filter(function (slot) { return slot.file === key || slot.file.replace(/\.(?:md|json)$/, '') === key; })[0] || null;
+  }
+  function slotByTag(tag, kind) { return draftSlots(kind).filter(function (slot) { return slot.tag === tag; })[0] || null; }
+  function deliveryTags(kind) { return draftSlots(kind).filter(function (slot) { return slot.tag; }).map(function (slot) { return slot.tag; }); }
+  function formatCount(value) { return String(Math.max(0, Math.trunc(Number(value) || 0))).replace(/\B(?=(\d{3})+(?!\d))/g, ','); }
+
+  function badSlot(name, kind) {
+    var list = draftSlots(kind).map(function (slot) { return slot.file; }).join('、');
+    return '草稿槽位「' + clip(name, 40) + '」不存在。只能用这几个固定文件名（不是路径，也不能写酒馆资产）：' + list
+      + (kind !== 'restructure' && /restructure/i.test(str(name)) ? '。restructure_note.md 只在结构重构时可用' : '') + '。';
+  }
+
+  function emptyWorkspace() { return { v: 1, rev: 0, files: {} }; }
+
+  /* 读回来的工作台按类型收一遍：只认白名单槽位，超长的截断并标成半稿。返回的是新对象，可以放心改。 */
+  function normalizeWorkspace(raw, kind) {
+    var ws = emptyWorkspace();
+    if (!isObject(raw)) return ws;
+    ws.rev = Math.max(0, Math.trunc(Number(raw.rev) || 0));
+    var files = isObject(raw.files) ? raw.files : {};
+    draftSlots(kind).forEach(function (slot) {
+      var item = typeof files[slot.file] === 'string' ? { text: files[slot.file] } : files[slot.file];
+      if (!isObject(item)) return;
+      var text = str(item.text).replace(/\r\n?/g, '\n');
+      if (!text.trim()) return;
+      var over = text.length > slot.limit;
+      ws.files[slot.file] = { text: over ? text.slice(0, slot.limit) : text, at: Number(item.at) || 0, partial: item.partial === true || over };
+    });
+    return ws;
+  }
+
+  function workspaceText(ws, file) {
+    var item = ws && isObject(ws.files) ? ws.files[file] : null;
+    return item ? str(item.text) : '';
+  }
+  function workspaceChars(ws) {
+    var files = ws && isObject(ws.files) ? ws.files : {};
+    return Object.keys(files).reduce(function (sum, key) { return sum + str(files[key] && files[key].text).length; }, 0);
+  }
+  function workspaceHasContent(ws) { return workspaceChars(ws) > 0; }
+  function workspaceOutline(ws) { return workspaceText(ws, 'outline.md'); }
+
+  /* 改一个槽位（就地改 ws，调用方先 normalizeWorkspace 拿一份新的）。写空等于删掉这个槽位。 */
+  function putSlot(ws, slot, text, partial) {
+    var body = str(text).replace(/\r\n?/g, '\n');
+    if (!body.trim()) delete ws.files[slot.file];
+    else ws.files[slot.file] = { text: body, at: Date.now(), partial: partial === true };
+    ws.rev += 1;
+  }
+
+  /*
+   * 把续写接到半稿后面：续写开头重复了半稿结尾的一段（模型往回多写了几个字）就去掉重叠；
+   * 从被截断的那一行重新写起的，丢掉半截的那一行；否则原样接上（断在句子中间就直接接，续写以标题或列表开头就换一行）。
+   */
+  function stitch(head, tail) {
+    var a = str(head), b = str(tail).replace(/^\n+/, '');
+    if (!a.trim()) return b;
+    if (!b.trim()) return a;
+    for (var k = Math.min(400, a.length, b.length); k >= 8; k -= 1) {
+      if (a.slice(-k) === b.slice(0, k)) return a + b.slice(k);
+    }
+    var cut = a.lastIndexOf('\n');
+    var lastLine = a.slice(cut + 1);
+    if (lastLine.trim().length >= 4 && b.indexOf(lastLine) === 0) return a.slice(0, cut + 1) + b;
+    return /\n$/.test(a) || /^\s*(?:#|[-*•>]|\d+[.、．]|\*\*)/.test(b) ? a.replace(/\n*$/, '\n') + b : a + b;
+  }
+
+  function outlineSections(text) {
+    var found = {}, order = [];
+    str(text).split('\n').forEach(function (line) {
+      var match = /^\s*#{1,6}\s*(?:\*\*)?\s*板块\s*([A-EＡ-Ｅ])/i.exec(line);
+      if (!match) return;
+      var letter = match[1].toUpperCase();
+      if (letter.charCodeAt(0) > 0xFF00) letter = String.fromCharCode(letter.charCodeAt(0) - 0xFEE0);
+      if (!found[letter]) { found[letter] = true; order.push(letter); }
+    });
+    return order.sort();
+  }
+  function letterRange(list) {
+    if (!list.length) return '';
+    var contiguous = list.every(function (letter, index) { return index === 0 || letter.charCodeAt(0) === list[index - 1].charCodeAt(0) + 1; });
+    return contiguous && list.length > 1 ? list[0] + '–' + list[list.length - 1] : list.join('、');
+  }
+  function lastHeading(text) {
+    var lines = str(text).split('\n');
+    for (var index = lines.length - 1; index >= 0; index -= 1) {
+      var match = /^\s*#{1,6}\s+(.+?)\s*$/.exec(lines[index]);
+      if (match) return clip(match[1].replace(/\*\*/g, ''), 40);
+    }
+    return '';
+  }
+  function outlineShape(text) {
+    var sections = letterRange(outlineSections(text));
+    var phases = inferPhases(text);
+    var bits = [];
+    if (sections) bits.push('板块 ' + sections);
+    if (phases.length) bits.push(phases.length > 1 ? 'Phase 1–' + phases.length : 'Phase 1');
+    return bits.join(' · ');
+  }
+  function indexValid(text) {
+    if (!str(text).trim() || !modules.agentKernel) return false;
+    try { return !!modules.agentKernel.extractJson(text).ok; } catch (error) { return false; }
+  }
+
+  /* 给界面与续传提示用的概要：每个槽位多少字、大纲写到哪个板块与 Phase、哪些是还没补完的半稿。 */
+  function workspaceSummary(ws, kind) {
+    var w = ws && isObject(ws.files) ? ws : emptyWorkspace();
+    var slots = draftSlots(kind).map(function (slot) {
+      var item = w.files[slot.file];
+      var text = item ? str(item.text) : '';
+      return { file: slot.file, label: slot.label, chars: text.length, lines: text ? text.split('\n').length : 0, written: !!text.trim(), partial: !!(item && item.partial), at: item && item.at || 0 };
+    });
+    var outline = workspaceText(w, 'outline.md'), index = workspaceText(w, 'index.json');
+    var partial = slots.filter(function (slot) { return slot.partial; }).map(function (slot) { return slot.file; });
+    var sections = outlineSections(outline);
+    var total = slots.reduce(function (sum, slot) { return sum + slot.chars; }, 0);
+    var hasBrief = !!workspaceText(w, 'first_brief.md').trim();
+    return {
+      rev: Math.max(0, Math.trunc(Number(w.rev) || 0)), slots: slots, empty: total === 0, totalChars: total,
+      outlineChars: outline.length, outlineSections: sections, sectionRange: letterRange(sections),
+      phases: inferPhases(outline), lastHeading: lastHeading(outline), shape: outlineShape(outline),
+      hasIndex: !!index.trim(), indexValid: indexValid(index), hasBrief: hasBrief,
+      hasSelfCheck: !!workspaceText(w, 'self_check.md').trim(), hasNote: !!workspaceText(w, 'restructure_note.md').trim(),
+      notesChars: workspaceText(w, 'notes.md').length, partial: partial,
+      ready: !!outline.trim() && !!index.trim() && hasBrief && partial.length === 0
+    };
+  }
+
+  function slotLine(slot, item) {
+    var text = item ? str(item.text) : '';
+    if (!text.trim()) return '- ' + slot.file + '（' + slot.label + '）：未写入';
+    var bits = [formatCount(text.length) + ' 字 / ' + text.split('\n').length + ' 行'];
+    if (slot.file === 'outline.md') { var shape = outlineShape(text); if (shape) bits.push('含 ' + shape); var last = lastHeading(text); if (last) bits.push('最后一个标题「' + last + '」'); }
+    if (slot.file === 'index.json') bits.push(indexValid(text) ? 'JSON 合法' : 'JSON 不合法');
+    if (item.partial) bits.push('［断流时抢救的半稿，尚未补完］');
+    return '- ' + slot.file + '（' + slot.label + '）：' + bits.join('；');
+  }
+
+  function workspaceOverview(ws, kind) {
+    var w = normalizeWorkspace(ws, kind);
+    return ['草稿工作台（' + (kind === 'restructure' ? '结构重构' : '编纲') + '，只属于这一份草稿）：'].concat(draftSlots(kind).map(function (slot) {
+      return slotLine(slot, w.files[slot.file]);
+    })).join('\n');
+  }
+
+  /* draft_read：不带 file 给总览；带 file 给带行号的正文（offset / limit 分段）。 */
+  function workspaceRead(ws, kind, args) {
+    var a = isObject(args) ? args : {};
+    if (!str(a.file).trim()) return { ok: true, text: workspaceOverview(ws, kind) + '\n（带 file 读正文；draft_write 写入、draft_edit 局部修改、draft_check 预检。）' };
+    var slot = draftSlot(a.file, kind);
+    if (!slot) return { ok: false, error: badSlot(a.file, kind) };
+    var item = ws && isObject(ws.files) ? ws.files[slot.file] : null;
+    var text = item ? str(item.text) : '';
+    if (!text.trim()) return { ok: true, text: '（' + slot.file + ' 还是空的，用 draft_write 写入。）' };
+    var lines = text.split('\n');
+    var offset = Math.max(1, Math.trunc(Number(a.offset) || 1));
+    var limit = Math.max(1, Math.min(2000, Math.trunc(Number(a.limit) || 400)));
+    var cap = 14000, used = 0, body = [], index = offset - 1;
+    for (; index < lines.length && index < offset - 1 + limit; index += 1) {
+      var line = lines[index];
+      if (used + line.length > cap && body.length) break;
+      if (line.length > cap) line = line.slice(0, cap) + '…（这一行很长，已截断）';
+      body.push(String(index + 1).padStart(5, ' ') + '\t' + line);
+      used += line.length + 1;
+    }
+    var head = slot.file + (item.partial ? '（断流时抢救的半稿，尚未补完）' : '') + '：共 ' + lines.length + ' 行 / ' + formatCount(text.length) + ' 字';
+    if (offset > lines.length) return { ok: true, text: head + '\n（offset 超出了末尾）' };
+    var more = index < lines.length ? '\n…还有内容，继续读用 offset=' + (index + 1) : '';
+    return { ok: true, text: head + '\n' + body.join('\n') + more };
+  }
+
+  function slotWarnings(file, text) {
+    var notes = [];
+    if (file === 'index.json' && str(text).trim() && !indexValid(text)) notes.push('注意：index.json 现在不是合法 JSON，交付前要改好');
+    if (file === 'first_brief.md' && str(text).length > BRIEF_LIMIT) notes.push('注意：首轮简报 ' + formatCount(str(text).length) + ' 字，超过 ' + BRIEF_LIMIT + ' 字的上限，定稿时会被截短');
+    if (file === 'restructure_note.md' && str(text).trim().length > 80) notes.push('注意：重构说明建议在 80 字以内');
+    return notes;
+  }
+
+  function writtenLine(file, text, verb) {
+    var bits = [verb + '，现共 ' + formatCount(text.length) + ' 字 / ' + text.split('\n').length + ' 行'];
+    if (file === 'outline.md') { var shape = outlineShape(text); if (shape) bits.push('含 ' + shape); }
+    return file + '（' + bits.join('；') + '）';
+  }
+
+  /*
+   * draft_write：mode=replace（默认）整份写入；mode=append 接在末尾（自动空一行），适合把大纲分几次写完。
+   * 内容外面套着这个槽位自己的标签时剥掉；内容里带着别的交付标签（模型把整份交付写进了一个槽位）时按标签分别写进各自的槽位。
+   * 返回 { ok, changed, ws, files, text } 或 { ok: false, error }。写入是原子的：任何一个槽位超限，一个都不写。
+   */
+  function workspaceWrite(ws, kind, args) {
+    var a = isObject(args) ? args : {};
+    var slot = draftSlot(a.file, kind);
+    if (!slot) return { ok: false, error: badSlot(a.file, kind) };
+    var mode = str(a.mode).trim().toLowerCase() || 'replace';
+    if (mode !== 'replace' && mode !== 'append') return { ok: false, error: 'mode 只能是 replace（整份覆盖，默认）或 append（接在末尾）。' };
+    var content = str(a.content).replace(/\r\n?/g, '\n');
+    if (!content.trim()) return { ok: false, error: '内容为空：draft_write 要写入正文。想删掉一段，用 draft_edit 把它替换成空。' };
+    var found = deliveryTags(kind).map(function (tag) { return { tag: tag, t: tagBody(content, tag) }; }).filter(function (item) { return item.t.found && item.t.body.trim(); });
+    var plan = [];
+    if (!found.length) plan.push({ slot: slot, body: content, mode: mode });
+    else if (found.length === 1 && found[0].tag === slot.tag) plan.push({ slot: slot, body: found[0].t.body, mode: mode });
+    else {
+      found.forEach(function (item) {
+        var target = slotByTag(item.tag, kind);
+        if (target) plan.push({ slot: target, body: item.t.body, mode: target === slot ? mode : 'replace' });
+      });
+      var rest = content.replace(/<(self_check|volume_outline|volume_index|first_brief|restructure_note)>[\s\S]*?(?:<\/\1>|$)/gi, '').trim();
+      if (!plan.some(function (item) { return item.slot === slot; }) && rest.length >= 20) plan.push({ slot: slot, body: rest, mode: mode });
+    }
+    var next = normalizeWorkspace(ws, kind);
+    var results = [], changed = false;
+    for (var index = 0; index < plan.length; index += 1) {
+      var step = plan[index];
+      var before = workspaceText(next, step.slot.file);
+      var partialBefore = !!(next.files[step.slot.file] && next.files[step.slot.file].partial);
+      /* 接在断流半稿后面的就是续写：按断点拼接（去重叠），不在句子中间硬插一个空行。 */
+      var after = step.mode === 'append' && before.trim()
+        ? (partialBefore ? stitch(before, step.body) : before.replace(/\s+$/, '') + '\n\n' + step.body.replace(/^\s*\n/, ''))
+        : step.body;
+      if (after.length > step.slot.limit) {
+        return { ok: false, error: step.slot.file + ' 写入后会有 ' + formatCount(after.length) + ' 字，超过这个槽位 ' + formatCount(step.slot.limit) + ' 字的上限；请精简，或把构思草纸挪进 notes.md。这次一个字都没有写。' };
+      }
+      var wasPartial = !!(next.files[step.slot.file] && next.files[step.slot.file].partial);
+      if (after === before && !wasPartial) { results.push(step.slot.file + '（内容与现有的完全一样，没有改动）'); continue; }
+      putSlot(next, step.slot, after, false);
+      changed = true;
+      results.push(writtenLine(step.slot.file, after, step.mode === 'append' && before.trim() ? '追加 ' + formatCount(step.body.length) + ' 字' : '写入 ' + formatCount(after.length) + ' 字'));
+      slotWarnings(step.slot.file, after).forEach(function (note) { results.push(note); });
+    }
+    if (workspaceChars(next) > WORKSPACE_LIMIT) return { ok: false, error: '草稿工作台合计超过 ' + formatCount(WORKSPACE_LIMIT) + ' 字的上限；请精简 notes.md 或重复的内容。这次一个字都没有写。' };
+    var lead = plan.length > 1 ? '内容里带着 ' + found.length + ' 段交付标签，已按标签分别写进各自的槽位：' : '';
+    return { ok: true, changed: changed, ws: changed ? next : ws, files: plan.map(function (item) { return item.slot.file; }),
+      text: lead + results.join('；') + (changed ? '。已存盘。' : '。') };
+  }
+
+  /* draft_edit：与 VFS 的 edit 同一个口径（old 须与原文一致且唯一，all=true 时全部替换；new 留空即删除这段）。 */
+  function workspaceEdit(ws, kind, args) {
+    var a = isObject(args) ? args : {};
+    var slot = draftSlot(a.file, kind);
+    if (!slot) return { ok: false, error: badSlot(a.file, kind) };
+    var text = workspaceText(ws, slot.file);
+    if (!text) return { ok: false, error: slot.file + ' 还是空的，先用 draft_write 写入。' };
+    var needle = str(a.old).replace(/\r\n?/g, '\n');
+    if (!needle) return { ok: false, error: 'old 不能为空：写上要被替换的原文（不带行号）。' };
+    var count = text.split(needle).length - 1;
+    if (!count) {
+      var loose = needle.trim();
+      var hint = /^\s*\d+\t/m.test(needle) ? '（old 里带了行号，去掉行首的行号与制表符再试）'
+        : loose && text.indexOf(loose) >= 0 ? '（去掉首尾空白后能找到——请原样复制 draft_read 给出的内容，不带行号）' : '';
+      return { ok: false, error: '在 ' + slot.file + ' 里没有找到要替换的原文' + hint + '。先 draft_read 确认现在的内容。' };
+    }
+    if (count > 1 && a.all !== true) return { ok: false, error: '要替换的原文在 ' + slot.file + ' 里出现了 ' + count + ' 次。多带一些上下文让它唯一，或者加 all=true 全部替换。' };
+    var replacement = a.new === undefined || a.new === null ? '' : str(a.new).replace(/\r\n?/g, '\n');
+    var after = a.all === true ? text.split(needle).join(replacement) : text.replace(needle, function () { return replacement; });
+    if (after.length > slot.limit) return { ok: false, error: slot.file + ' 改完会有 ' + formatCount(after.length) + ' 字，超过这个槽位 ' + formatCount(slot.limit) + ' 字的上限。' };
+    if (after === text) return { ok: true, changed: false, ws: ws, files: [slot.file], text: '替换前后内容一样，' + slot.file + ' 没有改动。' };
+    var next = normalizeWorkspace(ws, kind);
+    putSlot(next, slot, after, false);
+    var notes = slotWarnings(slot.file, after);
+    return { ok: true, changed: true, ws: next, files: [slot.file],
+      text: '已修改 ' + writtenLine(slot.file, after, '替换 ' + (a.all === true ? count : 1) + ' 处') + (notes.length ? '；' + notes.join('；') : '') + '。已存盘。' };
+  }
+
+  function partialIssue(file, ws) {
+    var text = workspaceText(ws, file);
+    if (file === 'outline.md') {
+      var last = lastHeading(text);
+      return '大纲没有写完就断了：已写出的 ' + formatCount(text.length) + ' 字已保存为草稿工作台 outline.md 的半稿' + (last ? '（写到「' + last + '」）' : '')
+        + '。请先 draft_read 看一眼结尾，再用 draft_write（mode=append）从断点接着写完剩下的部分（太长就分几次 append），不必整篇重写。';
+    }
+    var slot = DRAFT_SLOTS.filter(function (item) { return item.file === file; })[0];
+    return '<' + (slot && slot.tag || file) + '> 没有写完就断了：已写出的部分保存为 ' + file + ' 的半稿。请 draft_read 查看后，用 draft_write 补完或整份重写这一段。';
+  }
+
+  /*
+   * 交付合成：回复里的标签（闭合且非空）优先，并回填到槽位；回复里没写的从槽位取。
+   * 回复里某段写到一半就断了（只有开头没有结尾）：那是它最新的版本，存成这个槽位的半稿——接着 append 写完就行，不用整篇重来。
+   * 带半稿标记的槽位一律算硬伤（validateDelivery），绝不把半截内容当定稿。
+   * 返回 { text（合成后的完整交付）, workspace（回填后的新工作台）, used, backfilled, salvaged, partial, lenient }。
+   */
+  function composeDelivery(replyText, ws, kind) {
+    var text = stripBlocks(replyText);
+    var next = normalizeWorkspace(ws, kind);
+    var parts = {}, used = {}, backfilled = [], salvaged = [];
+    /*
+     * 大纲还是断流半稿、回复又没有重新开一个 <volume_outline>，却有一个 </volume_outline>：
+     * 结尾标签之前的那段就是接着半稿写下去的续文（直接吐标签的模型续写时最自然的写法）。拼上之后大纲就完整了。
+     */
+    var outlineSlot = slotByTag('volume_outline', kind);
+    var outlineItem = next.files[outlineSlot.file];
+    if (outlineItem && outlineItem.partial && !tagBody(text, 'volume_outline').found) {
+      var closeAt = text.search(/<\/volume_outline\s*>/i);
+      if (closeAt >= 0) {
+        var continued = text.slice(0, closeAt).replace(/<(self_check|volume_index|first_brief|restructure_note)>[\s\S]*?<\/\1>/gi, '').trim();
+        var whole = stitch(outlineItem.text, continued);
+        putSlot(next, outlineSlot, whole.slice(0, outlineSlot.limit), whole.length > outlineSlot.limit);
+        backfilled.push(outlineSlot.file);
+        used.volume_outline = 'continued';
+        parts.volume_outline = whole;
+        text = text.slice(0, closeAt).replace(/^[\s\S]*?(?=<(?:self_check|volume_index|first_brief|restructure_note)>|$)/, '') + text.slice(closeAt).replace(/^<\/volume_outline\s*>/i, '');
+      }
+    }
+    deliveryTags(kind).forEach(function (tag) {
+      if (used[tag] === 'continued') return;
+      var slot = slotByTag(tag, kind);
+      var t = tagBody(text, tag);
+      if (t.found && t.body.trim()) {
+        var item = next.files[slot.file];
+        if (t.closed) {
+          if (!item || item.text !== t.body || item.partial) {
+            putSlot(next, slot, t.body.slice(0, slot.limit), t.body.length > slot.limit);
+            backfilled.push(slot.file);
+          }
+          used[tag] = 'reply';
+        } else {
+          putSlot(next, slot, t.body.slice(0, slot.limit), true);
+          salvaged.push(slot.file);
+          used[tag] = 'partial';
+        }
+        parts[tag] = t.body;
+        return;
+      }
+      if (workspaceText(next, slot.file).trim()) { parts[tag] = workspaceText(next, slot.file); used[tag] = 'workspace'; }
+    });
+    var lenient = false;
+    if (parts.volume_outline === undefined) {
+      var loose = text.replace(/<(self_check|volume_outline|volume_index|first_brief|restructure_note)>[\s\S]*?(?:<\/\1>|$)/gi, '').trim();
+      if (inferPhases(loose).length) {
+        var outlineSlot = slotByTag('volume_outline', kind);
+        putSlot(next, outlineSlot, loose.slice(0, outlineSlot.limit), loose.length > outlineSlot.limit);
+        backfilled.push(outlineSlot.file);
+        parts.volume_outline = loose;
+        used.volume_outline = 'reply';
+        lenient = true;
+      }
+    }
+    var partial = draftSlots(kind).filter(function (slot) {
+      return slot.tag && parts[slot.tag] !== undefined && next.files[slot.file] && next.files[slot.file].partial;
+    }).map(function (slot) { return slot.file; });
+    var composed = DELIVERY_ORDER.filter(function (tag) { return parts[tag] !== undefined; }).map(function (tag) {
+      return '<' + tag + '>\n' + parts[tag] + '\n</' + tag + '>';
+    }).join('\n');
+    return { text: composed, workspace: next, used: used, backfilled: backfilled, salvaged: salvaged, partial: partial, lenient: lenient };
+  }
+
+  /* 合成之后的完整质检：validateFinalDelivery 加上「半稿未补完」的硬伤。返回值多了 composed 与 workspace。 */
+  function validateDelivery(replyText, ws, kind, options) {
+    var composed = composeDelivery(replyText, ws, kind);
+    var checked = validateFinalDelivery(composed.text, options);
+    var partialIssues = composed.partial.map(function (file) { return partialIssue(file, composed.workspace); });
+    if (partialIssues.length) {
+      checked.hardIssues = partialIssues.concat(checked.hardIssues || []);
+      checked.issues = checked.hardIssues.concat(checked.softIssues || []);
+      checked.hardFailure = true;
+      checked.ok = false;
+    }
+    checked.composed = composed;
+    checked.workspace = composed.workspace;
+    return checked;
+  }
+
+  /* draft_check：只对工作台里已经写下的内容跑一遍与最终交付相同的程序质检，外加几条不挡定稿的提醒。 */
+  function checkWorkspace(ws, kind, options) {
+    var w = normalizeWorkspace(ws, kind);
+    var checked = validateDelivery('', w, kind, options);
+    var summary = workspaceSummary(w, kind);
+    var missing = draftSlots(kind).filter(function (slot) { return slot.tag && slot.tag !== 'self_check' && slot.tag !== 'restructure_note' && !workspaceText(w, slot.file).trim(); })
+      .map(function (slot) { return slot.file; });
+    var warnings = [];
+    if (!summary.hasSelfCheck) warnings.push('还没有 self_check.md：交付前请按 Skill 的交付前自检清单逐条核查，每项一行写「通过」或「已修正：改了什么」。');
+    if (kind === 'restructure' && !summary.hasNote) warnings.push('还没有 restructure_note.md：用 80 字以内说明为什么改、改了什么。');
+    warnings = warnings.concat(slotWarnings('first_brief.md', workspaceText(w, 'first_brief.md')), slotWarnings('restructure_note.md', workspaceText(w, 'restructure_note.md')));
+    if (checked.final && checked.final.ok && summary.phases.length && checked.final.index && checked.final.index.totalPhases && checked.final.index.totalPhases !== summary.phases.length) {
+      warnings.push('index.json 的 phases 有 ' + checked.final.index.totalPhases + ' 项，outline.md 里有 ' + summary.phases.length + ' 个「#### Phase N」标题，两边应当一一对应。');
+    }
+    var lines = [];
+    if (checked.ok) {
+      lines.push('草稿预检：全部通过' + (summary.shape ? '（outline.md ' + formatCount(summary.outlineChars) + ' 字 · ' + summary.shape + '）' : '') + '。');
+    } else {
+      lines.push('草稿预检：未通过（硬伤 ' + (checked.hardIssues || []).length + ' 项，自检软问题 ' + (checked.softIssues || []).length + ' 项）。');
+      if ((checked.hardIssues || []).length) lines.push('硬伤：\n' + checked.hardIssues.map(function (item, index) { return (index + 1) + '. ' + item; }).join('\n'));
+      if ((checked.softIssues || []).length) lines.push('自检软问题：\n' + checked.softIssues.map(function (item, index) { return (index + 1) + '. ' + item; }).join('\n'));
+    }
+    if (missing.length) lines.push('尚未写入：' + missing.join('、'));
+    if (warnings.length) lines.push('提醒（不挡定稿）：\n' + warnings.map(function (item) { return '- ' + item; }).join('\n'));
+    lines.push(checked.ok
+      ? '可以交付了：最终回复只需一句简短的交付确认，不必把大纲在回复里再抄一遍。'
+      : '用 draft_edit 局部修改对应的槽位（缺的用 draft_write 补上），改完再 draft_check。');
+    return { ok: checked.ok, hard: checked.hardIssues || [], soft: checked.softIssues || [], missing: missing, warnings: warnings, summary: summary, text: lines.join('\n') };
+  }
+
+  /*
+   * 断流抢救：一次纯文本回复在传输途中断开（超时、断网、暂停、插话），已经吐出来的正文按交付标签拆进工作台。
+   * 闭合的段落直接替换对应槽位；写到一半的段落存成半稿（但不覆盖一份完整的现有内容，那种情况放进 notes.md）；
+   * 一个标签都没有的：像大纲就当大纲半稿，否则记进 notes.md。返回 { workspace, saved: [{ file, chars, partial, note }] }。
+   */
+  function salvagePartial(ws, text, kind) {
+    var body = stripBlocks(text).replace(/\r\n?/g, '\n');
+    var next = normalizeWorkspace(ws, kind);
+    var saved = [];
+    var notesSlot = draftSlot('notes.md', kind);
+    function toNotes(title, piece) {
+      var before = workspaceText(next, notesSlot.file);
+      var room = notesSlot.limit - before.length - title.length - 8;
+      if (room < 200) return;
+      var entry = '## ' + title + '\n' + piece.slice(0, room);
+      putSlot(next, notesSlot, before.trim() ? before.replace(/\s+$/, '') + '\n\n' + entry : entry, false);
+      saved.push({ file: notesSlot.file, chars: Math.min(piece.length, room), partial: false, note: title });
+    }
+    function keepPartial(slot, piece) {
+      var item = next.files[slot.file];
+      if (item && item.text.trim() && !item.partial) { toNotes('断流时没写完的 ' + slot.file + '（没有覆盖已有的完整版本）', piece); return; }
+      putSlot(next, slot, piece.slice(0, slot.limit), true);
+      saved.push({ file: slot.file, chars: Math.min(piece.length, slot.limit), partial: true });
+    }
+    var tagged = 0;
+    deliveryTags(kind).forEach(function (tag) {
+      var t = tagBody(body, tag);
+      if (!t.found || !t.body.trim()) return;
+      tagged += 1;
+      var slot = slotByTag(tag, kind);
+      if (t.closed) {
+        putSlot(next, slot, t.body.slice(0, slot.limit), t.body.length > slot.limit);
+        saved.push({ file: slot.file, chars: Math.min(t.body.length, slot.limit), partial: t.body.length > slot.limit });
+      } else keepPartial(slot, t.body);
+    });
+    if (!tagged) {
+      var loose = body.trim();
+      var outlineSlot = slotByTag('volume_outline', kind);
+      var current = next.files[outlineSlot.file];
+      if (loose && current && current.partial) {
+        /* 大纲还是半稿：这一段多半就是接着写的续文，接在后面（仍是半稿，等它写完）。 */
+        var joined = stitch(current.text, loose);
+        putSlot(next, outlineSlot, joined.slice(0, outlineSlot.limit), true);
+        saved.push({ file: outlineSlot.file, chars: Math.min(loose.length, outlineSlot.limit), partial: true, note: '接在原来的半稿后面' });
+      } else if (loose && (inferPhases(loose).length || /^\s*#{1,6}\s*(?:\*\*)?\s*板块\s*[A-EＡ-Ｅ]/im.test(loose))) keepPartial(outlineSlot, loose);
+      else if (loose) toNotes('断流时抢救的半稿', loose);
+    }
+    return { workspace: next, saved: saved };
+  }
+
+  function savedLine(item, ws) {
+    var bits = [item.file + ' ' + formatCount(item.chars) + ' 字'];
+    if (item.partial && item.file === 'outline.md') { var last = lastHeading(workspaceText(ws, 'outline.md')); bits.push('半稿' + (last ? '，写到「' + last + '」' : '')); }
+    else if (item.partial) bits.push('半稿');
+    if (item.note) bits.push(item.note);
+    return bits.join('，');
+  }
+
+  /* 抢救之后接着写的提示（拼在一条 user 消息里交给模型）。 */
+  function buildSalvageNote(result, reason, kind) {
+    var saved = result && Array.isArray(result.saved) ? result.saved : [];
+    var ws = result && result.workspace;
+    var lines = ['【系统提示 · 断点续写】你上一条回复在传输途中断开了' + (str(reason).trim() ? '（' + clip(reason, 80) + '）' : '') + '。'];
+    if (saved.length) lines.push('已经收到的内容已抢救进草稿工作台：' + saved.map(function (item) { return savedLine(item, ws); }).join('；') + '。');
+    lines.push(workspaceOverview(ws, kind).split('\n').slice(1).join('\n'));
+    lines.push('请不要从头重写：先 draft_read 看一眼断点处的结尾，再用 draft_write（mode=append）从断点接着写完，其余缺的槽位照常补上；全部写好后 draft_check，通过后回复一句简短的交付确认即可。');
+    return lines.filter(Boolean).join('\n');
+  }
+
+  /*
+   * 断点续传、上下文压缩之后注入的工作台进度。reason：resume（沿断点继续）｜ compact（较早的对话被压缩了）。
+   * 工作台是空的返回空串。
+   */
+  function buildWorkspaceNote(ws, kind, reason) {
+    if (!workspaceHasContent(ws)) return '';
+    var summary = workspaceSummary(ws, kind);
+    var written = summary.slots.filter(function (slot) { return slot.written; });
+    var missing = summary.slots.filter(function (slot) { return !slot.written && slot.file !== 'notes.md'; }).map(function (slot) { return slot.file; });
+    var head = reason === 'compact' ? '【草稿工作台进度（较早的对话已压缩，以工作台为准）】' : '【草稿工作台进度（断点续传）】';
+    var lines = [head, '- 已写入：' + written.map(function (slot) {
+      return slot.file + ' ' + formatCount(slot.chars) + ' 字' + (slot.file === 'outline.md' && summary.shape ? '（' + summary.shape + '）' : '') + (slot.partial ? '［半稿，尚未补完］' : '');
+    }).join('、')];
+    if (missing.length) lines.push('- 尚未写入：' + missing.join('、'));
+    lines.push(reason === 'compact'
+      ? '较早写入工作台的工具调用记录可能已被折叠，但工作台里的内容完好：需要时用 draft_read 查看，接着往下写，不要重写已完成的板块。'
+      : '请先 draft_read 确认进度（不带 file 看总览，带 file 看正文），再从断点继续补完缺少的部分；已完成的板块绝不从头重写。全部写好后 draft_check，通过后回复一句简短的交付确认即可。');
+    return lines.join('\n');
+  }
+
+  /* 工具轮数用完时：工作台已经有稿子就先给几轮只限 draft_* 的收尾，再要求交付。 */
+  function buildGraceNote(ws, kind, maxSteps, rounds) {
+    return '（已达到本次工具轮数预算（' + maxSteps + ' 轮）。草稿工作台里已有稿子，额外给你 ' + rounds + ' 轮收尾：这几轮只执行 draft_read / draft_write / draft_edit / draft_check，查阅工具不再执行。'
+      + '请用它们补齐缺少的槽位、修掉 draft_check 报出的问题，然后直接交付。）\n' + workspaceOverview(ws, kind).split('\n').slice(1).join('\n');
+  }
+
+  /* 工具彻底收走、只能写正文的那一轮提示。工作台有内容时只要缺的段落。 */
+  function buildFinaleNote(reason, ws, kind, maxSteps) {
+    var head = reason === 'no_progress'
+      ? '（连续出现重复或无效的工具调用，已拦截空转。请不再调用工具，'
+      : '（已达到本次工具轮数预算上限（' + maxSteps + ' 轮）。请不再调用工具，';
+    if (!workspaceHasContent(ws)) return head + '立即基于已查到的全部资料，直接按要求交付最终四段标签产出。）';
+    var summary = workspaceSummary(ws, kind);
+    var missing = summary.slots.filter(function (slot) { return slot.file !== 'notes.md' && (!slot.written || slot.partial); }).map(function (slot) { return slot.file; });
+    return head + '直接在回复里交付：草稿工作台里已写好的槽位会自动并入，不必重复；只需在回复里输出还缺的或要改的段落（用对应的交付标签包起来）'
+      + (missing.length ? '，目前还缺或没补完：' + missing.join('、') : '；都已齐全时回复一句交付确认即可') + '。）';
   }
 
   function phaseTitle(index, cursor) {
@@ -891,20 +1428,38 @@
     var mode = options.toolMode === 'native' ? 'native' : 'text';
     var tools = Array.isArray(options.tools) ? options.tools : [];
     var mounts = Array.isArray(options.mounts) ? options.mounts : [];
+    var draftKind = options.draftKind === 'restructure' ? 'restructure' : options.draftKind === 'plan' ? 'plan' : '';
     var lines = [
       '## 只读资料勘察工具（消除信息盲区）',
-      '- 你具备只读资料查阅能力（零写入风险、无需确认，可随时发起调用）。大纲落盘与新角色世界书建档由系统自动托管，你只负责查证资料并按要求交付文本。',
+      '- 你对酒馆与工作区的一切资料只读（零写入风险、无需确认，可随时发起调用）。大纲最终落盘与新角色世界书建档由系统自动托管' + (draftKind ? '；你另有一个只属于这一份草稿的私有工作台（见下文），用来边写边存。' : '，你只负责查证资料并按要求交付文本。'),
       '- 开局提供的世界书仅是全量条目目录地图、变量仅是全景结构探测、近期正文未必涵盖全部前史。',
-      '- **“不偷懒、无盲区”勘察原则**：正式落笔产出本卷动态大纲或重构/修订方案之前，必须依据目录索引主动调用 `read` / `grep` / `ls`（及可用的只读查询工具）深入查阅与本卷舞台、核心人物、关键规则、关系细节及现状相关的世界书原文、完整变量结构与必要前文历史，直到对世界与现状没有明显信息盲区再交付最终成果。',
+      '- **聚焦勘察、不留盲区**：落笔之前，依据目录索引主动调用 `read` / `grep` / `ls`（及可用的只读查询工具）查清与本卷舞台、核心人物、关键规则、关系细节及现状直接相关的世界书原文、完整变量结构与必要前文；查到对编纲没有明显信息盲区就动笔，与本卷无关的条目不必通读。',
       '- 当用户要求查看变量结构、核实世界书细节或追溯前文伏笔时，必须直接调用只读工具核实；**严禁在未查阅原文的情况下凭空猜测，严禁推说“看不了”或“无法查看”**。',
       '- `read` 支持直接读取世界书条目全文（`wb:/书名/条目`）、任意历史楼层（`chat:/楼层号`）、角色卡字段（`card:/...`）、记忆（`mem:/...`），以及通过 JSON Pointer 钻取任意深度变量结构（如 `var:/mvu.json#/stat_data/...`、`var:/chat.json#/...`、`var:/character.json`、`var:/message/latest.json`）。'
     ];
+    if (draftKind) {
+      /*
+       * 编纲与重构共用同一份 System（前缀缓存）：这里按「全部槽位」写，restructure_note.md 注明只在重构时可用，
+       * 不按这一次是编纲还是重构改字。真正的槽位限制在 draft_* 工具里按草稿类型执行。
+       */
+      lines.push('',
+        '## 私有草稿工作台（只属于当前这一份编纲 / 重构草稿）',
+        '- 槽位是固定的文件名，不是路径：' + DRAFT_SLOTS.map(function (slot) { return '`' + slot.file + '`（' + slot.label + (slot.restructure ? '，仅结构重构时可用' : '') + '）'; }).join('、')
+          + '。notes.md 不交付，但跨断点、跨上下文压缩一直保留；其余槽位的内容就是交付格式里对应标签中的内容（不用写标签）。',
+        '- `draft_write`：mode=replace（默认）整份写入；mode=append 接在末尾（自动空一行）。大纲很长时分块写：先写板块 A+B，再 append 板块 C+D，最后 append 板块 E。每次写入立即存盘，断网、超时、刷新之后都从已写的地方接着来。',
+        '- `draft_edit`：精确替换槽位里的一段原文（old 须与原文完全一致且唯一；多处相同时加 all=true；new 留空即删除）。自检发现局部问题、或用户插话要改某个设定时只改那几行，绝不整篇重吐。',
+        '- `draft_read`：不带 file 看所有槽位的总览（字数、大纲写到哪个板块 / Phase）；带 file 看带行号的正文，长的用 offset / limit 分段读。',
+        '- `draft_check`：对当前草稿跑一遍与最终交付完全相同的程序质检，返回硬伤与自检软问题清单。',
+        '- 推荐节奏：查清核心资料 → 分块 draft_write 写 outline.md → 写 index.json 与 first_brief.md（结构重构时再写 restructure_note.md）'
+          + ' → 按交付前自检清单逐条审视、结论写进 self_check.md → draft_check → 用 draft_edit 修到全部通过 → 最终回复只需一句简短的交付确认，不必把大纲在回复里再抄一遍。',
+        '- 也可以照旧在最终回复里直接输出交付标签：回复里写了的标签以回复为准（同时回填进工作台），没写的从工作台取。');
+    }
     if (mode === 'native') {
-      lines.push('- 工具已随本次请求声明，直接发起函数调用即可（支持同轮并行调用多个只读工具）；收到返回结果后再继续查阅，或直接交付最终四段标签成果。');
+      lines.push('- 工具已随本次请求声明，直接发起函数调用即可：只读查阅可以同轮并行；draft_write / draft_edit 会按顺序逐个执行。收到返回结果后再继续，或直接交付。');
     } else {
       var textFormat = modules.agentProtocol && modules.agentProtocol.TEXT_FORMAT;
       if (textFormat) lines.push('', textFormat);
-      if (tools.length) lines.push('', '【可用只读工具】\n' + formatToolManual(tools));
+      if (tools.length) lines.push('', '【可用工具】\n' + formatToolManual(tools));
     }
     if (mounts.length) {
       lines.push('', '【可读挂载点】\n' + mounts.map(function (mount) {
@@ -924,7 +1479,8 @@
       expandUser(skillBody(skillRaw), userName),
       '---',
       '## 运行环境补充（Reader-II 分卷导演 · 总导演）',
-      environmentNotes('- 你正以「插件运行模式」工作：先用只读工具充分勘察，再一气呵成完成本卷动态大纲、交付前自检与最终交付；不寒暄、不复述要求、不解释你用了什么写作技巧。', userName, preferences)
+      environmentNotes('- 你正以「插件运行模式」工作：先用只读工具聚焦勘察，再在同一个会话里连贯完成本卷动态大纲、交付前自检与最终交付'
+        + (isObject(options) && options.draftKind ? '（边写边存进私有草稿工作台）' : '') + '；不寒暄、不复述要求、不解释你用了什么写作技巧。', userName, preferences)
     ];
     var toolGuide = buildPlannerToolGuide(options);
     if (toolGuide) parts.push(toolGuide);
@@ -952,10 +1508,10 @@
    */
   var PLANNER_TASK = [
     '## 编纲与交付任务（单会话连贯完成）',
-    '1. **充分勘察（不偷懒、无盲区）**：先依据上方世界书目录地图、变量全景探测与楼层提示，主动调用只读工具（read / grep / ls 及可用只读查询工具）深入查阅与本卷舞台、核心人物、关键规则、关系细节及现状相关的世界书原文、完整变量结构与必要早期楼层，直到对世界与现状没有明显信息盲区。',
-    '2. **一气呵成构思与撰稿**：按上方 Skill 的方法论，在同一条完整思路下连贯完成工况定性、原件锚定、卷核立意、核心人物独立关系网，并直接写出颗粒度饱满、现场能直接演起来的单卷动态大纲（板块 A–E，3–5 个弹性 Phase，每个 Phase 按规范写齐要点；板块 B 有 [新增] 角色时在末尾附「待建档角色要点」）。',
-    '3. **交付前自检**：按上方 Skill 的交付前自检清单逐条审视自己的草稿；**凡查出任何破绽或触发红线，立刻在正文中直接推翻重写到位**，直到全部过关再输出最终稿。',
-    '4. **最终交付格式**（只输出以下四段，标签之外不要有任何寒暄或多余解释）：',
+    '1. **聚焦勘察**：依据上方世界书目录地图、变量全景探测与楼层提示，按需调用只读工具（read / grep / ls 及可用只读查询工具）查清与本卷舞台、核心人物、关键规则、关系细节及现状直接相关的世界书原文、完整变量结构与必要早期楼层，直到对编纲没有明显信息盲区；与本卷无关的条目不必通读。',
+    '2. **构思并边写边落盘**：按上方 Skill 的方法论，在同一条完整思路下连贯完成工况定性、原件锚定、卷核立意、核心人物独立关系网（构思要点、原件锚点可以先记进 notes.md），然后用 draft_write 把颗粒度饱满、现场能直接演起来的单卷动态大纲分块写进 outline.md（板块 A–E，3–5 个弹性 Phase，每个 Phase 按规范写齐要点；板块 B 有 [新增] 角色时在末尾附「待建档角色要点」），再写 index.json 与 first_brief.md。',
+    '3. **交付前自检**：按上方 Skill 的交付前自检清单逐条审视草稿，结论写进 self_check.md；**凡查出任何破绽或触发红线，立刻用 draft_edit 在草稿里改到位**（不必整篇重写），再用 draft_check 预检，直到全部过关。',
+    '4. **交付**：工作台各槽位写好、draft_check 通过之后，最终回复只需一句简短的交付确认。不便使用工作台时，也可以在最终回复里只输出以下四段标签（标签之外不要有任何寒暄或多余解释）；各槽位的内容就是对应标签里的内容：',
     '',
     '<self_check>',
     '（逐项对应 Skill 的交付前自检清单，每项一行：写「通过」或「已修正：改了什么」）',
@@ -981,13 +1537,17 @@
     return [{ role: 'system', content: str(context.system) }, { role: 'user', content: user }];
   }
 
-  /* 构造编纲途中用户的自由插话消息。 */
-  function buildInterjectionMessage(text) {
+  /* 构造编纲途中用户的自由插话消息。options.workspace：草稿工作台里已经有稿子，只改受影响的地方。 */
+  function buildInterjectionMessage(text, options) {
+    var drafted = !!(options && options.workspace);
     return [
       '【用户实时插话（最高优先级：与此前构思或默认做法冲突时，一律以这里为准）】',
       str(text).trim(),
       '',
-      '请立刻结合此前已查到的资料处理用户的要求（若用户点名查看变量结构、核实世界书细节或追溯前文，请先调用只读工具查证原文，不要推说看不了），再按完整交付格式直接输出修正后的最终四段标签成果。'
+      '请立刻结合此前已查到的资料处理用户的要求（若用户点名查看变量结构、核实世界书细节或追溯前文，请先调用只读工具查证原文，不要推说看不了），'
+        + (drafted
+          ? '再用 draft_edit / draft_write 修改草稿工作台里受这条意见影响的部分（已写好、不受影响的板块不要重写），改完 draft_check，通过后回复一句简短的交付确认。'
+          : '再按完整交付格式输出修正后的最终成果（可以先用 draft_write 把各段落进草稿工作台，也可以直接输出四段标签）。')
     ].join('\n');
   }
 
@@ -1103,7 +1663,8 @@
         '- 重写前若涉及核实世界书设定、完整变量结构或更早历史楼层（特别是用户意见中要求查看或核实的内容），必须先主动调用只读工具（read / grep / ls 等）查阅原文，消除信息盲区后再落笔；严禁凭空猜测或推说看不了。',
         '- 完全尊重既成事实，严禁把玩家拗回原来的轨道；保留仍有活力的角色关系与客观时钟，顺着玩家的选择长出新的展开。',
         '- 板块 A、B、C、E 只改必须改的地方；板块 D 从当前时点起重新推演，Phase 从 1 重新连续编号（已经演完的阶段不再列入，在板块 A 用两三句交代前情）。',
-        '- 仍按 Skill 的大纲产出规范与交付前自检标准。只输出下面四段，标签之外不要有任何内容：'
+        '- 边写边落盘：用 draft_write 把重构后的大纲分块写进 outline.md（可以先把原大纲里仍然有效的板块写进去，再用 draft_edit 局部改），再写 index.json、first_brief.md、restructure_note.md，结论写进 self_check.md；draft_check 通过后回复一句简短的交付确认即可。',
+        '- 仍按 Skill 的大纲产出规范与交付前自检标准。不便使用工作台时，也可以在最终回复里只输出下面几段标签（标签之外不要有任何内容）；各槽位的内容就是对应标签里的内容：'
       ].join('\n')),
       ['<restructure_note>', '（80 字以内：为什么改、改了什么）', '</restructure_note>', DELIVERY_NOTES].join('\n')
     ]);
@@ -1614,6 +2175,13 @@
   function describeToolCall(name, args) {
     var tool = str(name).trim();
     var a = isObject(args) ? args : {};
+    if (/^draft_/.test(tool)) {
+      var file = clip(a.file, 40);
+      if (tool === 'draft_read') return file ? '查看草稿 ' + file + (Number(a.offset) > 1 ? '（第 ' + Math.trunc(Number(a.offset)) + ' 行起）' : '') : '查看草稿工作台总览';
+      if (tool === 'draft_write') return '写入草稿 ' + (file || '?') + (str(a.mode).toLowerCase() === 'append' ? '（追加 ' : '（') + formatCount(str(a.content).length) + ' 字）';
+      if (tool === 'draft_edit') return '修改草稿 ' + (file || '?');
+      if (tool === 'draft_check') return '预检草稿';
+    }
     var path = displayVfsPath(a.path || '');
     var mount = /^([A-Za-z][\w-]*):/.exec(path);
     var id = mount ? mount[1] : '';
@@ -1703,6 +2271,12 @@
     latestVersion: latestVersion, addVersion: addVersion,
     inferPhases: inferPhases, normalizeIndex: normalizeIndex, parseFinalOutline: parseFinalOutline, inspectSelfCheck: inspectSelfCheck,
     validateFinalDelivery: validateFinalDelivery, buildRevisionPrompt: buildRevisionPrompt, isSelfCheckOnly: isSelfCheckOnly, mergeSelfCheck: mergeSelfCheck, phaseTitle: phaseTitle,
+    /* 总导演的私有草稿工作台 */
+    DRAFT_SLOTS: DRAFT_SLOTS, WORKSPACE_LIMIT: WORKSPACE_LIMIT, draftSlots: draftSlots, draftSlot: draftSlot, emptyWorkspace: emptyWorkspace,
+    normalizeWorkspace: normalizeWorkspace, workspaceSummary: workspaceSummary, workspaceOverview: workspaceOverview, workspaceHasContent: workspaceHasContent,
+    workspaceOutline: workspaceOutline, workspaceRead: workspaceRead, workspaceWrite: workspaceWrite, workspaceEdit: workspaceEdit, checkWorkspace: checkWorkspace,
+    composeDelivery: composeDelivery, validateDelivery: validateDelivery, salvagePartial: salvagePartial, buildSalvageNote: buildSalvageNote,
+    buildWorkspaceNote: buildWorkspaceNote, buildGraceNote: buildGraceNote, buildFinaleNote: buildFinaleNote, formatCount: formatCount,
     parseVerdict: parseVerdict, applyVerdict: applyVerdict,
     mergePreferences: mergePreferences, buildPlannerSystem: buildPlannerSystem, buildPlannerMessages: buildPlannerMessages,
     buildInterjectionMessage: buildInterjectionMessage,

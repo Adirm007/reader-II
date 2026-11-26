@@ -35,7 +35,7 @@ const GENERATED_MODULES = new Set([ASSETS_MODULE, PROMPTS_MODULE, DEFAULTS_MODUL
 
 /* 顺序即依赖顺序：后面的模块在加载期会用到前面的。 */
 export const CORE_MODULES = [
-  'src/reader-env.js', 'src/reader-host-kit.js', 'src/reader-native-host.js', 'src/reader-agent-transport.js',
+  'src/reader-env.js', 'src/reader-host-kit.js', 'src/reader-native-host.js', 'src/reader-llm-stream.js', 'src/reader-agent-transport.js',
   'src/reader-media.js', 'src/reader-task-models.js', 'src/reader-llm-gateway.js',
   /* 语义层 */
   'src/reader-mvu-guard.js', 'src/reader-runtime-store.js', 'src/reader-economy.js', 'src/reader-host-adapter.js',

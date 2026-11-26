@@ -5,7 +5,7 @@ import { createServer } from 'node:http';
 import { readFileSync } from 'node:fs';
 
 const scope = vm.createContext({ URL, AbortController, Blob, btoa, setTimeout, clearTimeout });
-for (const file of ['reader-env','reader-media','reader-task-models','reader-llm-gateway']) {
+for (const file of ['reader-env','reader-media','reader-llm-stream','reader-task-models','reader-llm-gateway']) {
   vm.runInContext(readFileSync(new URL('../src/' + file + '.js', import.meta.url), 'utf8'), scope);
 }
 const messages = [{ role:'user', content:'请检查摘要' }];
@@ -339,4 +339,48 @@ test('gateway.chatTools 与 chatTaskTools 支持独立 api 与 modelOverride 路
     realUnsup.gateway.saveTaskConnection('director', { selected: rp.id });
     await assert.rejects(realUnsup.gateway.chatTaskTools({ kind: 'director', messages, tools, retries: 0 }), { code: 'no_native_tools' }, '应识别为 no_native_tools：' + errText);
   }
+});
+
+test('长任务可以要求流式：chatTask / chatTaskTools 透传 stream、onStream、allowEmpty；不要求时仍是原来的整份请求；没有流式模块的旧载体自动退回非流式', async () => {
+  const sse = (payload) => 'data: ' + JSON.stringify(payload) + '\n\n';
+  let mode = 'text';
+  const progress = [];
+  const { gateway:g, calls, add } = fixture((url, init, body) => {
+    if (url.endsWith('/models')) return Response.json({ data:[{ id:'flagship', context_length:200000 }] });
+    if (!body.stream) return Response.json({ choices:[{ message:{ content: mode === 'empty' ? '' : '整份正文' } }] });
+    const parts = mode === 'tools'
+      ? [sse({ choices:[{ delta:{ tool_calls:[{ index:0, id:'t1', function:{ name:'draft_read', arguments:'{"file":' } }] } }] }),
+        sse({ choices:[{ delta:{ tool_calls:[{ index:0, function:{ arguments:'"outline.md"}' } }] }, finish_reason:'tool_calls' }] })]
+      : [sse({ choices:[{ delta:{ reasoning_content:'先想想' } }] }), sse({ choices:[{ delta:{ content:'流式' } }] }), sse({ choices:[{ delta:{ content:'正文' }, finish_reason:'stop' }] })];
+    return new Response(parts.join('') + 'data: [DONE]\n\n', { headers:{ 'content-type':'text/event-stream' } });
+  });
+  g.saveAgentConnection({ selected:add('flagship').id });
+  assert.equal(await g.chatTask({ kind:'director', messages, stream:true, onStream:(p) => progress.push(p.phase) }), '流式正文');
+  assert.equal(calls.at(-1).body.stream, true);
+  assert.ok(progress.length > 0, '流式进度交到调用方');
+  mode = 'tools';
+  const reply = await g.chatTaskTools({ kind:'director', messages, tools:[{ type:'function', function:{ name:'draft_read', parameters:{ type:'object', properties:{} } } }], stream:true });
+  assert.deepEqual([reply.toolCalls[0].name, JSON.parse(reply.toolCalls[0].arguments).file, calls.at(-1).body.stream], ['draft_read', 'outline.md', true]);
+  mode = 'text';
+  assert.equal(await g.chatTask({ kind:'director', messages }), '整份正文');
+  assert.equal(calls.at(-1).body.stream, false, '不要求流式时照旧整份请求');
+  mode = 'empty';
+  assert.equal(await g.chatTask({ kind:'director', messages, allowEmpty:true }), '', '允许空回复时不当失败');
+  await assert.rejects(g.chatTask({ kind:'director', messages }), /未返回可用文本/);
+
+  /* 没加载流式模块的载体（旧的组合方式）：stream 被忽略，按原来的整份请求发。 */
+  const bare = vm.createContext({ URL, AbortController, Blob, btoa, setTimeout, clearTimeout });
+  for (const file of ['reader-env','reader-media','reader-task-models','reader-llm-gateway']) {
+    vm.runInContext(readFileSync(new URL('../src/' + file + '.js', import.meta.url), 'utf8'), bare);
+  }
+  const seen = [], bag = new Map();
+  const old = bare.__ReaderIIModules.createLlmGateway({ storage:{ getItem:k => bag.get(k), setItem:(k,v) => bag.set(k,v) },
+    host:{ fetch:async (url, init) => {
+      if (url.endsWith('/models')) return Response.json({ data:[{ id:'flagship' }] });
+      seen.push(JSON.parse(init.body));
+      return Response.json({ choices:[{ message:{ content:'旧载体' } }] });
+    } } });
+  old.saveAgentConnection({ selected:old.saveConnectionPreset({ name:'flagship', model:'flagship', source:'openai', apiurl:'https://flagship.test/v1', key:'k' }).id });
+  assert.equal(await old.chatTask({ kind:'director', messages, stream:true }), '旧载体');
+  assert.equal(seen.at(-1).stream, false);
 });

@@ -509,28 +509,89 @@
       });
     }
 
-    /* 一次请求：超时与取消都会通知酒馆停止对应生成。 */
-    function raceOnce(run, generationId, timeoutMs, signal) {
+    function timeoutError(text) {
+      var error = new Error(text);
+      error.name = 'TimeoutError';
+      error.code = 'timeout';
+      return error;
+    }
+
+    /*
+     * 流式失败（超时、断网、中止、流里报错）时把已经收到的正文挂在错误上：
+     *   partialText（去掉思考块的可见正文）、hasToolCalls（断在工具调用里：半截的调用没法用）、
+     *   streamStats（收到的字节、正文与思考的字数、耗时）、streamed: true。上层据此决定要不要抢救半稿。
+     */
+    function withPartial(error, collector) {
+      if (!collector || !collector.received()) return error;
+      var out = error instanceof Error ? error : new Error(String(error && error.message || error || '模型请求失败'));
+      try {
+        var partial = collector.partial();
+        out.partialText = partial.text;
+        out.hasToolCalls = partial.hasToolCalls;
+        out.streamStats = collector.stats();
+        out.streamed = true;
+      } catch (ignored) { /* 错误对象不可写时原样抛出 */ }
+      return out;
+    }
+
+    /* 流式已经吐出了实质正文：从头重试会把它丢掉，交给调用方抢救（总导演把半稿落进草稿工作台接着写）。 */
+    function keepsPartial(error) {
+      var min = modules.llmStream ? modules.llmStream.SALVAGE_MIN : 200;
+      return !!(error && error.streamed && !error.hasToolCalls && String(error.partialText || '').trim().length >= min);
+    }
+
+    /*
+     * 一次请求。超时与取消都会通知酒馆停止对应生成，并中止在途的网络请求（run 拿到的 signal 是这一次请求自己的）。
+     * watch.collector（流式接收器）：timeoutMs 改按「连续多久没有新数据」计——思考、正文、工具参数、保活注释都会重置计时；
+     * 另设一道绝对上限 max(6 × timeoutMs, 30 分钟)，防止异常的代理只发空心跳把连接永远挂住。
+     */
+    function raceOnce(run, generationId, timeoutMs, signal, watch) {
+      var Controller = env && env.host && env.host.AbortController || root.AbortController;
+      var inner = typeof Controller === 'function' ? new Controller() : null;
+      var collector = watch && watch.collector || null;
       return new Promise(function (resolve, reject) {
         var settled = false;
-        var timer = null;
+        var timer = null, hardTimer = null;
         function finish(fn, value) {
           if (settled) return;
           settled = true;
           if (timer) clearTimeout(timer);
+          if (hardTimer) clearTimeout(hardTimer);
           if (signal) signal.removeEventListener('abort', onAbort);
+          if (collector) collector.onActivity = null;
           fn(value);
         }
-        function onAbort() { stop(generationId); finish(reject, abortError()); }
+        function cut(error) {
+          if (settled) return;
+          stop(generationId);
+          finish(reject, withPartial(error, collector));
+          if (inner) { try { inner.abort(); } catch (ignored) { /* 请求已经结束 */ } }
+        }
+        function onAbort() { cut(abortError()); }
+        function onIdle() {
+          cut(timeoutError(collector ? '模型响应超时（连续 ' + Math.round(timeoutMs / 1000) + ' 秒没有收到新数据）' : '模型响应超时（' + Math.round(timeoutMs / 1000) + ' 秒）'));
+        }
         if (signal) {
           if (signal.aborted) { reject(abortError()); return; }
           signal.addEventListener('abort', onAbort, { once: true });
         }
-        if (timeoutMs > 0) timer = setTimeout(function () {
-          stop(generationId);
-          finish(reject, new Error('模型响应超时（' + Math.round(timeoutMs / 1000) + ' 秒）'));
-        }, timeoutMs);
-        Promise.resolve().then(run).then(function (value) { finish(resolve, value); }, function (error) { finish(reject, error); });
+        if (timeoutMs > 0) {
+          timer = setTimeout(onIdle, timeoutMs);
+          if (collector) {
+            collector.onActivity = function () {
+              if (settled) return;
+              clearTimeout(timer);
+              timer = setTimeout(onIdle, timeoutMs);
+            };
+            var hardMs = Math.max(timeoutMs * 6, 30 * 60 * 1000);
+            hardTimer = setTimeout(function () {
+              cut(timeoutError('模型响应超时（流式输出超过 ' + Math.round(hardMs / 60000) + ' 分钟的总时长上限）'));
+            }, hardMs);
+          }
+        }
+        Promise.resolve().then(function () { return run(inner ? inner.signal : signal); }).then(function (value) { finish(resolve, value); }, function (error) {
+          finish(reject, withPartial(error, collector));
+        });
       });
     }
 
@@ -612,10 +673,19 @@
       return script.extractMessageFromData(JSON.parse(await response.text()), ctx.mainApi);
     }
 
+    /* 这一次请求用的流式接收器：调用方要了 stream，而且流式模块在场。每次尝试各用一个新的。 */
+    function streamCollector(request) {
+      if (request.stream !== true || !modules.llmStream || typeof modules.llmStream.createCollector !== 'function') return null;
+      return modules.llmStream.createCollector({ onProgress: typeof request.onStream === 'function' ? request.onStream : null });
+    }
+
     /*
      * 多轮消息生成。request:
      *   messages [{role, content}]  route  maxTokens  temperature  timeoutMs  retries  signal  jsonSchema
-     * 返回文本；空回复与瞬时错误按 retries 重试。
+     *   stream      true：能流式的通道（酒馆后端、直连）边收边读，timeoutMs 改为空闲超时；别的通道照旧整份返回
+     *   onStream    流式进度回调（节流过的）：{ phase, textChars, reasoningChars, toolName, toolChars, … }
+     *   allowEmpty  空回复不算失败（总导演的草稿工作台已经写好时，最后一句确认可以是空的）
+     * 返回文本；空回复与瞬时错误按 retries 重试。流式已经吐出实质正文后断开的，不从头重试，错误上带着 partialText。
      */
     async function chat(input, rich) {
       var request = Object.assign({}, input || {});
@@ -632,31 +702,33 @@
       for (var attempt = 0; attempt <= retries; attempt += 1) {
         if (request.signal && request.signal.aborted) throw abortError();
         var generationId = String(request.generationId || 'reader-llm') + '-' + Date.now().toString(36) + '-' + (++sequence).toString(36);
+        var collector = streamCollector(request);
         try {
-          var result = await raceOnce(async function () {
+          var result = await raceOnce(async function (signal) {
+            var live = Object.assign({}, request, { signal: signal, streamCollector: collector });
             if (isolatedRoute(request)) {
               var ctx = nativeContext();
               if (ctx && typeof ctx.getRequestHeaders === 'function' && (api || ctx.mainApi === 'openai')) {
-                var options = Object.assign({}, request, { timeoutMs: timeoutMs, tools: undefined, toolChoice: undefined });
+                var options = Object.assign({}, live, { timeoutMs: timeoutMs, tools: undefined, toolChoice: undefined });
                 return api ? backendRequest(api, messages, options) : mainRequest(messages, options);
               }
-              if (api && hostFetch()) return directRequest(api, messages, request);
+              if (api && hostFetch()) return directRequest(api, messages, live);
               if (ctx && ctx.mainApi === 'textgenerationwebui' && typeof ctx.getRequestHeaders === 'function' && env.hostImport && hostFetch()) {
                 var textApi = await env.hostImport('/scripts/textgen-settings.js').catch(function () { return null; });
                 if (textApi && textApi.textgenerationwebui_settings && typeof textApi.getTextGenModel === 'function' && typeof textApi.getTextGenServer === 'function') {
-                  return isolatedTextCompletion(ctx, textApi, messages, request);
+                  return isolatedTextCompletion(ctx, textApi, messages, live);
                 }
               }
             }
             if (!generateRaw) {
               /* 没有酒馆助手：独立 API 经酒馆后端代发（同源，不受跨域限制）；没有酒馆后端时才由浏览器直连。否则走酒馆原生的 generateRaw。 */
               if (api) {
-                var plain = { maxTokens: request.maxTokens, temperature: request.temperature, signal: request.signal };
+                var plain = { maxTokens: request.maxTokens, temperature: request.temperature, signal: signal, streamCollector: collector };
                 var backendCtx = nativeContext();
                 if (backendCtx && typeof backendCtx.getRequestHeaders === 'function' && hostFetch()) {
                   return backendRequest(api, messages, plain);
                 }
-                return directRequest(api, messages, request);
+                return directRequest(api, messages, live);
               }
               var native = nativeContext();
               if (native && typeof native.generateRaw === 'function') {
@@ -683,7 +755,7 @@
               if (typeof request.temperature === 'number' && Number.isFinite(request.temperature)) config.custom_api.temperature = request.temperature;
             }
             return generateRaw(config);
-          }, generationId, timeoutMs, request.signal);
+          }, generationId, timeoutMs, request.signal, collector ? { collector: collector } : null);
           if (isolatedRoute(request) || rich) {
             if (request.checkProviderStop && result && typeof result === 'object') {
               var firstChoice = result.choices && result.choices[0], providerMessage = firstChoice && firstChoice.message;
@@ -696,15 +768,22 @@
             var parsed = parseToolResponse(result, !!rich && !request.textOnly);
             if (parsed.toolCalls.length) throw new Error('模型为文本请求返回了未声明的工具调用，本次没有执行');
             if (rich && (parsed.text.trim() || parsed.images.length)) return parsed;
-            if (!parsed.text.trim()) throw new Error('LLM 未返回可用文本');
+            if (!parsed.text.trim()) {
+              if (request.allowEmpty === true) return rich ? parsed : '';
+              throw new Error('LLM 未返回可用文本');
+            }
             return parsed.text;
           }
           var text = responseText(result);
-          if (!text.trim()) throw new Error('LLM 未返回可用文本');
+          if (!text.trim()) {
+            if (request.allowEmpty === true) return '';
+            throw new Error('LLM 未返回可用文本');
+          }
           return text;
         } catch (error) {
           lastError = error;
           if (error && error.name === 'AbortError') throw error;
+          if (keepsPartial(error)) throw error;
           var message = String(error && error.message || error);
           if (attempt >= retries || !TRANSIENT.test(message)) throw error;
           await delay(1200 * (attempt + 1), request.signal);
@@ -1171,17 +1250,66 @@
       return sendBackendBody(ctx, fetcher, body, request, '独立 API');
     }
 
+    /*
+     * 这份请求体流式时回来的是哪一种 SSE（reader-llm-stream.js 认得 openai / anthropic / gemini 三种）。
+     * 认不准的来源返回空串，照旧整份请求：Responses API、Cohere 等事件格式不同，拼不回响应就是白断一次。
+     */
+    function streamFormat(body) {
+      var source = String(body.chat_completion_source || 'openai').toLowerCase();
+      var custom = String(body.custom_api_format || '').trim().toLowerCase();
+      var opencode = String(body.opencode_api_format || '').trim().toLowerCase();
+      if (source === 'claude') return 'anthropic';
+      if (source === 'makersuite') return 'gemini';
+      if (source === 'vertexai') return /(?:^|\/)claude-/i.test(String(body.model || '')) ? '' : 'gemini';
+      if (source === 'custom') return !custom || custom === 'openai_compat' ? 'openai' : custom === 'claude_messages' ? 'anthropic' : custom === 'gemini_generate_content' ? 'gemini' : '';
+      if (source === 'opencode') return !opencode || /^openai(?:_compat)?$/.test(opencode) ? 'openai' : opencode === 'claude_messages' ? 'anthropic' : opencode === 'gemini' ? 'gemini' : '';
+      if (source === 'openai') return String(body.openai_api_format || '').trim().toLowerCase() === 'openai_responses' ? '' : 'openai';
+      if (source === 'cohere') return '';
+      return 'openai';
+    }
+
+    /* 上游明确不接受 stream 参数的连接（按来源、地址与模型记），这一次会话里不再试流式。 */
+    var noStream = Object.create(null);
+    function streamKey(body, url) {
+      return [body.chat_completion_source || 'direct', url || body.custom_url || body.reverse_proxy || '', body.model || ''].join('|');
+    }
+    /* 流式请求被拒、报错里点名了 stream：多半是这个接口（或它跟工具一起时）不支持流式，换非流式能解决。 */
+    function streamRejected(error) {
+      if (error && error.streamRejected === true) return true;
+      var status = Number(error && error.status);
+      if ([400, 404, 405, 415, 422, 501].indexOf(status) < 0) return false;
+      var detail = String(error && error.message || error || '');
+      return /\bstream(?:ing)?\b/i.test(detail) && !NOT_UNSUPPORTED_DETAIL.test(detail);
+    }
+
     async function sendBackendBody(ctx, fetcher, body, request, label) {
       var data;
-      if (isolatedRoute(request) && modules.hasAgentCompletionTransport && modules.hasAgentCompletionTransport(env)) {
-        try { data = await modules.sendAgentCompletion(env, body, request.signal, request.timeoutMs); }
-        catch (error) {
-          var detail = String(error && error.message || error || '').slice(0, 300);
-          if (body.tools && looksUnsupported(error && error.status, detail)) throw unsupportedError('当前连接不接受原生函数调用（' + detail + '）');
-          throw error;
+      var viaTransport = isolatedRoute(request) && modules.hasAgentCompletionTransport && modules.hasAgentCompletionTransport(env);
+      var collector = request.streamCollector || null;
+      if (collector && (!streamFormat(body) || noStream[streamKey(body)])) collector = null;
+      /* TauriTavern 的宿主 ABI 一次性返回整份 JSON：保持非流式。 */
+      if (collector && viaTransport && !(modules.agentCompletionStreams && modules.agentCompletionStreams(env))) collector = null;
+      body.stream = !!collector;
+      try {
+        if (viaTransport) {
+          try { data = await modules.sendAgentCompletion(env, body, request.signal, collector ? 0 : request.timeoutMs, collector ? { collector: collector } : undefined); }
+          catch (error) {
+            if (collector && !collector.received() && streamRejected(error)) throw Object.assign(error, { streamRejected: true });
+            var detail = String(error && error.message || error || '').slice(0, 300);
+            if (body.tools && looksUnsupported(error && error.status, detail)) throw unsupportedError('当前连接不接受原生函数调用（' + detail + '）');
+            throw error;
+          }
+        } else {
+          data = await fetchBackendBody(ctx, fetcher, body, request, label, collector);
         }
-      } else {
-        data = await fetchBackendBody(ctx, fetcher, body, request, label);
+      } catch (error) {
+        /* 上游不接受 stream 参数：记下这条连接，立刻按非流式重发一次（不算重试）。 */
+        if (collector && !collector.received() && streamRejected(error)) {
+          noStream[streamKey(body)] = true;
+          body.stream = false;
+          return sendBackendBody(ctx, fetcher, body, Object.assign({}, request, { streamCollector: null }), label);
+        }
+        throw error;
       }
       if (data && data.quota_error) throw Object.assign(new Error(label + ' 配额不足'), { code:'insufficient_quota', status:429 });
       if (data && data.error) {
@@ -1195,14 +1323,23 @@
       return data;
     }
 
-    async function fetchBackendBody(ctx, fetcher, body, request, label) {
+    /* 流式响应体：有读取器就边收边喂给接收器，没有就整段读完再喂（接收器认得出它是不是 SSE）。 */
+    function readStream(response, collector) {
+      var Decoder = env && env.host && env.host.TextDecoder || root.TextDecoder;
+      return modules.llmStream.readResponse(response, collector, Decoder);
+    }
+
+    async function fetchBackendBody(ctx, fetcher, body, request, label, collector) {
       var headers = Object.assign({ 'Content-Type': 'application/json' }, ctx.getRequestHeaders() || {});
       var response = await fetcher('/api/backends/chat-completions/generate', { method: 'POST', headers: headers, body: JSON.stringify(body), signal: request.signal, cache: 'no-cache' });
       if (!response.ok) {
         var detail = await readFailure(response);
+        var failure = Object.assign(new Error(label + ' 返回 HTTP ' + response.status + '：' + detail), { status: response.status });
+        if (collector && streamRejected(failure)) throw Object.assign(failure, { streamRejected: true });
         if (body.tools && looksUnsupported(response.status, detail)) throw unsupportedError('这个接口不接受原生函数调用（HTTP ' + response.status + '：' + detail + '）');
-        throw Object.assign(new Error(label + ' 返回 HTTP ' + response.status + '：' + detail), { status: response.status });
+        throw failure;
       }
+      if (collector) return readStream(response, collector);
       /* 展示用预设可以改写 Response 实例的 json()，把调用消费为正文；助手需要同一次响应的协议数据。 */
       return isolatedRoute(request) || body.tools ? JSON.parse(await response.text()) : response.json();
     }
@@ -1212,14 +1349,24 @@
       if (!fetcher) throw new Error('当前环境不能直连独立 API');
       var headers = { 'Content-Type': 'application/json' };
       if (api.key) headers.Authorization = 'Bearer ' + api.key;
+      var url = String(api.apiurl).replace(/\/+$/, '') + '/chat/completions';
       var body = requestBody(api, messages, request);
       Object.assign(body, compatibleParameters(api.model, request));
-      var response = await fetcher(String(api.apiurl).replace(/\/+$/, '') + '/chat/completions', { method: 'POST', headers: headers, body: JSON.stringify(body), signal: request.signal });
+      var collector = request.streamCollector && !noStream[streamKey(body, url)] ? request.streamCollector : null;
+      body.stream = !!collector;
+      var response = await fetcher(url, { method: 'POST', headers: headers, body: JSON.stringify(body), signal: request.signal });
       if (!response.ok) {
         var detail = await readFailure(response);
+        var failure = Object.assign(new Error('独立 API 返回 HTTP ' + response.status + '：' + detail), { status: response.status });
+        /* 上游不接受 stream 参数：记下这条连接，立刻按非流式重发一次（不算重试）。 */
+        if (collector && streamRejected(failure)) {
+          noStream[streamKey(body, url)] = true;
+          return directRequest(api, messages, Object.assign({}, request, { streamCollector: null }));
+        }
         if (body.tools && looksUnsupported(response.status, detail)) throw unsupportedError('这个接口不接受原生函数调用（HTTP ' + response.status + '：' + detail + '）');
-        throw Object.assign(new Error('独立 API 返回 HTTP ' + response.status + '：' + detail), { status: response.status });
+        throw failure;
       }
+      if (collector) return readStream(response, collector);
       return body.tools ? JSON.parse(await response.text()) : response.json();
     }
 
@@ -1280,6 +1427,13 @@
         if (['refusal', 'content_filter', 'max_tokens', 'length', 'model_context_window_exceeded'].indexOf(stopReason) !== -1) {
           var stopped = new Error('模型已停止生成（' + stopReason + '），本批工具未执行。');
           stopped.code = 'provider_stop';
+          stopped.stopReason = stopReason;
+          /* 写到长度上限被截断：已经写出的正文带在错误上，调用方可以把它抢救下来接着写，而不是整篇重来。 */
+          if (stopReason === 'max_tokens' || stopReason === 'length') {
+            var cutReply = parseToolResponse(completion);
+            stopped.partialText = cutReply.text;
+            stopped.hasToolCalls = cutReply.toolCalls.length > 0;
+          }
           throw stopped;
         }
         return completion;
@@ -1315,7 +1469,8 @@
      *   messages  OpenAI 形状，可含 assistant.tool_calls 与 role: 'tool'
      *   tools     [{ type: 'function', function: { name, description, parameters } }]；toolChoice: 'auto' | 'required' | 'none'
      *   route  maxTokens  temperature  timeoutMs  retries  signal
-     * 返回 parseToolResponse 的结果，另带 via（走了哪条通道）。通道或接口不支持时抛 code === 'no_native_tools' 的错误。
+     *   stream / onStream / allowEmpty  同 chat()：流式接收（timeoutMs 改为空闲超时）、进度回调、允许空回复
+     * 返回 parseToolResponse 的结果，另带 via（走了哪条通道；流式时还有 stream 统计）。通道或接口不支持时抛 code === 'no_native_tools' 的错误。
      */
     async function chatTools(input) {
       var request = modules.isObject(input) ? Object.assign({}, input) : {};
@@ -1334,12 +1489,14 @@
       var lastError = null;
       for (var attempt = 0; attempt <= retries; attempt += 1) {
         if (request.signal && request.signal.aborted) throw abortError();
+        var collector = streamCollector(request);
         try {
-          var data = await raceOnce(function () {
-            if (support.via === 'backend') return backendRequest(api, messages, Object.assign({ timeoutMs: timeoutMs }, request));
-            if (support.via === 'direct') return directRequest(api, messages, Object.assign({ timeoutMs: timeoutMs }, request));
-            return mainRequest(messages, Object.assign({ timeoutMs: timeoutMs }, request));
-          }, '', timeoutMs, request.signal);
+          var data = await raceOnce(function (signal) {
+            var live = Object.assign({ timeoutMs: timeoutMs }, request, { signal: signal, streamCollector: collector });
+            if (support.via === 'backend') return backendRequest(api, messages, live);
+            if (support.via === 'direct') return directRequest(api, messages, live);
+            return mainRequest(messages, live);
+          }, '', timeoutMs, request.signal, collector ? { collector: collector } : null);
           if (request.checkProviderStop && data && typeof data === 'object') {
             var firstChoice = data.choices && data.choices[0], providerMessage = firstChoice && firstChoice.message;
             var reason = data.promptFeedback && data.promptFeedback.blockReason || data.stop_reason ||
@@ -1349,12 +1506,14 @@
             }
           }
           var parsed = parseToolResponse(data, !request.textOnly);
-          if (!parsed.text.trim() && !parsed.images.length && !parsed.toolCalls.length && !/^(?:tool_calls|function_call|tool_use)$/.test(parsed.finish)) throw new Error('LLM 未返回可用文本');
+          if (!parsed.text.trim() && !parsed.images.length && !parsed.toolCalls.length && !/^(?:tool_calls|function_call|tool_use)$/.test(parsed.finish) && request.allowEmpty !== true) throw new Error('LLM 未返回可用文本');
           parsed.via = support.via;
+          if (collector && collector.received()) parsed.stream = collector.stats();
           return parsed;
         } catch (error) {
           lastError = error;
           if (error && (error.name === 'AbortError' || error.code === 'no_native_tools' || error.code === 'provider_stop')) throw error;
+          if (keepsPartial(error)) throw error;
           var message = String(error && error.message || error);
           if (attempt >= retries || !TRANSIENT.test(message)) throw error;
           await delay(1200 * (attempt + 1), request.signal);

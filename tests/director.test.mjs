@@ -1662,6 +1662,30 @@ test('世界书全量目录索引不遗漏末尾绿灯条目；变量全景探�
 });
 
 /* 为真 Agent 测试构建带独立 API 原生工具后端、多源变量与多条目世界书的宿主。 */
+/* 流式响应：body.getReader() 一段段交出 pieces；遇到 Error 就在那一段抛出（模拟中途断网）。 */
+function sseResponse(pieces, signal) {
+  const enc = new TextEncoder();
+  let index = 0;
+  return {
+    ok: true, status: 200, headers: { get: () => 'text/event-stream' },
+    body: {
+      getReader: () => ({
+        async read() {
+          await sleep(2);
+          if (signal && signal.aborted) throw Object.assign(new Error('Aborted'), { name: 'AbortError' });
+          if (index >= pieces.length) return { done: true, value: undefined };
+          const piece = pieces[index++];
+          if (piece instanceof Error) throw piece;
+          return { done: false, value: enc.encode(piece) };
+        },
+        releaseLock() {},
+      }),
+    },
+    text: async () => { throw new Error('流式响应不该整段读'); },
+  };
+}
+const sseDelta = (delta, finish = null) => 'data: ' + JSON.stringify({ choices: [{ index: 0, delta: typeof delta === 'string' ? { content: delta } : delta, finish_reason: finish }] }) + '\n\n';
+
 function makeNativeDirectorHost(options = {}) {
   const backendCalls = [];
   const chat = options.chat || [
@@ -1704,6 +1728,8 @@ function makeNativeDirectorHost(options = {}) {
     if (url === '/api/backends/chat-completions/generate' || url.endsWith('/chat/completions')) {
       backendCalls.push({ url, body: plain(body), headers: plain(init.headers) });
       const res = await options.backend(body, backendCalls.length, init.signal);
+      /* { sse: [文字段, …, Error] }：按段流式交付，遇到 Error 就在那里断开（模拟断网）。 */
+      if (res && Array.isArray(res.sse)) return sseResponse(res.sse, init.signal);
       const status = res && res.status ? res.status : 200;
       const payload = res && res.status ? res.body : res;
       return { ok: status < 400, status, headers: { get: () => 'application/json' }, text: async () => JSON.stringify(payload), json: async () => plain(payload) };
@@ -1712,6 +1738,8 @@ function makeNativeDirectorHost(options = {}) {
   };
 
   const h = makeHost({ chat, storage, fetch, agentSettings: options.agentSettings, directorSettings: options.directorSettings });
+  /* 有 TextDecoder，网关才会用 body.getReader() 边收边读流式响应；没有 body 的假响应照旧整段读。 */
+  h.host.TextDecoder = TextDecoder;
   /* 覆盖世界书与变量读取接口，模拟真实酒馆中的多源变量（MVU + 小白X聊天变量 + 角色卡变量） */
   Object.keys(h.worldbooks).forEach((k) => delete h.worldbooks[k]);
   Object.assign(h.worldbooks, worldbooks);
@@ -1847,7 +1875,9 @@ test('编纲与重构不再有「4 步」：任务牌不带步数（steps: 0）�
       return nativeReply({ content: delivery(OUTLINE, INDEX, brief('Phase 1 · 雨夜')) });
     },
   });
-  const AGENT_KEYS = ['state', 'activity', 'activityLabel', 'stage', 'rounds', 'toolCalls', 'revisions', 'maxRevisions', 'hasCheckpoint', 'canForceCommit', 'feedback', 'lastOutput', 'error', 'updatedAt'];
+  const AGENT_KEYS = ['state', 'activity', 'activityLabel', 'stage', 'rounds', 'toolCalls', 'revisions', 'maxRevisions', 'hasCheckpoint', 'canForceCommit', 'feedback', 'lastOutput', 'error', 'updatedAt',
+    /* 草稿工作台与实时流式进度 */
+    'workspace', 'draftFiles', 'draftOps', 'partialChars', 'stream'];
   const jobsSeen = [], planSeen = [], restructureSeen = [];
   let restructureShape = null;
   try {
@@ -2722,4 +2752,342 @@ test('第三轮修复回归：过期重构断点不挡自动 L2、自检转折�
     assert.deepEqual(plain(await hFake.director.activate()), { done: true });
     assert.equal(hFake.director.getStatus().volume.title, INDEX.title);
   } finally { hFake.dispose(); }
+});
+
+/* ========================================================================================================
+ * 8. 总导演的私有草稿工作台、流式接收与断流抢救
+ * ====================================================================================================== */
+
+const toolRounds = (body) => body.messages.filter((m) => m.role === 'assistant' && Array.isArray(m.tool_calls) && m.tool_calls.length).length;
+const lastUser = (body) => String([...body.messages].reverse().find((m) => m.role === 'user')?.content || '');
+const toolResults = (body) => {
+  const out = [];
+  for (let i = body.messages.length - 1; i >= 0 && body.messages[i].role === 'tool'; i -= 1) out.unshift(String(body.messages[i].content));
+  return out;
+};
+/* 断点挑在一行的中间：前后都不是空白，拼接结果才能逐字对上。 */
+function midLine(text, from) {
+  let at = from;
+  while (/\s/.test(text[at - 1]) || /\s/.test(text[at])) at += 1;
+  return at;
+}
+
+test('草稿工作台（纯逻辑）：固定槽位白名单拒绝路径穿越、replace / append / edit、交付合成与回填、半稿与续写拼接、预检', () => {
+  let ws = core.emptyWorkspace();
+  /* 1. 只认固定的逻辑文件名：路径、挂载点、穿越、未知文件一律拒绝；restructure_note.md 只给结构重构。 */
+  for (const bad of ['../outline.md', 'wb:/命定之诗/格温', 'outline.md/../x', '/outline.md', 'ws:/director/x', 'C:\\outline.md', 'secret.md', '..', '']) {
+    const out = core.workspaceWrite(ws, 'plan', { file: bad, content: '内容' });
+    assert.equal(out.ok, false, bad);
+    assert.match(out.error, /草稿槽位/);
+  }
+  assert.match(core.workspaceWrite(ws, 'plan', { file: 'restructure_note.md', content: '说明' }).error, /只在结构重构时可用/);
+  assert.equal(core.workspaceWrite(ws, 'restructure', { file: 'restructure_note', content: '说明' }).ok, true, '不带扩展名的槽位名也认');
+
+  /* 2. 分块写：先 A+B，再 append C–E。 */
+  const split = OUTLINE.indexOf('### 板块 C');
+  let out = core.workspaceWrite(ws, 'plan', { file: 'outline.md', content: OUTLINE.slice(0, split).trim() });
+  assert.ok(out.ok && out.changed);
+  assert.match(out.text, /板块 A–B/);
+  ws = out.ws;
+  out = core.workspaceWrite(ws, 'plan', { file: 'outline.md', mode: 'append', content: OUTLINE.slice(split) });
+  ws = out.ws;
+  let sum = core.workspaceSummary(ws, 'plan');
+  assert.deepEqual([sum.sectionRange, sum.phases.length, sum.hasIndex, sum.ready, sum.partial.length], ['A–E', 3, false, false, 0]);
+  assert.match(core.workspaceWrite(ws, 'plan', { file: 'outline.md', mode: 'insert', content: 'x' }).error, /mode 只能是/);
+  out = core.workspaceWrite(ws, 'plan', { file: 'outline.md', content: core.workspaceOutline(ws) });
+  assert.deepEqual([out.ok, out.changed], [true, false], '内容没变不算改动');
+
+  /* 3. 局部修改：与 VFS edit 同口径。 */
+  out = core.workspaceEdit(ws, 'plan', { file: 'outline.md', old: '耳背，', new: '耳背，爱哼小调，' });
+  assert.ok(out.ok && out.changed);
+  ws = out.ws;
+  assert.ok(core.workspaceOutline(ws).includes('耳背，爱哼小调，'));
+  assert.match(core.workspaceEdit(ws, 'plan', { file: 'outline.md', old: '### 板块', new: '### 板' }).error, /出现了 5 次/);
+  assert.match(core.workspaceEdit(ws, 'plan', { file: 'outline.md', old: '没有这一句' }).error, /没有找到/);
+  assert.match(core.workspaceEdit(ws, 'plan', { file: 'outline.md', old: '    2\t旧港的雨季。' }).error, /行号/);
+  assert.match(core.workspaceEdit(ws, 'plan', { file: 'first_brief.md', old: 'x' }).error, /还是空的/);
+
+  /* 4. 模型把整份交付写进了一个槽位：按标签分别写进各自的槽位。 */
+  const spread = core.workspaceWrite(core.emptyWorkspace(), 'plan', { file: 'outline.md', content: delivery(OUTLINE, INDEX, brief('分发')) });
+  assert.deepEqual(Object.keys(spread.ws.files).sort(), ['first_brief.md', 'index.json', 'outline.md', 'self_check.md']);
+  assert.equal(core.workspaceOutline(spread.ws), OUTLINE);
+  /* 5. 上限：超限一个字都不写。 */
+  const huge = core.workspaceWrite(core.emptyWorkspace(), 'plan', { file: 'first_brief.md', content: '字'.repeat(9000) });
+  assert.equal(huge.ok, false);
+  assert.match(huge.error, /上限/);
+
+  /* 6. 读：总览与带行号的分段正文。 */
+  assert.match(core.workspaceRead(ws, 'plan', {}).text, /outline\.md（本卷动态大纲（板块 A–E））：[\d,]+ 字/);
+  const page = core.workspaceRead(ws, 'plan', { file: 'outline.md', offset: 2, limit: 2 }).text;
+  assert.match(page, /^outline\.md：共 \d+ 行/);
+  assert.match(page, /\n {4}2\t旧港的雨季/);
+  assert.match(page, /继续读用 offset=4/);
+
+  /* 7. 交付合成：一句确认 → 全取工作台；回复里写了的标签以回复为准并回填。 */
+  ws = core.workspaceWrite(ws, 'plan', { file: 'index.json', content: JSON.stringify(INDEX) }).ws;
+  ws = core.workspaceWrite(ws, 'plan', { file: 'first_brief.md', content: brief('工作台') }).ws;
+  assert.equal(core.workspaceSummary(ws, 'plan').ready, true);
+  const confirm = core.validateDelivery('都写进草稿工作台了，交付。', ws, 'plan', { userName: '林渡' });
+  assert.equal(confirm.ok, true, confirm.issues.join('；'));
+  assert.ok(confirm.final.firstBrief.includes('工作台') && confirm.final.index.totalPhases === 3);
+  const replyWins = core.validateDelivery('<first_brief>\n' + brief('回复为准') + '\n</first_brief>', ws, 'plan', { userName: '林渡' });
+  assert.equal(replyWins.ok, true);
+  assert.ok(replyWins.final.firstBrief.includes('回复为准'));
+  assert.deepEqual(plain(replyWins.composed.backfilled), ['first_brief.md']);
+  assert.ok(core.workspaceRead(replyWins.workspace, 'plan', { file: 'first_brief.md' }).text.includes('回复为准'), '回复里的标签回填进工作台');
+
+  /* 8. 回复里的大纲写到一半断了：存成半稿、算硬伤（不当定稿）；续写带上 </volume_outline> 就拼回完整的一份。 */
+  const cut = midLine(OUTLINE, OUTLINE.indexOf('#### Phase 2') + 6);
+  const truncated = core.validateDelivery('<volume_outline>\n' + OUTLINE.slice(0, cut), ws, 'plan', { userName: '林渡' });
+  assert.equal(truncated.ok, false);
+  assert.match(truncated.hardIssues[0], /大纲没有写完就断了.*outline\.md 的半稿/);
+  assert.deepEqual(plain(truncated.composed.partial), ['outline.md']);
+  const resumed = core.validateDelivery(OUTLINE.slice(cut) + '\n</volume_outline>', truncated.workspace, 'plan', { userName: '林渡' });
+  assert.equal(resumed.ok, true, resumed.issues.join('；'));
+  assert.equal(resumed.final.outline, OUTLINE);
+  assert.equal(resumed.workspace.files['outline.md'].partial, false);
+
+  /* 9. 断流抢救：闭合段替换、没写完的存半稿、不带标签的续文接在半稿后面；append 到半稿上按断点拼接并清掉半稿标记。 */
+  const cut2 = midLine(OUTLINE, cut + 40);
+  let sal = core.salvagePartial(core.emptyWorkspace(), '<self_check>\n1. 通过\n</self_check>\n<volume_outline>\n' + OUTLINE.slice(0, cut), 'plan');
+  assert.deepEqual(plain(sal.saved.map((item) => [item.file, item.partial])), [['outline.md', true], ['self_check.md', false]]);
+  sal = core.salvagePartial(sal.workspace, OUTLINE.slice(cut, cut2), 'plan');
+  assert.equal(core.workspaceOutline(sal.workspace), OUTLINE.slice(0, cut2));
+  assert.equal(sal.workspace.files['outline.md'].partial, true);
+  const appended = core.workspaceWrite(sal.workspace, 'plan', { file: 'outline.md', mode: 'append', content: OUTLINE.slice(cut2) });
+  assert.equal(core.workspaceOutline(appended.ws), OUTLINE);
+  assert.equal(appended.ws.files['outline.md'].partial, false);
+  const kept = core.salvagePartial(appended.ws, '<volume_outline>\n### 板块 A：半截的新版本', 'plan');
+  assert.equal(core.workspaceOutline(kept.workspace), OUTLINE, '半截的新版本不覆盖完整的大纲');
+  assert.match(core.workspaceRead(kept.workspace, 'plan', { file: 'notes.md' }).text, /没有覆盖已有的完整版本/);
+  assert.match(core.buildSalvageNote(sal, '长时间没有收到新数据', 'plan'), /断点续写[\s\S]*outline\.md[\s\S]*半稿[\s\S]*mode=append/);
+
+  /* 10. 预检：自检残留是软问题；draft_edit 改掉之后全部通过。 */
+  let check = core.checkWorkspace(ws, 'plan', { userName: '林渡' });
+  assert.equal(check.ok, true);
+  assert.match(check.text, /草稿预检：全部通过/);
+  assert.ok(check.warnings.some((note) => note.includes('self_check.md')));
+  ws = core.workspaceWrite(ws, 'plan', { file: 'self_check.md', content: '1. 通过\n2. 命名嗅探：未通过，有罐头名' }).ws;
+  check = core.checkWorkspace(ws, 'plan', { userName: '林渡' });
+  assert.deepEqual([check.ok, check.hard.length, check.soft.length], [false, 0, 1]);
+  ws = core.workspaceEdit(ws, 'plan', { file: 'self_check.md', old: '未通过，有罐头名', new: '已修正：换成旧港本土地名' }).ws;
+  assert.equal(core.checkWorkspace(ws, 'plan', { userName: '林渡' }).ok, true);
+
+  /* 11. 读回来的工作台按类型收敛：未知槽位丢掉、超长截断并标成半稿。 */
+  const dirty = core.normalizeWorkspace({ rev: 3, files: { 'outline.md': { text: 'x'.repeat(130000) }, '../evil.md': { text: 'bad' }, 'notes.md': '纯字符串也认', 'restructure_note.md': { text: '编纲里没有' } } }, 'plan');
+  assert.deepEqual(Object.keys(dirty.files).sort(), ['notes.md', 'outline.md']);
+  assert.deepEqual([dirty.rev, dirty.files['outline.md'].text.length, dirty.files['outline.md'].partial], [3, 120000, true]);
+
+  /* 12. 续传 / 打回 / 插话的提示都指向工作台。 */
+  assert.match(core.buildWorkspaceNote(ws, 'plan', 'resume'), /断点续传[\s\S]*outline\.md[\s\S]*draft_read/);
+  assert.equal(core.buildWorkspaceNote(core.emptyWorkspace(), 'plan', 'resume'), '');
+  assert.match(core.buildRevisionPrompt(['缺少 <first_brief>'], { workspace: true }), /draft_edit[\s\S]*不要把整份大纲在回复里重吐/);
+  assert.match(core.buildRevisionPrompt(['自检未修正'], { softOnly: true, workspace: true }), /只需重新输出一段 <self_check>/);
+  assert.match(core.buildInterjectionMessage('改名', { workspace: true }), /draft_edit[\s\S]*不要重写/);
+  assert.match(core.describeToolCall('draft_write', { file: 'outline.md', mode: 'append', content: '一二三' }), /写入草稿 outline\.md（追加 3 字）/);
+});
+
+test('总导演草稿工作台全链路：分块落盘 → 上游 502 中断 → resume 后 draft_read 接着补完 → draft_check 发现问题 → draft_edit 局部修复 → 一句确认定稿并清理草稿', async () => {
+  const split = OUTLINE.indexOf('### 板块 C');
+  const AB = OUTLINE.slice(0, split).trim(), CDE = OUTLINE.slice(split);
+  let down = false;
+  const seen = [];
+  const h = makeNativeDirectorHost({
+    backend: (body) => {
+      const sys = String(body.messages[0].content);
+      if (sys.includes('分卷导演 · 场记')) return nativeReply({ content: judge() });
+      const round = toolRounds(body);
+      seen.push({ round, stream: body.stream, last: lastUser(body), results: toolResults(body) });
+      if (round === 0) {
+        return nativeReply({ tool_calls: [
+          toolCall('read', { path: 'wb:/命定之诗/格温' }, 'w_read'),
+          toolCall('draft_write', { file: 'notes.md', content: '原件锚点：格温保管着备用舵钥匙。' }, 'w_notes'),
+          toolCall('draft_write', { file: '../outline.md', content: '穿越' }, 'w_bad1'),
+          toolCall('draft_write', { file: 'wb:/命定之诗/格温', content: '想写酒馆资产' }, 'w_bad2'),
+        ] }, 'tool_calls');
+      }
+      if (round === 1) {
+        const results = toolResults(body);
+        assert.ok(results[0].includes('备用舵钥匙'));
+        assert.match(results[1], /已写入|写入 /);
+        assert.match(results[2], /^［失败］草稿槽位/);
+        assert.match(results[3], /^［失败］草稿槽位/);
+        return nativeReply({ tool_calls: [toolCall('draft_write', { file: 'outline.md', content: AB }, 'w_ab')] }, 'tool_calls');
+      }
+      if (round === 2 && down) return { status: 502, body: { error: { message: 'upstream 502' } } };
+      if (round === 2) {
+        assert.match(lastUser(body), /【草稿工作台进度（断点续传）】[\s\S]*outline\.md [\d,]+ 字（板块 A–B）/);
+        return nativeReply({ tool_calls: [toolCall('draft_read', { file: 'outline.md' }, 'w_peek')] }, 'tool_calls');
+      }
+      if (round === 3) {
+        assert.ok(toolResults(body)[0].includes('### 板块 B'));
+        return nativeReply({ tool_calls: [toolCall('draft_write', { file: 'outline.md', mode: 'append', content: CDE }, 'w_cde')] }, 'tool_calls');
+      }
+      if (round === 4) {
+        return nativeReply({ tool_calls: [
+          toolCall('draft_write', { file: 'index.json', content: JSON.stringify(INDEX) }, 'w_idx'),
+          toolCall('draft_write', { file: 'first_brief.md', content: brief('工作台简报') }, 'w_brief'),
+          toolCall('draft_write', { file: 'self_check.md', content: '1. 去塑料件：通过\n2. 命名嗅探：未通过，有罐头名' }, 'w_check'),
+        ] }, 'tool_calls');
+      }
+      if (round === 5) return nativeReply({ tool_calls: [toolCall('draft_check', {}, 'w_dc1')] }, 'tool_calls');
+      if (round === 6) {
+        assert.match(toolResults(body)[0], /草稿预检：未通过[\s\S]*自检软问题/);
+        return nativeReply({ tool_calls: [toolCall('draft_edit', { file: 'self_check.md', old: '未通过，有罐头名', new: '已修正：换成旧港本土地名' }, 'w_fix')] }, 'tool_calls');
+      }
+      if (round === 7) return nativeReply({ tool_calls: [toolCall('draft_check', {}, 'w_dc2')] }, 'tool_calls');
+      assert.match(toolResults(body)[0], /草稿预检：全部通过/);
+      /* 「现在开始…」这种收尾以前会被当成「只说不做」：工作台有大纲时它就是交付确认。 */
+      return nativeReply({ content: '草稿已全部写好并通过预检，现在开始交付执导。' });
+    },
+  });
+  try {
+    await h.director.ready();
+    const runsBefore = (await h.agent.listRuns(50)).length;
+    const wbBefore = h.worldbooks.命定之诗[1].content;
+    /* 第三个请求上游持续 502：编纲停在断点，已经写进工作台的板块 A–B 随断点落盘。 */
+    down = true;
+    const first = h.director.activate();
+    first.catch(() => {});
+    await until(() => seen.some((item) => item.round === 2), '写完板块 A–B 后的请求');
+    await assert.rejects(first, /502/);
+    const parked = await h.readJson(h.dir() + '/draft.json');
+    assert.equal(parked.workspace.files['outline.md'].text, AB);
+    assert.ok(parked.workspace.files['notes.md'].text.includes('备用舵钥匙'));
+    const status = h.director.getStatus();
+    assert.deepEqual([status.state, status.plan.workspace.sectionRange, status.plan.workspace.outlineChars, status.plan.draftFiles['outline.md'] === AB],
+      ['draft', 'A–B', AB.length, true]);
+    /* 修好上游后沿断点继续：先读一眼已写的部分，再接着补完。 */
+    down = false;
+    assert.deepEqual(plain(await h.director.resume()), { done: true });
+    assert.ok(seen.every((item) => item.stream === true), '总导演的每个请求都是流式');
+    const outline = await h.vfs.readText(h.dir() + '/outline.md');
+    assert.ok(outline.startsWith('### 板块 A') && outline.includes('### 板块 E') && outline.includes('#### Phase 3：清点之日'));
+    assert.equal(await h.readJson(h.dir() + '/draft.json'), null, '定稿后草稿与工作台一起清掉');
+    assert.ok((await h.director.getBrief()).text.includes('工作台简报'));
+    /* 酒馆资产一个字没动，也没有进改动记录。 */
+    assert.equal(h.worldbooks.命定之诗[1].content, wbBefore);
+    assert.equal((await h.agent.listRuns(50)).length, runsBefore);
+    /* 声明给模型的工具里有四个草稿工具；「只读工具」清单里没有它们。 */
+    const declared = h.backendCalls.find((call) => Array.isArray(call.body.tools)).body.tools.map((t) => t.function.name);
+    for (const name of ['draft_read', 'draft_write', 'draft_edit', 'draft_check', 'read', 'grep', 'ls']) assert.ok(declared.includes(name), name);
+    assert.ok(!h.director.listReadonlyTools().some((t) => /^draft_/.test(t.name)));
+    const logs = h.api.jobs.list().filter((job) => job.owner === 'director').flatMap((job) => job.lines).join('\n');
+    assert.ok(logs.includes('写入草稿 outline.md') && logs.includes('预检草稿') && logs.includes('修改草稿 self_check.md'), logs.slice(0, 400));
+  } finally { h.dispose(); }
+});
+
+test('断流半稿抢救：纯文本流式输出中途断网，已流出的正文抢救进工作台自动接着写；再断就随断点落盘，resume 时从半稿接着补完', async () => {
+  /* 两段断流前收到的正文都要过 200 字的抢救门槛（第一段还带着 <self_check> 与开头标签）。 */
+  const cut = midLine(OUTLINE, 160);
+  const cut2 = midLine(OUTLINE, cut + 205);
+  assert.ok(cut2 < OUTLINE.length - 40);
+  let phase = 0;
+  const prompts = [];
+  const h = makeNativeDirectorHost({
+    backend: (body) => {
+      const sys = String(body.messages[0].content);
+      if (sys.includes('分卷导演 · 场记')) return nativeReply({ content: judge() });
+      phase += 1;
+      prompts.push(lastUser(body));
+      if (phase === 1) {
+        return { sse: [': keep-alive\n\n', sseDelta({ reasoning_content: '先把大纲写出来。' }), sseDelta('<self_check>\n1. 通过\n</self_check>\n<volume_outline>\n'),
+          sseDelta(OUTLINE.slice(0, cut)), new TypeError('network error')] };
+      }
+      if (phase === 2) return { sse: [sseDelta(OUTLINE.slice(cut, cut2)), new TypeError('Failed to fetch')] };
+      /* resume 之后：直接吐标签的模型按续写的样子接着写——没有新开 <volume_outline>，只有它的结尾。 */
+      return nativeReply({ content: OUTLINE.slice(cut2) + '\n</volume_outline>\n<volume_index>\n' + JSON.stringify(INDEX) + '\n</volume_index>\n<first_brief>\n' + brief('续写') + '\n</first_brief>' });
+    },
+  });
+  try {
+    await h.director.ready();
+    await assert.rejects(() => h.director.activate(), /Failed to fetch/);
+    /* 第一次断：抢救进工作台（自检 + 大纲半稿）并在同一会话里接着写；第二次断：半稿随断点落盘。 */
+    assert.match(prompts[1], /断点续写[\s\S]*outline\.md[\s\S]*半稿/);
+    const parked = await h.readJson(h.dir() + '/draft.json');
+    assert.equal(parked.workspace.files['outline.md'].text, OUTLINE.slice(0, cut));
+    assert.equal(parked.workspace.files['outline.md'].partial, true);
+    assert.ok(parked.workspace.files['self_check.md'].text.includes('通过'));
+    assert.equal(parked.partialOutput.text, OUTLINE.slice(cut, cut2));
+    const status = h.director.getStatus();
+    assert.deepEqual([status.plan.partialChars, plain(status.plan.workspace.partial)], [cut2 - cut, ['outline.md']]);
+    assert.equal(phase, 2, '已吐出实质正文的断流不在网关里从头重试');
+
+    assert.deepEqual(plain(await h.director.resume()), { done: true });
+    assert.match(prompts[2], /断点续写/);
+    assert.equal(await h.vfs.readText(h.dir() + '/outline.md'), OUTLINE, '三段拼回来一字不差');
+    assert.ok((await h.director.getBrief()).text.includes('续写'));
+    assert.equal(await h.readJson(h.dir() + '/draft.json'), null);
+    const logs = h.api.jobs.list().filter((job) => job.owner === 'director').flatMap((job) => job.lines).join('\n');
+    assert.match(logs, /抢救进草稿工作台/);
+  } finally { h.dispose(); }
+});
+
+test('结构重构同样有草稿工作台：写 restructure_note.md 等槽位后一句确认就落盘；编纲草稿里没有这个槽位；直接吐四段标签的模型照常交付', async () => {
+  const V2_INDEX = { title: '雨季的钟', phases: [{ n: 1, title: '渡口改道' }, { n: 2, title: '对岸的钟' }], new_characters: [] };
+  const h = makeNativeDirectorHost({
+    backend: (body) => {
+      const sys = String(body.messages[0].content);
+      if (sys.includes('分卷导演 · 场记')) return nativeReply({ content: judge() });
+      const restructuring = body.messages.some((m) => String(m.content || '').includes('## 结构重构'));
+      const round = toolRounds(body);
+      if (!restructuring) {
+        if (round === 0) return nativeReply({ tool_calls: [toolCall('draft_write', { file: 'restructure_note.md', content: '编纲没有这个槽位' }, 'p_note')] }, 'tool_calls');
+        assert.match(toolResults(body)[0], /restructure_note\.md 只在结构重构时可用/);
+        return nativeReply({ content: delivery(OUTLINE, INDEX, brief('传统四段')) });
+      }
+      assert.ok(String(body.messages[0].content).includes('restructure_note.md'), '重构的 System 里写着重构说明槽位');
+      if (round === 0) {
+        return nativeReply({ tool_calls: [
+          toolCall('draft_write', { file: 'outline.md', content: OUTLINE_V2 }, 'r_outline'),
+          toolCall('draft_write', { file: 'index.json', content: JSON.stringify(V2_INDEX) }, 'r_index'),
+          toolCall('draft_write', { file: 'first_brief.md', content: brief('重构工作台') }, 'r_brief'),
+          toolCall('draft_write', { file: 'restructure_note.md', content: '玩家提前渡河，改走渡口线' }, 'r_note'),
+        ] }, 'tool_calls');
+      }
+      return nativeReply({ content: '重构稿已经写进工作台。' });
+    },
+  });
+  try {
+    await h.director.ready();
+    assert.deepEqual(plain(await h.director.activate()), { done: true });
+    assert.equal(h.director.getStatus().volume.title, INDEX.title);
+    const done = await h.director.restructureNow('手动重构');
+    assert.deepEqual([done.version, done.note], [2, '玩家提前渡河，改走渡口线']);
+    assert.ok((await h.vfs.readText(h.dir() + '/outline.md')).includes('渡口改道'));
+    assert.ok((await h.director.getBrief()).text.includes('重构工作台'));
+    assert.equal(await h.readJson(h.dir() + '/restructure-draft.json'), null, '落盘后重构草稿与工作台一起清掉');
+  } finally { h.dispose(); }
+});
+
+test('工具轮数用完而工作台已有稿子：先给几轮只限草稿工具的收尾（查阅不再执行），工作台写全后空回复也能定稿', async () => {
+  const h = makeNativeDirectorHost({
+    agentSettings: { maxSteps: 2 },
+    backend: (body) => {
+      const sys = String(body.messages[0].content);
+      if (sys.includes('分卷导演 · 场记')) return nativeReply({ content: judge() });
+      const round = toolRounds(body);
+      if (round === 0) return nativeReply({ tool_calls: [toolCall('draft_write', { file: 'outline.md', content: OUTLINE }, 'g_outline')] }, 'tool_calls');
+      if (round === 1) return nativeReply({ tool_calls: [toolCall('read', { path: 'wb:/命定之诗/格温' }, 'g_read')] }, 'tool_calls');
+      if (round === 2) {
+        assert.match(lastUser(body), /额外给你 3 轮收尾/);
+        assert.notEqual(body.tool_choice, 'none', '收尾轮还能调草稿工具');
+        return nativeReply({ tool_calls: [
+          toolCall('read', { path: 'wb:/命定之诗/旧港规矩' }, 'g_read2'),
+          toolCall('draft_write', { file: 'index.json', content: JSON.stringify(INDEX) }, 'g_index'),
+          toolCall('draft_write', { file: 'first_brief.md', content: brief('收尾') }, 'g_brief'),
+        ] }, 'tool_calls');
+      }
+      const results = toolResults(body);
+      assert.match(results[0], /^［未执行］工具轮数已经用完/);
+      assert.match(results[1], /index\.json/);
+      return nativeReply({ content: '' });
+    },
+  });
+  try {
+    await h.director.ready();
+    assert.deepEqual(plain(await h.director.activate()), { done: true });
+    assert.equal(await h.vfs.readText(h.dir() + '/outline.md'), OUTLINE);
+    assert.ok((await h.director.getBrief()).text.includes('收尾'));
+  } finally { h.dispose(); }
 });

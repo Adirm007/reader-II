@@ -221,10 +221,19 @@
         lastOutput: str(raw.lastOutput),
         canForceCommit: raw.canForceCommit === true,
         softPending: raw.softPending === true,
+        workspace: core.normalizeWorkspace(raw.workspace, 'plan'),
+        partialOutput: normalizePartial(raw.partialOutput),
+        draftOps: Math.max(0, Math.trunc(Number(raw.draftOps) || 0)),
         error: str(raw.error),
         startedAt: Number(raw.startedAt) || Date.now(),
         updatedAt: Number(raw.updatedAt) || Date.now()
       };
+    }
+
+    /* 断流时已经吐出、还没并进工作台的半稿（下次续跑开头先抢救进工作台）。 */
+    function normalizePartial(raw) {
+      if (!modules.isObject(raw) || !str(raw.text).trim()) return null;
+      return { text: str(raw.text).slice(0, 120000), reason: str(raw.reason).slice(0, 200), at: Number(raw.at) || Date.now() };
     }
 
     function normalizeRestructureDraft(raw) {
@@ -255,6 +264,9 @@
         lastOutput: str(raw.lastOutput),
         canForceCommit: raw.canForceCommit === true,
         softPending: raw.softPending === true,
+        workspace: core.normalizeWorkspace(raw.workspace, 'restructure'),
+        partialOutput: normalizePartial(raw.partialOutput),
+        draftOps: Math.max(0, Math.trunc(Number(raw.draftOps) || 0)),
         error: str(raw.error),
         startedAt: Number(raw.startedAt) || Date.now(),
         updatedAt: Number(raw.updatedAt) || Date.now()
@@ -661,7 +673,8 @@
       var list = [];
       var seenNames = Object.create(null);
       function add(def) {
-        if (!def || !def.name || seenNames[def.name]) return;
+        /* draft_ 前缀留给总导演自己的草稿工作台：连接器里同名的工具一律不收，免得撞名。 */
+        if (!def || !def.name || seenNames[def.name] || /^draft_/i.test(def.name)) return;
         seenNames[def.name] = true;
         list.push(def);
       }
@@ -711,7 +724,7 @@
           assertSafeVfsPath(args.path);
           /*
            * 直接调 vfs.grep（与注册表的 grep 格式相同），不转交注册表：检索被中断时返回结构化的 { ok: false }，
-           * 由 execReadTool 按失败处理（不进 seen、不计数），不靠在正文里找提示句来判断。
+           * 由 execTool 按失败处理（不进 seen、不计数），不靠在正文里找提示句来判断。
            */
           var out = await vfs.grep(args.path, args.pattern, { flags: args.flags, context: args.context, limit: args.limit, signal: ctx && ctx.signal });
           if (out.aborted) {
@@ -752,6 +765,31 @@
         });
       }
       return list;
+    }
+
+    /*
+     * 总导演私有草稿工作台的四个工具（只在 runDirectorAgent 里绑定到当前这份草稿）。它们不碰任何 VFS 挂载点：
+     * 不过权限判定、不进改动记录、不弹确认。draft_write / draft_edit 不可并行（同一批里按顺序执行），读与预检可以并行。
+     */
+    function draftToolSpecs() {
+      /* 工具声明也是前缀缓存的一部分：编纲与重构用同一份，restructure_note.md 只在重构草稿里写得进去（由工作台按草稿类型拦）。 */
+      var names = core.DRAFT_SLOTS.map(function (slot) { return slot.file + (slot.restructure ? '（仅结构重构）' : ''); }).join(' / ');
+      return [
+        { name: 'draft_read', effect: 'draft', parallel: true, draft: true,
+          summary: '查看私有草稿工作台。不带 file：所有槽位的总览（字数、行数、大纲写到哪个板块与 Phase）；带 file：带行号的正文，长的用 offset / limit 分段读。',
+          params: [{ name: 'file', type: 'string', desc: '槽位名：' + names }, { name: 'offset', type: 'number', desc: '起始行，默认 1' }, { name: 'limit', type: 'number', desc: '行数，默认 400' }] },
+        { name: 'draft_write', effect: 'draft', parallel: false, draft: true,
+          summary: '写入私有草稿工作台的一个槽位并立即存盘（只写这份草稿，不碰酒馆资产）。mode=replace 整份覆盖（默认）；mode=append 接在末尾，适合把大纲分几次写完。',
+          params: [{ name: 'file', type: 'string', required: true, desc: '槽位名：' + names }, { name: 'content', type: 'string', required: true, desc: '要写入的正文（就是对应交付标签里的内容，不用写标签）' },
+            { name: 'mode', type: 'string', desc: 'replace（默认）或 append' }] },
+        { name: 'draft_edit', effect: 'draft', parallel: false, draft: true,
+          summary: '精确替换草稿槽位里的一段原文并立即存盘。old 须与原文完全一致（不带行号）且唯一；多处相同时加 all=true；new 留空即删除这段。',
+          params: [{ name: 'file', type: 'string', required: true, desc: '槽位名：' + names }, { name: 'old', type: 'string', required: true, desc: '要被替换的原文' },
+            { name: 'new', type: 'string', desc: '替换成的内容；留空即删除' }, { name: 'all', type: 'boolean', desc: 'true 时替换所有出现处' }] },
+        { name: 'draft_check', effect: 'draft', parallel: true, draft: true,
+          summary: '对当前草稿跑一遍与最终交付相同的程序质检（大纲结构、Phase、索引 JSON、首轮简报、自检残留、半稿），返回硬伤与软问题清单。',
+          params: [] }
+      ];
     }
 
     function agentToolConfig() {
@@ -1027,10 +1065,13 @@
         }
         if (start < 0) break;
         var after = next[end];
+        /* 折叠掉的那一轮里有写草稿的调用：说清楚工作台里的内容不受影响，免得模型以为写过的都没了。 */
+        var label = /draft_/.test(summary) ? '（已折叠一轮较早的工具调用：' + summary + '；草稿工作台里的内容不受影响，需要时用 draft_read 查看）'
+          : '（已折叠一轮较早的只读查阅：' + summary + '）';
         var replacement = after && after.role === 'user'
-          ? [{ role: 'assistant', content: '（已折叠一轮较早的只读查阅：' + summary + '）', compressed: true }]
+          ? [{ role: 'assistant', content: label, compressed: true }]
           : [
-              { role: 'assistant', content: '（已折叠一轮较早的只读查阅：' + summary + '）', compressed: true },
+              { role: 'assistant', content: label, compressed: true },
               { role: 'user', content: '（请继续基于上下文已有资料推进当前编纲任务。）' }
             ];
         next.splice.apply(next, [start, end - start].concat(replacement));
@@ -1051,10 +1092,14 @@
     var CONTEXT_OVERFLOW_RE = /context_(?:length|window)_exceeded|context (?:window|limit)|maximum context length|maximum number of tokens|too many tokens|prompt is too long|输入超过.{0,8}上下文/i;
 
     /*
-     * 总导演只读 Agent 工具循环（单会话编纲、实时插话、自动自检打回、L2 结构重构共用）。
+     * 总导演 Agent 工具循环（单会话编纲、实时插话、自动自检打回、L2 结构重构共用）。
      * - 独立锁与独立历史：不占主助手锁，不写入夜梦私聊历史。
-     * - 支持双级中止（任务级取消 vs 单请求插话打断）与 inbox 实时插话队列：插话仅打断在途模型请求，不截断本地只读工具。
-     * - 严格只读白名单，零确认弹窗；仅在明确 no_native_tools 时退回文本协议，并记录 protocolKey 便于换模型后恢复原生。
+     * - 双级中止（任务级取消 vs 单请求插话打断）与 inbox 实时插话队列：插话仅打断在途模型请求，不截断本地工具。
+     * - 酒馆与工作区资产严格只读白名单，零确认弹窗；另有一个只属于当前草稿的私有工作台（draft_* 四个工具）。
+     * - 流式接收：等模型时任务牌实时写着「正在构思推演 / 正在撰写 / 正在写入草稿」与字数；断流时已经吐出的正文抢救进工作台接着写。
+     * - 仅在明确 no_native_tools 时退回文本协议，并记录 protocolKey 便于换模型后恢复原生。
+     * options.workspace: { kind: 'plan' | 'restructure', get(), set(ws) }    options.partial: { get(), set(p | null) }
+     *   两者都只改内存里的草稿对象（set 带 epoch 守卫，草稿作废时抛 director_stale）；落盘交给 onCheckpoint。
      */
     async function runDirectorAgent(options) {
       var target = options.target;
@@ -1062,7 +1107,10 @@
       var job = entry.job;
       var settings = options.settings;
       var cfg = agentToolConfig();
-      var tools = directorTools();
+      var space = options.workspace && typeof options.workspace.get === 'function' && typeof options.workspace.set === 'function' ? options.workspace : null;
+      var kind = space && space.kind === 'restructure' ? 'restructure' : 'plan';
+      var pending = options.partial && typeof options.partial.get === 'function' && typeof options.partial.set === 'function' ? options.partial : null;
+      var tools = directorTools().concat(space ? draftToolSpecs() : []);
       var toolsByName = Object.create(null);
       tools.forEach(function (def) { toolsByName[def.name] = def; });
       var toolNames = tools.map(function (def) { return def.name; });
@@ -1070,7 +1118,7 @@
       var proto = pickDirectorProtocol(cfg.toolProtocol, options.preferredProtocol, options.preferredProtocolKey, options.preferredProtocolFallback);
       if (job && cfg.toolProtocol === 'native' && proto.mode === 'text' && proto.reason) job.log(proto.reason);
       var makeSystem = function (mode) {
-        return core.buildPlannerSystem(options.skillText, options.preferences, options.userName, { toolMode: mode, tools: tools, mounts: mounts });
+        return core.buildPlannerSystem(options.skillText, options.preferences, options.userName, { toolMode: mode, tools: tools, mounts: mounts, draftKind: space ? kind : '' });
       };
       var bodyMsgs = normalizeConversationMessages(options.baseMessages.slice(1), proto.mode);
       var messages = [{ role: 'system', content: makeSystem(proto.mode) }].concat(bodyMsgs);
@@ -1079,9 +1127,26 @@
       var rounds = Math.max(0, Math.trunc(Number(options.initialRounds) || 0));
       var stepRounds = Math.max(0, Math.trunc(Number(options.initialStepRounds) || 0));
       var toolCount = Math.max(0, Math.trunc(Number(options.initialToolCalls) || 0));
+      var draftOps = Math.max(0, Math.trunc(Number(options.initialDraftOps) || 0));
       var localRounds = 0, forced = '', finalTries = 0, nudged = false, retryWindow = 0, seqRetried = false;
+      /* 工具轮数用完时，工作台里已经有稿子：再给几轮只限 draft_* 的收尾（grace 是剩下的轮数；null = 还没进收尾）。 */
+      var GRACE_ROUNDS = Math.min(6, Math.max(3, Math.ceil(cfg.maxSteps / 4)));
+      var grace = null;
+      /* 断流抢救之后自动接着写，一次会话最多一次；再断就停下来留着断点。 */
+      var autoContinues = 0;
+      var lastCheck = null;
       var seen = Object.create(null);
       var lastIdleBatch = '', idleRepeats = 0, idleStreak = 0;
+      var streamSerial = 0, streamEmitAt = 0;
+
+      function ws() { return space ? space.get() : null; }
+      function hasDraft() { return !!space && core.workspaceHasContent(ws()); }
+      function hasOutline() { return !!space && !!core.workspaceOutline(ws()).trim(); }
+      /* 草稿改过之后，之前 draft_read 的结果都过期了：不能再让模型「复用已读」。 */
+      function forgetDraftReads() {
+        Object.keys(seen).forEach(function (key) { if (key.indexOf('draft_read:') === 0) delete seen[key]; });
+        lastCheck = null;
+      }
 
       function rebuildSeenFromMessages() {
         seen = Object.create(null);
@@ -1092,7 +1157,8 @@
             sm.tool_calls.forEach(function (tc) {
               var n = tc && tc.function && str(tc.function.name).trim();
               var def = n && toolsByName[n];
-              if (!def) return;
+              /* 草稿工具的旧结果不从历史里回填：草稿之后可能又改过，续传后让模型重新 draft_read。 */
+              if (!def || def.draft) return;
               var parsedArg = protocol.nativeArgs(tc.function.arguments);
               if (parsedArg.error) return;
               var coercedArg = protocol.coerce(def, parsedArg.args || {});
@@ -1115,7 +1181,7 @@
         return messages.slice(1).map(cleanTraceMessage);
       }
 
-      /* 把会话落成断点。它「此刻在做什么」由调用方（编纲 / 重构）自己记，这里只交会话与计数。 */
+      /* 把会话落成断点（草稿工作台与半稿都在草稿对象上，一起写进去）。它「此刻在做什么」由调用方（编纲 / 重构）自己记。 */
       async function checkpoint() {
         if (typeof options.onCheckpoint !== 'function') return;
         await options.onCheckpoint({
@@ -1125,17 +1191,66 @@
           protocolFallback: proto.fallback === true,
           rounds: rounds,
           stepRounds: stepRounds,
-          toolCalls: toolCount
+          toolCalls: toolCount,
+          draftOps: draftOps
         });
+      }
+
+      function result(text) {
+        return { text: str(text), protocol: proto.mode, protocolKey: proto.key, protocolFallback: proto.fallback === true, rounds: rounds, stepRounds: stepRounds,
+          toolCalls: toolCount, draftOps: draftOps, messages: snapshotMessages() };
       }
 
       /*
        * 等模型回话时任务牌上写什么。它是自己决定「接着查」还是「开始写」的，所以平时只写调用方给的那句
        * （带已查项数）；工具被收走之后（空转拦截、轮数用尽）它只能动笔，这时才写「正在撰写与自检」。
+       * 流式收到东西以后，换成实时的「正在构思推演（已思考 N 字）」这一类（streamLabel）。
        */
       function waitingStage() {
         if (forced) return '正在撰写与自检';
+        if (grace !== null) return '工具轮数已用完，正在用草稿工作台收尾';
         return typeof options.stageOf === 'function' ? str(options.stageOf(toolCount)) : '自主查阅与撰稿';
+      }
+
+      function streamLabel(progress) {
+        var fmt = core.formatCount;
+        if (proto.mode === 'text' && progress.phase === 'text' && typeof progress.snapshot === 'function') {
+          var text = str(progress.snapshot());
+          var at = text.lastIndexOf('<action');
+          if (at >= 0 && at > text.lastIndexOf('</action>')) {
+            return /^<action\s+name\s*=\s*["']?draft_(?:write|edit)/i.test(text.slice(at, at + 80))
+              ? '正在写入草稿（已接收 ' + fmt(text.length - at) + ' 字）' : '正在组织工具调用';
+          }
+        }
+        if (progress.phase === 'tool') {
+          return /^draft_(?:write|edit)$/.test(str(progress.toolName)) ? '正在写入草稿（已接收 ' + fmt(progress.toolChars) + ' 字）'
+            : '正在组织工具调用' + (progress.toolName ? '（' + str(progress.toolName).slice(0, 40) + '）' : '');
+        }
+        if (progress.phase === 'thinking') return '正在构思推演（已思考 ' + fmt(progress.reasoningChars) + ' 字）';
+        if (progress.phase === 'text') return '正在撰写（已输出 ' + fmt(progress.textChars) + ' 字）';
+        return '';
+      }
+
+      /* 每次请求一个新的进度回调；请求结束（streamDone）之后晚到的进度一律不认。界面最多每 400 毫秒刷新一次。 */
+      function streamWatcher() {
+        var serial = ++streamSerial;
+        return function (progress) {
+          if (serial !== streamSerial || taskAborted(entry) || !progress) return;
+          var label = streamLabel(progress);
+          entry.stream = {
+            phase: str(progress.phase), label: label, textChars: Number(progress.textChars) || 0, reasoningChars: Number(progress.reasoningChars) || 0,
+            toolName: str(progress.toolName), toolChars: Number(progress.toolChars) || 0, bytes: Number(progress.bytes) || 0, at: Date.now()
+          };
+          var now = Date.now();
+          if (now - streamEmitAt < 400) return;
+          streamEmitAt = now;
+          if (label) setStage(entry, label);
+          emit('stream');
+        };
+      }
+      function streamDone() {
+        streamSerial += 1;
+        if (entry.stream) { entry.stream = null; emit('stream'); }
       }
 
       async function drainInbox() {
@@ -1145,8 +1260,9 @@
         if (!texts.length) return false;
         if (typeof options.onInbox === 'function') await options.onInbox(batch);
         var merged = texts.length === 1 ? texts[0] : texts.map(function (t, i) { return (i + 1) + '. ' + t; }).join('\n');
-        appendUserTurn(messages, core.buildInterjectionMessage(merged), true);
+        appendUserTurn(messages, core.buildInterjectionMessage(merged, { workspace: hasDraft() }), true);
         forced = '';
+        grace = null;
         idleRepeats = 0;
         lastIdleBatch = '';
         idleStreak = 0;
@@ -1167,31 +1283,86 @@
         await checkpoint();
       }
 
-      async function askOnce(reqMessages, maxTokens, reqSignal) {
-        if (proto.mode === 'native') {
-          var reply = await llm.chatTaskTools({
-            kind: 'director', messages: reqMessages, tools: tools.map(protocol.toolSchema), toolChoice: forced ? 'none' : 'auto',
-            maxTokens: maxTokens, timeoutMs: settings.timeoutMs, signal: reqSignal, retries: 1, cacheMs: MODEL_CACHE_MS,
-            generationId: options.generationId || 'reader-director-plan'
-          });
-          var calls = (reply.toolCalls || []).map(function (item) {
-            var parsed = protocol.nativeArgs(item.arguments);
-            return { id: item.id, name: item.name, args: parsed.args || {}, malformed: parsed.error || '' };
-          });
-          if (calls.length) return { style: 'native', text: str(reply.text), prose: str(reply.text).trim(), calls: calls, truncated: false, message: reply.message, reasoning: str(reply.reasoning) };
-          var fallbackParsed = protocol.parse(str(reply.text));
-          return { style: 'text', text: str(reply.text), prose: fallbackParsed.prose, calls: fallbackParsed.calls, truncated: fallbackParsed.truncated, reasoning: str(reply.reasoning) };
+      /*
+       * 断流抢救：流式回复中途断开（超时、断网、暂停、插话、切聊天）时，已经吐出的可见正文够长、而且不是断在工具调用里，
+       * 就先记成草稿上的 partialOutput（同步，调用方的收尾会一起落盘）；absorbPartial 再把它拆进工作台、在会话里接上续写提示。
+       * 文本协议下只认工具块之外的正文：断在 <action> 里的半截调用丢掉，不污染消息序列。
+       */
+      function salvageable(error) {
+        if (!space || !pending || !error || error.hasToolCalls) return '';
+        var text = str(error.partialText);
+        if (!text.trim()) return '';
+        if (proto.mode === 'text') {
+          var parsed = protocol.parse(text.replace(/<(?:action_result|tool_result|tool_response)\b[\s\S]*$/i, ''));
+          if (parsed.calls.length) return '';
+          text = parsed.prose;
         }
-        var raw = str(await llm.chatTask({
-          kind: 'director', messages: plainMessages(reqMessages),
-          maxTokens: maxTokens, timeoutMs: settings.timeoutMs, signal: reqSignal, retries: 1, cacheMs: MODEL_CACHE_MS,
-          generationId: options.generationId || 'reader-director-plan'
-        }));
-        /* 文本协议下模型可能在工具块之后自己编出 <action_result>（文本补全通道尤其常见）：从那里截断，只认它自己发出的调用。 */
-        var fake = raw.search(/<(?:action_result|tool_result|tool_response)\b/i);
-        if (fake > 0) raw = raw.slice(0, fake).trimEnd();
-        var parsed = protocol.parse(raw);
-        return { style: 'text', text: raw, prose: parsed.prose, calls: parsed.calls, truncated: parsed.truncated, reasoning: '' };
+        var min = modules.llmStream ? modules.llmStream.SALVAGE_MIN : 200;
+        return text.trim().length >= min ? text : '';
+      }
+      function cutReason(error) {
+        if (!error) return '';
+        if (error.name === 'AbortError') return entry.inbox.length ? '被用户插话打断' : '被中止';
+        if (error.code === 'provider_stop') return '输出达到长度上限';
+        if (error.name === 'TimeoutError' || error.code === 'timeout') return '长时间没有收到新数据';
+        return message(error).replace(/\s+/g, ' ').slice(0, 80);
+      }
+      function keepPartial(error) {
+        var text = salvageable(error);
+        if (text) pending.set({ text: text, reason: cutReason(error), at: Date.now() });
+        return text;
+      }
+      async function absorbPartial() {
+        var held = pending ? pending.get() : null;
+        if (!held || !str(held.text).trim() || !space) return false;
+        var salvaged = core.salvagePartial(space.get(), held.text, kind);
+        space.set(salvaged.workspace);
+        pending.set(null);
+        forgetDraftReads();
+        messages.push({ role: 'assistant', content: '（这条回复写到 ' + core.formatCount(str(held.text).length) + ' 字时传输中断，已收到的内容已由系统抢救进草稿工作台。）' });
+        appendUserTurn(messages, core.buildSalvageNote(salvaged, held.reason, kind), true);
+        if (job) {
+          job.log('已把断流前收到的 ' + core.formatCount(str(held.text).length) + ' 字抢救进草稿工作台'
+            + (salvaged.saved.length ? '：' + salvaged.saved.map(function (item) { return item.file + (item.partial ? '（半稿）' : ''); }).join('、') : ''));
+        }
+        await checkpoint();
+        return true;
+      }
+      /* 断流后能不能自动接着写：超时、断网、上游 5xx、流里报错、写到长度上限。鉴权、风控、额度这类报错停下来。 */
+      function continuable(error) {
+        if (!error) return false;
+        if (error.code === 'provider_stop') return /^(?:max_tokens|length)$/i.test(str(error.stopReason)) || /max_tokens|length/i.test(message(error));
+        if (error.name === 'TimeoutError' || error.code === 'timeout' || error.code === 'stream_error') return true;
+        return /\b(?:408|409|425|429|500|502|503|504|520|522|524|529|530)\b|timeout|timed out|超时|overloaded|temporarily|ECONNRESET|socket|network|网络|fetch failed|Failed to fetch|tunnel|中断/i.test(message(error));
+      }
+
+      async function askOnce(reqMessages, maxTokens, reqSignal) {
+        var common = {
+          kind: 'director', maxTokens: maxTokens, timeoutMs: settings.timeoutMs, signal: reqSignal, retries: 1, cacheMs: MODEL_CACHE_MS,
+          generationId: options.generationId || 'reader-director-plan',
+          /* 总导演一律流式：长思考、长输出期间连接不再 0 字节静默，timeoutMs 按空闲计；工作台有大纲时最后一句确认可以是空的。 */
+          stream: true, onStream: streamWatcher(), allowEmpty: hasOutline()
+        };
+        try {
+          if (proto.mode === 'native') {
+            var reply = await llm.chatTaskTools(Object.assign({ messages: reqMessages, tools: tools.map(protocol.toolSchema), toolChoice: forced ? 'none' : 'auto' }, common));
+            var calls = (reply.toolCalls || []).map(function (item) {
+              var parsed = protocol.nativeArgs(item.arguments);
+              return { id: item.id, name: item.name, args: parsed.args || {}, malformed: parsed.error || '' };
+            });
+            if (calls.length) return { style: 'native', text: str(reply.text), prose: str(reply.text).trim(), calls: calls, truncated: false, message: reply.message, reasoning: str(reply.reasoning) };
+            var fallbackParsed = protocol.parse(str(reply.text));
+            return { style: 'text', text: str(reply.text), prose: fallbackParsed.prose, calls: fallbackParsed.calls, truncated: fallbackParsed.truncated, reasoning: str(reply.reasoning) };
+          }
+          var raw = str(await llm.chatTask(Object.assign({ messages: plainMessages(reqMessages) }, common)));
+          /* 文本协议下模型可能在工具块之后自己编出 <action_result>（文本补全通道尤其常见）：从那里截断，只认它自己发出的调用。 */
+          var fake = raw.search(/<(?:action_result|tool_result|tool_response)\b/i);
+          if (fake > 0) raw = raw.slice(0, fake).trimEnd();
+          var parsedText = protocol.parse(raw);
+          return { style: 'text', text: raw, prose: parsedText.prose, calls: parsedText.calls, truncated: parsedText.truncated, reasoning: '' };
+        } finally {
+          streamDone();
+        }
       }
 
       function toolPermissionDenied(def, args) {
@@ -1204,14 +1375,65 @@
         return decision.reason || '权限规则限制了该只读操作。';
       }
 
-      async function execReadTool(call, taskSignal) {
+      /*
+       * 草稿工具：只读写 space 指向的那份草稿，不过权限判定、不进改动记录。写入改了内容就立刻 checkpoint 存盘，
+       * 并让之前的 draft_read 结果失效。没改动的写入、草稿没变时的重复预检算空转（reused）。
+       */
+      async function execDraftTool(def, rawArgs) {
+        var coerced = protocol.coerce(def, rawArgs);
+        if (coerced.error) return { name: def.name, args: rawArgs, status: 'error', body: coerced.error, ok: false, reused: false, draft: true, summary: coerced.error };
+        var args = coerced.args;
+        var label = core.describeToolCall(def.name, args);
+        var signature = def.name === 'draft_read' ? def.name + ':' + JSON.stringify(args) : '';
+        if (signature && seen[signature] && seen[signature].inContext) {
+          if (job) job.log('✓ ' + label + '（复用已读）');
+          return { name: def.name, args: args, signature: signature, status: 'ok', ok: true, reused: true, draft: true,
+            body: '（你已查看过完全相同的 ' + label + '，之后草稿没有改动，完整结果仍在上方对话记录中。）', summary: '重复查看，草稿没有改动' };
+        }
+        setStage(entry, label, label);
+        assertCurrent(target);
+        if (taskAborted(entry)) throw staleError('已停止');
+        var current = space.get();
+        var out;
+        if (def.name === 'draft_read') out = core.workspaceRead(current, kind, args);
+        else if (def.name === 'draft_write') out = core.workspaceWrite(current, kind, args);
+        else if (def.name === 'draft_edit') out = core.workspaceEdit(current, kind, args);
+        else if (lastCheck && lastCheck.rev === (current && current.rev)) out = { ok: true, text: lastCheck.text, reused: true };
+        else {
+          var report = core.checkWorkspace(current, kind, { userName: options.userName });
+          lastCheck = { rev: current && current.rev, text: report.text };
+          out = { ok: true, text: report.text };
+        }
+        if (!out.ok) {
+          if (job) job.log('× ' + label + '：' + str(out.error).slice(0, 120));
+          return { name: def.name, args: args, status: 'error', body: str(out.error), ok: false, reused: false, draft: true, summary: str(out.error) };
+        }
+        var writes = def.name === 'draft_write' || def.name === 'draft_edit';
+        if (writes && out.changed) {
+          space.set(out.ws);
+          draftOps += 1;
+          forgetDraftReads();
+          await checkpoint();
+        }
+        if (job) job.log((writes && !out.changed ? '· ' : '✓ ') + label + (writes && !out.changed ? '（没有改动）' : ''));
+        return { name: def.name, args: args, signature: signature, status: 'ok', body: str(out.text), ok: true, draft: true, wrote: writes && out.changed === true,
+          reused: writes ? out.changed !== true : out.reused === true, summary: str(out.text).replace(/\s+/g, ' ').slice(0, 120) };
+      }
+
+      async function execTool(call, taskSignal) {
         var name = str(call.name).trim();
         var rawArgs = modules.isObject(call.args) ? call.args : {};
         var def = call.malformed ? null : toolsByName[name];
         if (!def) {
-          var reason = call.malformed || ('总导演仅具备只读勘察工具（' + toolNames.join('、') + '），禁止调用「' + (name || '未知工具') + '」。');
+          var reason = call.malformed || ('总导演只具备只读勘察工具与私有草稿工具（' + toolNames.join('、') + '），禁止调用「' + (name || '未知工具') + '」。');
           if (job && !call.malformed) job.log('× 已拦截未授权工具：' + name);
           return { name: name || '?', args: rawArgs, status: 'denied', body: reason, ok: false, reused: false, summary: reason };
+        }
+        if (def.draft) return execDraftTool(def, rawArgs);
+        if (grace !== null) {
+          var closing = '工具轮数已经用完，收尾阶段只执行 draft_read / draft_write / draft_edit / draft_check，查阅工具不再执行。请用已经查到的资料补齐草稿并交付。';
+          if (job) job.log('× 收尾阶段不再查阅：' + core.describeToolCall(def.name, rawArgs));
+          return { name: def.name, args: rawArgs, status: 'denied', body: closing, ok: false, reused: false, summary: closing };
         }
         var coerced = protocol.coerce(def, rawArgs);
         if (coerced.error) {
@@ -1276,6 +1498,8 @@
       for (;;) {
         assertCurrent(target);
         if (taskAborted(entry)) throw staleError('已停止');
+        /* 上一次断流留下的半稿（续传开头、或这一轮被插话打断）：先抢救进工作台，接上续写提示。 */
+        if (pending && pending.get()) await absorbPartial();
         await drainInbox();
         /* 发送前统一规范化消息序列，杜绝相邻同角色或残缺工具块触发 400。 */
         messages = [messages[0]].concat(normalizeConversationMessages(messages.slice(1), proto.mode));
@@ -1283,6 +1507,9 @@
         if (fitted.changed) {
           messages = fitted.messages;
           rebuildSeenFromMessages();
+          /* 较早的记录（可能包括写草稿的那几轮）被折叠了：告诉它工作台里现在有什么，别从头重写。 */
+          var compactNote = space ? core.buildWorkspaceNote(ws(), kind, 'compact') : '';
+          if (compactNote) appendUserTurn(messages, compactNote, false);
         }
         setStage(entry, waitingStage(), '');
         var req = makeRequestSignal(entry);
@@ -1291,16 +1518,24 @@
           turn = await askOnce(messages, fitted.maxTokens, req.signal);
         } catch (error) {
           req.cleanup();
+          var salvage = keepPartial(error);
           assertCurrent(target);
-          /* 单请求被实时插话打断（任务本身未被取消）：留在同一会话消费 inbox 继续！ */
+          /* 单请求被实时插话打断（任务本身未被取消）：留在同一会话消费 inbox 继续（已经写出的半稿先抢救进工作台）。 */
           if ((isAbort(error) || (req.signal && req.signal.aborted)) && !taskAborted(entry) && entry.inbox.length > 0) {
             continue;
           }
           if (isAbort(error) || taskAborted(entry) || (error && error.code === 'model_changed')) throw error;
           var detail = message(error);
+          /* 流式断开，但已经写出了一大段：抢救进工作台，在同一会话里接着写（每次会话最多自动一次）。 */
+          if (salvage && autoContinues < 1 && continuable(error)) {
+            autoContinues += 1;
+            if (job) job.log('传输中断（' + detail.replace(/\s+/g, ' ').slice(0, 80) + '），已收到 ' + core.formatCount(salvage.length) + ' 字，抢救进草稿工作台后接着写');
+            continue;
+          }
           if (error && error.code === 'provider_stop') {
             if (/max_tokens|length/i.test(detail)) {
-              throw new Error('总导演本轮输出达到长度上限被截断（' + detail + '）。请到「导演 → 配置」把「编纲回复上限」调大后沿断点继续。');
+              throw new Error('总导演本轮输出达到长度上限被截断（' + detail + '）' + (salvage ? '；已写出的 ' + core.formatCount(salvage.length) + ' 字已保存，沿断点继续会接着写' : '')
+                + '。请到「导演 → 配置」把「编纲回复上限」调大后沿断点继续。');
             }
             throw error;
           }
@@ -1324,6 +1559,7 @@
             await switchToText(detail.slice(0, 200), true);
             continue;
           }
+          if (salvage && job) job.log('已写出的 ' + core.formatCount(salvage.length) + ' 字已随断点保存，沿断点继续会先把它抢救进草稿工作台');
           throw error;
         }
         req.cleanup();
@@ -1337,31 +1573,34 @@
             if (said) messages.push({ role: 'assistant', content: said });
             continue;
           }
-          if (!forced && !nudged && localRounds === 0 && CANT_READ_CLAIM.test(said)) {
+          /*
+           * 工作台里已经有大纲：这一句（甚至空回复）就是交付确认，交给调用方合成与质检。
+           * 不再套「只说不做」「推说看不了」的检测——「草稿写好了，现在开始执导」这种收尾会被误判，甚至触发协议降级。
+           */
+          var drafted = hasOutline();
+          if (!drafted && !forced && !nudged && localRounds === 0 && CANT_READ_CLAIM.test(said)) {
             nudged = true;
             messages.push({ role: 'assistant', content: said });
             appendUserTurn(messages, '（系统提示：你已配备只读 VFS 工具 ls / read / grep，可直接查阅 wb:/、var:/、chat:/、card:/ 的完整原文与变量结构。请立即调用只读工具查证后再交付产出，不要推说看不了。）', false);
             await checkpoint();
             continue;
           }
-          if (!forced && !nudged && localRounds === 0 && protocol.stalled(said, turn.reasoning)) {
+          if (!drafted && !forced && !nudged && localRounds === 0 && protocol.stalled(said, turn.reasoning)) {
             nudged = true;
             messages.push({ role: 'assistant', content: said });
             appendUserTurn(messages, '（系统提示：上一条回复没有发出任何工具调用。如需查阅世界书、变量或历史，请立即调用只读工具；若已查证充分，请直接交付完整产出。）', false);
             await checkpoint();
             continue;
           }
-          if (!forced && nudged && localRounds === 0 && proto.mode === 'native' && cfg.toolProtocol === 'auto' && protocol.stalled(said, turn.reasoning)) {
+          if (!drafted && !forced && nudged && localRounds === 0 && proto.mode === 'native' && cfg.toolProtocol === 'auto' && protocol.stalled(said, turn.reasoning)) {
             await switchToText('模型未响应原生函数调用', false);
             continue;
           }
-          return { text: said, protocol: proto.mode, protocolKey: proto.key, protocolFallback: proto.fallback === true, rounds: rounds, stepRounds: stepRounds, toolCalls: toolCount, messages: snapshotMessages() };
+          return result(said);
         }
 
         if (forced) {
-          if (turn.prose) {
-            return { text: turn.prose, protocol: proto.mode, protocolKey: proto.key, protocolFallback: proto.fallback === true, rounds: rounds, stepRounds: stepRounds, toolCalls: toolCount, messages: snapshotMessages() };
-          }
+          if (turn.prose || hasOutline()) return result(turn.prose);
           if (finalTries < 1) {
             finalTries += 1;
             var fallbackReq = makeRequestSignal(entry);
@@ -1369,19 +1608,22 @@
             try {
               fallbackText = str(await llm.chatTask({
                 kind: 'director',
-                messages: plainMessages(messages).concat([{ role: 'user', content: '请停止调用任何工具，直接基于上面已查到的全部资料，按要求的四段标签格式交付最终正文。' }]),
+                messages: plainMessages(messages).concat([{ role: 'user', content: core.buildFinaleNote(forced, ws(), kind, cfg.maxSteps) }]),
                 maxTokens: fitted.maxTokens, timeoutMs: settings.timeoutMs, signal: fallbackReq.signal, retries: 0, cacheMs: MODEL_CACHE_MS,
-                generationId: options.generationId || 'reader-director-plan'
+                generationId: options.generationId || 'reader-director-plan', stream: true, onStream: streamWatcher(), allowEmpty: hasOutline()
               }));
             } catch (fbErr) {
               fallbackReq.cleanup();
+              streamDone();
+              keepPartial(fbErr);
               if ((isAbort(fbErr) || (fallbackReq.signal && fallbackReq.signal.aborted)) && !taskAborted(entry) && entry.inbox.length > 0) continue;
               throw fbErr;
             }
             fallbackReq.cleanup();
+            streamDone();
             assertCurrent(target);
             var cleanFinal = protocol.parse(fallbackText).prose || fallbackText.trim();
-            return { text: cleanFinal, protocol: proto.mode, protocolKey: proto.key, protocolFallback: proto.fallback === true, rounds: rounds, stepRounds: stepRounds, toolCalls: toolCount, messages: snapshotMessages() };
+            return result(cleanFinal);
           }
           throw new Error('总导演在工具预算耗尽后仍未交付正文产出');
         }
@@ -1398,12 +1640,12 @@
         var outcomes = [];
         try {
           outcomes = canRunParallel(turn.calls)
-            ? await kernel.mapLimit(turn.calls, PARALLEL_READS, function (call) { assertCurrent(target); return execReadTool(call, taskSignal); })
+            ? await kernel.mapLimit(turn.calls, PARALLEL_READS, function (call) { assertCurrent(target); return execTool(call, taskSignal); })
             : [];
           if (!outcomes.length) {
             for (var cIdx = 0; cIdx < turn.calls.length; cIdx += 1) {
               assertCurrent(target);
-              outcomes.push(await execReadTool(turn.calls[cIdx], taskSignal));
+              outcomes.push(await execTool(turn.calls[cIdx], taskSignal));
             }
           }
         } catch (toolErr) {
@@ -1418,13 +1660,15 @@
         /* 工具全部执行完毕后再把整组 call + result + seen 缓存与计数原子提交并落盘，杜绝半截断点与缓存锁死。 */
         messages.push(callMessage);
         var textBlocks = [];
+        /* 同一批里草稿被改过：这一批的 draft_read 结果可能是改之前读的，不进 seen。 */
+        var batchWrote = outcomes.some(function (item) { return item && item.wrote; });
         for (var oIdx = 0; oIdx < outcomes.length; oIdx += 1) {
           var callItem = turn.calls[oIdx];
           var outcome = outcomes[oIdx];
-          if (outcome.ok && !outcome.reused && outcome.signature) {
+          if (outcome.ok && !outcome.reused && outcome.signature && !(outcome.draft && batchWrote)) {
             seen[outcome.signature] = { content: outcome.body, inContext: true };
-            toolCount += 1;
           }
+          if (outcome.ok && !outcome.reused && outcome.signature && !outcome.draft) toolCount += 1;
           if (native) {
             messages.push({
               role: 'tool', tool_call_id: callItem.id, toolResult: true, toolName: callItem.name || '?', toolStatus: outcome.status,
@@ -1452,16 +1696,26 @@
         var tail = '';
         if (idleRepeats >= 2 || idleStreak >= 3) {
           forced = 'no_progress';
-          tail = '（连续出现重复或无效的只读查阅调用，已拦截空转。请不再调用工具，立即基于已查到的全部资料，直接按要求交付最终四段标签产出。）';
-          if (job) job.log('拦截重复/无效查阅调用，要求总导演基于现有资料收尾');
+          tail = core.buildFinaleNote('no_progress', ws(), kind, cfg.maxSteps);
+          if (job) job.log('拦截重复/无效的工具调用，要求总导演基于现有资料收尾');
         } else if (stepRounds >= cfg.maxSteps) {
-          forced = 'step_limit';
-          tail = '（已达到本次工具轮数预算上限（' + cfg.maxSteps + ' 轮）。请不再调用工具，立即基于已查到的全部资料，直接按要求交付最终四段标签产出。）';
-          if (job) job.log('达到工具轮数上限（' + cfg.maxSteps + ' 轮），要求总导演基于已查资料收尾');
+          if (grace === null && hasDraft()) {
+            grace = GRACE_ROUNDS;
+            tail = core.buildGraceNote(ws(), kind, cfg.maxSteps, GRACE_ROUNDS);
+            if (job) job.log('达到工具轮数上限（' + cfg.maxSteps + ' 轮）：草稿工作台已有稿子，再给 ' + GRACE_ROUNDS + ' 轮只限草稿工具的收尾');
+          } else if (grace !== null && grace > 1) {
+            grace -= 1;
+          } else {
+            forced = 'step_limit';
+            tail = core.buildFinaleNote('step_limit', ws(), kind, cfg.maxSteps);
+            if (job) job.log('达到工具轮数上限（' + cfg.maxSteps + ' 轮），要求总导演' + (hasDraft() ? '基于草稿工作台直接交付' : '基于已查资料收尾'));
+          }
         } else if (turn.truncated) {
-          tail = '（上一条回复里有一个工具块未写完，未执行。请重新发起查阅，或基于现有资料直接交付产出。）';
+          tail = '（上一条回复里有一个工具块未写完，未执行。请重新发起调用（draft_write 的内容太长就拆成几次 append），或基于现有资料直接交付产出。）';
         } else if (!native) {
-          tail = '（以上是只读工具返回结果。若仍有信息盲区请继续查阅；若已查证充分，请一气呵成完成大纲撰写与自检，直接交付四段标签产出。）';
+          tail = space
+            ? '（以上是工具返回结果。仍有信息盲区就继续查阅；查证充分后用 draft_write 把大纲分块写进草稿工作台（也可以直接交付四段标签），draft_check 通过后回复一句简短的交付确认即可。）'
+            : '（以上是只读工具返回结果。若仍有信息盲区请继续查阅；若已查证充分，请一气呵成完成大纲撰写与自检，直接交付四段标签产出。）';
         }
 
         if (native) {
@@ -1594,6 +1848,59 @@
       });
     }
 
+    /*
+     * 草稿工作台与断流半稿的读写口：只改内存里的这一份草稿对象，落盘交给 saveDraft / saveRsDraft（epoch 守卫）。
+     * 定稿、放弃、切卷之后草稿换了对象：工作台的 set 一律抛 director_stale，半稿的 set 静默作废，绝不写到别的草稿上。
+     * 编纲与重构共用；isCurrent 判断这份草稿是否还是当前的那一份。
+     */
+    function draftSpace(draft, kind, isCurrent) {
+      return {
+        kind: kind,
+        get: function () { return draft.workspace; },
+        set: function (next) {
+          if (!isCurrent()) throw staleError('这份草稿已经作废');
+          draft.workspace = core.normalizeWorkspace(next, kind);
+        }
+      };
+    }
+    function partialSlot(draft, isCurrent) {
+      return {
+        get: function () { return draft.partialOutput || null; },
+        set: function (value) {
+          if (!isCurrent()) return;
+          draft.partialOutput = value && str(value.text).trim()
+            ? { text: str(value.text).slice(0, 120000), reason: str(value.reason).slice(0, 200), at: Number(value.at) || Date.now() } : null;
+        }
+      };
+    }
+
+    /* 断点续传时把工作台进度接在会话末尾；末尾已经是上一次续传留下的同类提示就换成新的，不一条条叠上去。 */
+    var RESUME_MARK = '【草稿工作台进度（断点续传）】';
+    function appendResumeNote(messages, workspace, kind) {
+      var note = core.buildWorkspaceNote(workspace, kind, 'resume');
+      if (!note || !Array.isArray(messages) || !messages.length) return;
+      var last = messages[messages.length - 1];
+      var content = last && last.role === 'user' ? str(last.content) : '';
+      var at = content.lastIndexOf(RESUME_MARK);
+      if (at >= 0 && content.slice(at).indexOf('\n\n---\n\n') < 0) {
+        if (content.slice(at) === note) return;
+        last.content = content.slice(0, at).replace(/(?:\s*\n---\n\s*)+$/, '').trim();
+        if (!last.content) messages.pop();
+      }
+      appendUserTurn(messages, note, false);
+    }
+
+    /* 交付合成的过程记进日志：哪些段落取自工作台、哪些是回复里没写完而存成的半稿。 */
+    function noteComposition(job, composed) {
+      if (!job || !composed) return;
+      var files = {};
+      core.DRAFT_SLOTS.forEach(function (slot) { if (slot.tag) files[slot.tag] = slot.file; });
+      var fromDraft = Object.keys(composed.used || {}).filter(function (tag) { return composed.used[tag] === 'workspace'; }).map(function (tag) { return files[tag] || tag; });
+      if (fromDraft.length) job.log('交付合成：' + fromDraft.join('、') + ' 取自草稿工作台' + (composed.backfilled.length ? '，回复里的 ' + composed.backfilled.join('、') + ' 已回填' : ''));
+      else if (composed.backfilled.length) job.log('交付合成：回复里的 ' + composed.backfilled.join('、') + ' 已回填草稿工作台');
+      if (composed.salvaged.length) job.log('回复里没写完的段落已存成半稿：' + composed.salvaged.join('、'));
+    }
+
     async function commitVolume(target, final, userName, entry) {
       assertCurrent(target);
       if (entry && taskAborted(entry)) throw staleError('已停止');
@@ -1656,6 +1963,7 @@
       var draft = target.draft;
       if (!draft) throw new Error('编纲草稿已不存在');
       var epoch = draft.epoch;
+      var planCurrent = function () { return target.draft === draft && draft.epoch === epoch; };
       var settings = getSettings();
       var signal = signalOf(entry), job = entry.job;
       var userName = kit.names().user;
@@ -1706,7 +2014,10 @@
             draft.protocol || 'native'
           );
         }
-        job.log('从断点续传（已累计 ' + draft.rounds + ' 轮工具调用，查阅 ' + draft.toolCalls + ' 项资料）');
+        job.log('从断点续传（已累计 ' + draft.rounds + ' 轮工具调用，查阅 ' + draft.toolCalls + ' 项资料'
+          + (core.workspaceHasContent(draft.workspace) ? '，草稿工作台已有 ' + core.formatCount(core.workspaceSummary(draft.workspace, 'plan').totalChars) + ' 字' : '') + '）');
+        /* 草稿工作台里已有进度：明确告诉它从哪里接着写。还有没并进工作台的半稿时，由 runDirectorAgent 抢救后一并说明。 */
+        if (!draft.partialOutput) appendResumeNote(draft.messages, draft.workspace, 'plan');
       }
 
       for (;;) {
@@ -1723,7 +2034,9 @@
           preferredProtocol: draft.protocol, preferredProtocolKey: draft.protocolKey, preferredProtocolFallback: draft.protocolFallback,
           stageOf: function (toolCount) { return planStage(draft, toolCount); },
           generationId: 'reader-director-plan', modelWindow: modelWindow,
-          initialRounds: draft.rounds, initialStepRounds: draft.stepRounds, initialToolCalls: draft.toolCalls,
+          initialRounds: draft.rounds, initialStepRounds: draft.stepRounds, initialToolCalls: draft.toolCalls, initialDraftOps: draft.draftOps,
+          workspace: draftSpace(draft, 'plan', planCurrent),
+          partial: partialSlot(draft, planCurrent),
           onInbox: async function (batch) {
             if (target.draft !== draft || draft.epoch !== epoch) return;
             batch.forEach(function (item) { draft.feedback.push({ at: item.at || Date.now(), text: str(item.text).trim() }); });
@@ -1743,6 +2056,7 @@
             draft.rounds = cp.rounds;
             draft.stepRounds = cp.stepRounds;
             draft.toolCalls = cp.toolCalls;
+            draft.draftOps = cp.draftOps || 0;
             await saveDraft(target, draft, epoch);
             emit('plan');
           }
@@ -1757,13 +2071,15 @@
         draft.rounds = outcome.rounds;
         draft.stepRounds = outcome.stepRounds;
         draft.toolCalls = outcome.toolCalls;
-        /* 上一稿只有 <self_check> 软问题时，模型可以只重交 <self_check>：换进上一稿再质检，不必整卷重写。 */
-        var delivery = str(outcome.text);
-        if (draft.softPending && str(draft.lastOutput).trim() && core.isSelfCheckOnly(delivery)) {
-          delivery = core.mergeSelfCheck(draft.lastOutput, delivery);
-          job.log('总导演只重交了自检段，已换进上一稿重新质检');
-        }
-        draft.lastOutput = delivery;
+        draft.draftOps = outcome.draftOps || draft.draftOps;
+        /*
+         * 交付合成：回复里写了（闭合、非空）的标签以回复为准并回填工作台，没写的从工作台取。
+         * 所以只重交一段 <self_check>、只补一段 <first_brief>、或者只回一句「已交付」都能和工作台拼成完整的一稿。
+         */
+        var checked = core.validateDelivery(str(outcome.text), draft.workspace, 'plan', { userName: userName });
+        noteComposition(job, checked.composed);
+        draft.workspace = checked.workspace;
+        draft.lastOutput = checked.composed.text;
         draft.activity = 'checking';
         setStage(entry, '质检：校验大纲结构、索引与防剧透简报');
         emit('plan');
@@ -1777,12 +2093,11 @@
           continue;
         }
 
-        var checked = core.validateFinalDelivery(delivery, { userName: userName });
         if (!checked.ok) {
           draft.canForceCommit = !checked.hardFailure;
           draft.softPending = !checked.hardFailure;
           draft.messages.push({ role: 'assistant', content: str(outcome.text).trim() || '（上一次回复为空）' });
-          appendUserTurn(draft.messages, core.buildRevisionPrompt(checked.issues, { softOnly: !checked.hardFailure }), true);
+          appendUserTurn(draft.messages, core.buildRevisionPrompt(checked.issues, { softOnly: !checked.hardFailure, workspace: !!core.workspaceOutline(draft.workspace).trim() }), true);
           if (draft.revisions < MAX_SELF_REVISIONS) {
             draft.revisions += 1;
             if (draft.stepRounds >= cfg.maxSteps) draft.stepRounds = Math.max(0, cfg.maxSteps - 4);
@@ -1835,7 +2150,7 @@
             var texts = leftover.map(function (item) { return str(item && item.text).trim(); }).filter(Boolean);
             leftover.forEach(function (item) { if (item && str(item.text).trim()) draft.feedback.push({ at: item.at || Date.now(), text: str(item.text).trim() }); });
             if (texts.length && Array.isArray(draft.messages) && draft.messages.length) {
-              appendUserTurn(draft.messages, core.buildInterjectionMessage(texts.join('\n')), true);
+              appendUserTurn(draft.messages, core.buildInterjectionMessage(texts.join('\n'), { workspace: core.workspaceHasContent(draft.workspace) }), true);
             }
           }
           draft.state = aborted ? (entry.reason === 'chat' ? 'interrupted' : 'paused') : 'failed';
@@ -1861,9 +2176,11 @@
       if (!target.key) throw new Error('先打开一个聊天');
       if (volumeActive(target)) throw new Error('这个聊天已经有一卷在执导');
       var draft = target.draft;
-      if (!draft || !str(draft.lastOutput).trim()) throw new Error('没有可直接定稿的草稿输出');
+      var drafted = !!(draft && core.workspaceHasContent(draft.workspace));
+      if (!draft || (!drafted && !str(draft.lastOutput).trim())) throw new Error('没有可直接定稿的草稿输出');
       var userName = kit.names().user;
-      var checked = core.validateFinalDelivery(draft.lastOutput, { userName: userName });
+      /* 工作台是最新的一稿（每次交付都回填进去、之后的 draft_edit 也改在这里）；没有工作台的旧断点才用最近一次的输出。 */
+      var checked = drafted ? core.validateDelivery('', draft.workspace, 'plan', { userName: userName }) : core.validateFinalDelivery(draft.lastOutput, { userName: userName });
       if (checked.hardFailure) throw new Error('当前草稿存在结构硬伤，不能直接定稿：' + checked.hardIssues[0]);
       var entry = begin('plan', { title: '导演 · 定稿落盘', stage: '按当前草稿定稿落盘', steps: 0 });
       entry.committing = true;
@@ -2240,6 +2557,7 @@
       var previousStatus = target.active.status;
       var rsDraft = null;
       var rsEpoch = '';
+      var rsCurrent = function () { return !!rsDraft && target.rsDraft === rsDraft && rsDraft.epoch === rsEpoch; };
       try {
         target.active.status = 'restructuring';
         emit('volume');
@@ -2277,9 +2595,11 @@
             var extraNote = str(opts.feedback).trim();
             rsDraft.feedback.push({ at: Date.now(), text: extraNote });
             rsDraft.softPending = false;
-            appendUserTurn(rsDraft.messages, core.buildInterjectionMessage(extraNote), true);
+            appendUserTurn(rsDraft.messages, core.buildInterjectionMessage(extraNote, { workspace: core.workspaceHasContent(rsDraft.workspace) }), true);
           }
-          entry.job.log('从重构断点续传（已累计 ' + rsDraft.rounds + ' 轮工具调用，查阅 ' + rsDraft.toolCalls + ' 项资料）');
+          entry.job.log('从重构断点续传（已累计 ' + rsDraft.rounds + ' 轮工具调用，查阅 ' + rsDraft.toolCalls + ' 项资料'
+            + (core.workspaceHasContent(rsDraft.workspace) ? '，草稿工作台已有 ' + core.formatCount(core.workspaceSummary(rsDraft.workspace, 'restructure').totalChars) + ' 字' : '') + '）');
+          if (!rsDraft.partialOutput) appendResumeNote(rsDraft.messages, rsDraft.workspace, 'restructure');
           await saveRsDraft(target, rsDraft, rsEpoch);
         } else {
           var reason = str(opts.reason).trim() || (opts.feedback ? '用户要求修订大纲' : '手动发起的结构重构');
@@ -2331,7 +2651,9 @@
             generationId: 'reader-director-restructure',
             modelWindow: modelWindow,
             preferredProtocol: rsDraft.protocol, preferredProtocolKey: rsDraft.protocolKey, preferredProtocolFallback: rsDraft.protocolFallback,
-            initialRounds: rsDraft.rounds, initialStepRounds: rsDraft.stepRounds, initialToolCalls: rsDraft.toolCalls,
+            initialRounds: rsDraft.rounds, initialStepRounds: rsDraft.stepRounds, initialToolCalls: rsDraft.toolCalls, initialDraftOps: rsDraft.draftOps,
+            workspace: draftSpace(rsDraft, 'restructure', rsCurrent),
+            partial: partialSlot(rsDraft, rsCurrent),
             baseMessages: [{ role: 'system', content: '' }].concat(rsDraft.messages),
             onInbox: async function (batch) {
               if (target.rsDraft !== rsDraft || rsDraft.epoch !== rsEpoch) return;
@@ -2352,6 +2674,7 @@
               rsDraft.rounds = cp.rounds;
               rsDraft.stepRounds = cp.stepRounds;
               rsDraft.toolCalls = cp.toolCalls;
+              rsDraft.draftOps = cp.draftOps || 0;
               await saveRsDraft(target, rsDraft, rsEpoch);
               emit('volume');
             }
@@ -2365,12 +2688,12 @@
           rsDraft.rounds = outcome.rounds;
           rsDraft.stepRounds = outcome.stepRounds;
           rsDraft.toolCalls = outcome.toolCalls;
-          var delivery = str(outcome.text);
-          if (rsDraft.softPending && str(rsDraft.lastOutput).trim() && core.isSelfCheckOnly(delivery)) {
-            delivery = core.mergeSelfCheck(rsDraft.lastOutput, delivery);
-            entry.job.log('总导演只重交了自检段，已换进上一版重构稿重新质检');
-          }
-          rsDraft.lastOutput = delivery;
+          rsDraft.draftOps = outcome.draftOps || rsDraft.draftOps;
+          /* 与编纲同一套交付合成：回复里写了的标签以回复为准并回填，没写的从重构草稿的工作台取。 */
+          var checked = core.validateDelivery(str(outcome.text), rsDraft.workspace, 'restructure', { userName: userName });
+          noteComposition(entry.job, checked.composed);
+          rsDraft.workspace = checked.workspace;
+          rsDraft.lastOutput = checked.composed.text;
           rsDraft.activity = 'checking';
           setStage(entry, '质检：校验重构稿的结构、索引与防剧透简报');
           emit('volume');
@@ -2383,12 +2706,11 @@
             continue;
           }
 
-          var checked = core.validateFinalDelivery(delivery, { userName: userName });
           if (!checked.ok) {
             rsDraft.canForceCommit = !checked.hardFailure;
             rsDraft.softPending = !checked.hardFailure;
             rsDraft.messages.push({ role: 'assistant', content: str(outcome.text).trim() || '（上一次回复为空）' });
-            appendUserTurn(rsDraft.messages, core.buildRevisionPrompt(checked.issues, { softOnly: !checked.hardFailure }), true);
+            appendUserTurn(rsDraft.messages, core.buildRevisionPrompt(checked.issues, { softOnly: !checked.hardFailure, workspace: !!core.workspaceOutline(rsDraft.workspace).trim() }), true);
             if (rsDraft.revisions < MAX_SELF_REVISIONS) {
               rsDraft.revisions += 1;
               if (rsDraft.stepRounds >= cfg.maxSteps) rsDraft.stepRounds = Math.max(0, cfg.maxSteps - 4);
@@ -2432,7 +2754,7 @@
             var texts = leftover.map(function (item) { return str(item && item.text).trim(); }).filter(Boolean);
             leftover.forEach(function (item) { if (item && str(item.text).trim()) rsDraft.feedback.push({ at: item.at || Date.now(), text: str(item.text).trim() }); });
             if (texts.length && Array.isArray(rsDraft.messages) && rsDraft.messages.length) {
-              appendUserTurn(rsDraft.messages, core.buildInterjectionMessage(texts.join('\n')), true);
+              appendUserTurn(rsDraft.messages, core.buildInterjectionMessage(texts.join('\n'), { workspace: core.workspaceHasContent(rsDraft.workspace) }), true);
             }
           }
           rsDraft.state = aborted ? (entry.reason === 'chat' ? 'interrupted' : 'paused') : 'failed';
@@ -2477,7 +2799,8 @@
       var target = await ensureSession();
       if (!target.key || !volumeActive(target)) throw new Error('这个聊天里没有正在执导的分卷');
       var rsDraft = target.rsDraft;
-      if (!rsDraft || !str(rsDraft.lastOutput).trim()) throw new Error('没有可直接落盘的重构草稿输出');
+      var rsDrafted = !!(rsDraft && core.workspaceHasContent(rsDraft.workspace));
+      if (!rsDraft || (!rsDrafted && !str(rsDraft.lastOutput).trim())) throw new Error('没有可直接落盘的重构草稿输出');
       var view = chatView();
       var floor = view.lastAssistant();
       var picked = core.pickSnapshot(target.snaps, view, view.lastVisible());
@@ -2488,7 +2811,7 @@
         throw new Error('当前聊天楼层或大纲版本已经改变，旧的重构草稿已过期，不能直接落盘；请点「放弃重构断点」后重新发起「重构大纲」。');
       }
       var userName = kit.names().user;
-      var checked = core.validateFinalDelivery(rsDraft.lastOutput, { userName: userName });
+      var checked = rsDrafted ? core.validateDelivery('', rsDraft.workspace, 'restructure', { userName: userName }) : core.validateFinalDelivery(rsDraft.lastOutput, { userName: userName });
       if (checked.hardFailure) throw new Error('当前重构草稿存在结构硬伤，不能直接落盘：' + checked.hardIssues[0]);
       var entry = begin('restructure', { title: '导演 · 重构落盘', stage: '按当前重构草稿落盘', steps: 0 });
       entry.committing = true;
@@ -2935,7 +3258,7 @@
         draft.feedback.push({ at: Date.now(), text: note });
         if (Array.isArray(draft.messages) && draft.messages.length) {
           draft.messages = normalizeConversationMessages(draft.messages, draft.protocol || 'native');
-          appendUserTurn(draft.messages, core.buildInterjectionMessage(note), true);
+          appendUserTurn(draft.messages, core.buildInterjectionMessage(note, { workspace: core.workspaceHasContent(draft.workspace) }), true);
         }
         var cfg = agentToolConfig();
         draft.revisions = 0;
@@ -3150,20 +3473,46 @@
      *   hasCheckpoint / canForceCommit / feedback / lastOutput / error / updatedAt
      * 它在一个会话里自己决定查几轮、写几稿，所以这里没有「第几步、共几步」。
      */
+    /*
+     * 草稿工作台在状态里的样子：概要（字数、写到哪个板块 / Phase、半稿）、各槽位正文（给「草稿预览」）、能不能直接定稿。
+     * getStatus 每次事件都会被调用，按「哪一份草稿、第几版工作台」记一份，没变就不重算（整份质检不便宜）。
+     */
+    var spaceCache = { draft: null, rev: -1, value: null };
+    function workspaceView(draft, kind) {
+      var ws = draft.workspace || core.emptyWorkspace();
+      if (spaceCache.draft === draft && spaceCache.rev === ws.rev && spaceCache.value) return spaceCache.value;
+      var summary = core.workspaceSummary(ws, kind);
+      var files = {};
+      Object.keys(ws.files || {}).forEach(function (name) { files[name] = str(ws.files[name] && ws.files[name].text); });
+      var committable = false;
+      if (summary.ready) {
+        try { committable = !core.validateDelivery('', ws, kind, { userName: kit.names().user }).hardFailure; } catch (error) { committable = false; }
+      }
+      spaceCache = { draft: draft, rev: ws.rev, value: { summary: summary, files: files, committable: committable } };
+      return spaceCache.value;
+    }
+
     function agentState(draft, kind, running, stale) {
       var state = running ? 'running' : draft.state;
       var labels = ACTIVITY_LABEL[kind];
+      var space = workspaceView(draft, kind === 'restructure' ? 'restructure' : 'plan');
+      /* 流式收到东西时，「此刻在做什么」换成实时的那一句（正在构思推演 / 正在撰写 / 正在写入草稿 + 字数）。 */
+      var live = running && work && work.stream ? work.stream : null;
       return {
         state: state,
         activity: running ? draft.activity : '',
-        activityLabel: running ? (labels[draft.activity] || labels.exploring) : (IDLE_LABEL[state] || IDLE_LABEL.interrupted),
+        activityLabel: running ? (live && live.label ? live.label : labels[draft.activity] || labels.exploring) : (IDLE_LABEL[state] || IDLE_LABEL.interrupted),
         stage: running && work ? str(work.stage) : '',
         rounds: draft.rounds, toolCalls: draft.toolCalls,
         revisions: draft.revisions, maxRevisions: MAX_SELF_REVISIONS,
         hasCheckpoint: Array.isArray(draft.messages) && draft.messages.length > 0,
-        canForceCommit: !running && !stale && draft.canForceCommit === true && !!str(draft.lastOutput).trim(),
+        /* 能直接定稿：上一次交付只差自检软问题；或者工作台里的一稿结构完整、没有半稿（模型没来得及回确认就断了也能定）。 */
+        canForceCommit: !running && !stale && ((draft.canForceCommit === true && !!str(draft.lastOutput).trim()) || space.committable),
         feedback: draft.feedback.slice(), lastOutput: draft.lastOutput,
-        error: draft.error, updatedAt: draft.updatedAt
+        error: draft.error, updatedAt: draft.updatedAt,
+        workspace: space.summary, draftFiles: space.files, draftOps: draft.draftOps || 0,
+        partialChars: draft.partialOutput ? str(draft.partialOutput.text).length : 0,
+        stream: live ? { phase: live.phase, label: live.label, textChars: live.textChars, reasoningChars: live.reasoningChars, toolName: live.toolName, toolChars: live.toolChars } : null
       };
     }
 

@@ -287,23 +287,31 @@
         : { native: false, via: '', reason: '当前的模型网关没有原生函数调用' };
       return Object.assign({}, support, { model: support.model || t.model, key: t.cacheKey + '|' + t.model });
     }
+    /* stream / onStream / allowEmpty 原样交给网关（见 reader-llm-gateway.js 的 chat / chatTools）；不传就是原来的整份请求。 */
+    function streamOptions(options) {
+      var out = {};
+      if (options.stream === true) out.stream = true;
+      if (typeof options.onStream === 'function') out.onStream = options.onStream;
+      if (options.allowEmpty === true) out.allowEmpty = true;
+      return out;
+    }
     async function chatTask(options) {
       var p = await prepareTask(options);
-      return gateway.chat({ api:p.t.api, route:'agent', modelOverride:p.info.model, messages:options.messages, temperature:options.temperature,
+      return gateway.chat(Object.assign({ api:p.t.api, route:'agent', modelOverride:p.info.model, messages:options.messages, temperature:options.temperature,
         maxTokens:options.maxTokens, contextWindow:p.info.contextWindow, signal:options.signal, retries:options.retries === undefined ? 0 : options.retries, timeoutMs:options.timeoutMs,
         generationId:options.generationId || 'reader-child', checkProviderStop:true,
-        reasoningEffort:p.effort });
+        reasoningEffort:p.effort }, streamOptions(options)));
     }
     async function chatTaskTools(options) {
       var p = await prepareTask(options);
       if (p.t.textCompletion) throw Object.assign(new Error('酒馆主 API 是文本补全类型（' + p.t.source + '），没有原生函数调用'), { code: 'no_native_tools' });
       if (typeof gateway.chatTools !== 'function') throw Object.assign(new Error('当前的模型网关没有原生函数调用'), { code: 'no_native_tools' });
-      return gateway.chatTools({ api:p.t.api, route:'agent', modelOverride:p.info.model, messages:options.messages,
+      return gateway.chatTools(Object.assign({ api:p.t.api, route:'agent', modelOverride:p.info.model, messages:options.messages,
         tools:options.tools, toolChoice:options.toolChoice, textOnly:options.textOnly !== false,
         temperature:options.temperature, maxTokens:options.maxTokens, contextWindow:p.info.contextWindow, signal:options.signal,
         retries:options.retries === undefined ? 0 : options.retries, timeoutMs:options.timeoutMs,
         generationId:options.generationId || 'reader-child', checkProviderStop:true,
-        reasoningEffort:p.effort });
+        reasoningEffort:p.effort }, streamOptions(options)));
     }
     return { getConnectionPreset:function (id) { return publicPreset(getPreset(id)); }, saveConnectionPreset:savePreset, getTaskConnection:getConnection,
       saveTaskConnection:saveConnection, listTaskModels:listModels, resolveTaskModel:resolveModel, taskToolSupport:taskToolSupport,

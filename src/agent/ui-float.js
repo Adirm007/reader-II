@@ -35,6 +35,7 @@
     var open = Object.create(null);         /* 哪些任务是展开的 */
     var touched = Object.create(null);      /* 用户自己点过展开 / 收起的任务：之后不再替他决定 */
     var signature = '';
+    var structure = '';                     /* 上一次整块重画时、去掉「当前动作」文字的样子：只有那行字变了就就地改字，不重建按钮 */
 
     function call(name, fallback) {
       try { return typeof options[name] === 'function' ? options[name]() : fallback; } catch (error) { return fallback; }
@@ -69,12 +70,17 @@
       return node;
     }
 
-    function rowHtml(job) {
+    function stageLine(job) {
+      return job.state === 'running' ? (job.stage || job.detail || '进行中') : (job.result || (job.state === 'done' ? '完成' : job.state === 'failed' ? '失败' : '已停止'));
+    }
+
+    /* bare：不带「当前动作」那行字（用来判断除了那行字之外有没有别的变化）。 */
+    function rowHtml(job, bare) {
       var running = job.state === 'running';
       var expanded = open[job.id] === true;
       var steps = job.steps > 0 ? Math.min(job.step, job.steps) + '/' + job.steps : '';
       var percent = job.steps > 0 ? Math.round(Math.min(job.step, job.steps) / job.steps * 100) : 0;
-      var line = running ? (job.stage || job.detail || '进行中') : (job.result || (job.state === 'done' ? '完成' : job.state === 'failed' ? '失败' : '已停止'));
+      var line = bare ? '' : stageLine(job);
       var lines = job.lines.slice(-6);
       if (!running && job.result) lines.push(job.result);
       var more = '';
@@ -116,6 +122,25 @@
     function detach() {
       if (node && node.parentNode && typeof node.remove === 'function') node.remove();
       signature = '';
+      structure = '';
+    }
+
+    /*
+     * 只有「当前动作」那行字变了（流式接收时一秒变两三次）：就地改字。整块重画会把正被按住的「查看 / 停止」按钮换掉，
+     * 按下与松开落在两个不同的节点上，这一下点击就丢了。
+     */
+    function patchStages(list) {
+      if (!node || typeof node.querySelectorAll !== 'function') return false;
+      var rows = node.querySelectorAll('.rf-job');
+      if (rows.length !== list.length) return false;
+      for (var index = 0; index < list.length; index += 1) {
+        if (rows[index].getAttribute('data-job') !== list[index].id) return false;
+        var stage = rows[index].querySelector('.rf-stage');
+        if (!stage) return false;
+        var text = stageLine(list[index]);
+        if (stage.textContent !== text) stage.textContent = text;
+      }
+      return true;
     }
 
     function render() {
@@ -133,8 +158,13 @@
         node.setAttribute('data-theme', call('getTheme', 'cafe'));
         if (!dock()) return;
         var shown = list.slice(0, MAX_ROWS);
-        var html = shown.map(rowHtml).join('') + (list.length > shown.length ? '<div class="rf-rest">另有 ' + (list.length - shown.length) + ' 项后台任务</div>' : '');
-        if (html !== signature) { node.innerHTML = html; signature = html; }
+        var rest = list.length > shown.length ? '<div class="rf-rest">另有 ' + (list.length - shown.length) + ' 项后台任务</div>' : '';
+        var html = shown.map(function (job) { return rowHtml(job, false); }).join('') + rest;
+        if (html !== signature) {
+          var skeleton = shown.map(function (job) { return rowHtml(job, true); }).join('') + rest;
+          if (!(skeleton === structure && patchStages(shown))) { node.innerHTML = html; structure = skeleton; }
+          signature = html;
+        }
       } catch (error) {
         if (env.console && typeof env.console.warn === 'function') env.console.warn('[ReaderII] 状态浮窗渲染失败', error);
       }

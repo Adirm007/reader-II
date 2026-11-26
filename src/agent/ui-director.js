@@ -172,6 +172,17 @@
         + (temp.length ? '<p class="ra-note">一次性的场面与龙套条目会自动停用（只关不删）：' + temp.map(function (item) { return esc(item.name); }).join('、') + '</p>' : '');
     }
 
+    /* 断点横幅里的草稿进度：已经落盘的稿子不会丢，继续时沿当前草稿接着写。 */
+    function draftProgressHtml(a, verb) {
+      var w = a && a.workspace;
+      var parts = [];
+      if (w && w.outlineChars) parts.push('已保存草稿进度（' + draftShape(w) + '），' + verb + '将直接沿当前草稿接续，不会从头重写');
+      else if (w && !w.empty) parts.push('草稿工作台里已有 ' + count(w.totalChars) + ' 字的笔记与段落，' + verb + '时会接着用');
+      if (w && w.partial && w.partial.length) parts.push(w.partial.join('、') + ' 是断流时抢救下来的半稿，会先补完再定稿');
+      if (a && a.partialChars) parts.push('上次断流时已收到的 ' + count(a.partialChars) + ' 字也已保存，' + verb + '时会先抢救进草稿');
+      return parts.length ? '<p class="rd-draft-progress">' + esc(parts.join('；')) + '。</p>' : '';
+    }
+
     function statusHtml(s) {
       var label = STATE_LABEL[s.state] || [s.state, ''];
       var busy = !!s.work;
@@ -214,7 +225,7 @@
       if (s.plan && s.state === 'draft') {
         html += '<div class="rd-banner' + (s.plan.state === 'failed' ? ' is-bad' : '') + '"><h4>编纲断点待续'
           + (s.plan.toolCalls ? '（已查 ' + esc(s.plan.toolCalls) + ' 项资料）' : '') + '</h4><p>'
-          + esc(DRAFT_NOTE[s.plan.state] || '') + (s.plan.error ? '<br>' + esc(s.plan.error) : '') + '</p></div>';
+          + esc(DRAFT_NOTE[s.plan.state] || '') + (s.plan.error ? '<br>' + esc(s.plan.error) : '') + '</p>' + draftProgressHtml(s.plan, '继续编纲') + '</div>';
       }
       if (s.volume && s.restructureDraft && s.state !== 'restructuring') {
         var rs = s.restructureDraft;
@@ -228,7 +239,7 @@
         } else {
           html += '<div class="rd-banner' + (rs.state === 'failed' ? ' is-bad' : '') + '"><h4>结构重构断点待续'
             + (rs.toolCalls ? '（已查 ' + esc(rs.toolCalls) + ' 项资料）' : '') + '</h4><p>'
-            + esc(RS_NOTE[rs.state] || '') + (rs.error ? '<br>' + esc(rs.error) : '') + '</p>'
+            + esc(RS_NOTE[rs.state] || '') + (rs.error ? '<br>' + esc(rs.error) : '') + '</p>' + draftProgressHtml(rs, '继续重构')
             + '<div class="rd-acts">'
             + button('dir-rs-resume', '继续重构', 'is-main is-small', busy)
             + (rs.canForceCommit ? button('dir-rs-force', '按当前重构稿落盘', 'is-small', busy) : '')
@@ -250,7 +261,7 @@
         if (s.canRestoreArchive) acts.push(button('dir-restore', '恢复上一卷', '', busy, ' title="把最近一次归档（或放弃）的那一卷恢复成执导中"'));
       } else if (s.state === 'draft') {
         acts.push(button('dir-resume', '继续编纲', 'is-main', busy));
-        if (s.plan && s.plan.canForceCommit) acts.push(button('dir-draft-force', '忽略自检按当前稿定稿', '', busy, ' title="当前草稿的大纲、索引与简报结构完整，可直接跳过自检告警定稿"'));
+        if (s.plan && s.plan.canForceCommit) acts.push(button('dir-draft-force', '忽略自检按当前稿定稿', '', busy, ' title="按草稿工作台（或最近一次交付）里的当前一稿定稿：大纲、索引与简报结构完整，跳过自检告警；结构硬伤仍会拦下"'));
         acts.push(button('dir-draft-discard', '放弃草稿', 'is-ghost', busy));
       } else if (s.volume) {
         if (s.paused) acts.push(button('dir-resume', '恢复执导', 'is-main', busy));
@@ -295,19 +306,38 @@
      * 它是在一个会话里自己决定查什么、写什么的只读 Agent，没有固定的步数，所以这里不画步骤条；
      * 正在查的那一项、每一步的过程在紧挨着的实时日志（#rd-live）里。
      */
+    function count(value) { return String(Math.max(0, Math.trunc(Number(value) || 0))).replace(/\B(?=(\d{3})+(?!\d))/g, ','); }
+
+    /* 草稿工作台的一句话进度：「3,200 字，含板块 A–C · Phase 1–2」。 */
+    function draftShape(w) {
+      if (!w || !w.outlineChars) return '';
+      return count(w.outlineChars) + ' 字' + (w.shape ? '，含' + w.shape : '');
+    }
+
     function agentHtml(kind, a, note) {
       var stale = a.stale === true;
+      var w = a.workspace || null;
       var badges = [
         '<span class="ra-badge">已查阅 ' + esc(a.toolCalls || 0) + ' 项资料</span>',
         '<span class="ra-badge">工具 ' + esc(a.rounds || 0) + ' 轮</span>'
       ];
+      if (w && w.outlineChars) badges.push('<span class="ra-badge is-ok" data-draft="outline">草稿 ' + esc(count(w.outlineChars)) + ' 字' + (w.sectionRange ? ' · 板块 ' + esc(w.sectionRange) : '') + '</span>');
+      else if (w && !w.empty) badges.push('<span class="ra-badge" data-draft="notes">草稿笔记 ' + esc(count(w.totalChars)) + ' 字</span>');
+      if (w && w.partial && w.partial.length) badges.push('<span class="ra-badge is-warn">半稿待补：' + esc(w.partial.join('、')) + '</span>');
+      if (a.partialChars) badges.push('<span class="ra-badge is-warn">断流半稿 ' + esc(count(a.partialChars)) + ' 字待接续</span>');
       if (a.revisions) badges.push('<span class="ra-badge is-warn">自动重写 ' + esc(a.revisions) + ' / ' + esc(a.maxRevisions || 2) + ' 次</span>');
       if (!stale) badges.push(a.hasCheckpoint ? '<span class="ra-badge is-ok">断点已保存</span>' : '<span class="ra-badge">尚无断点</span>');
+      /* 流式接收中：思考与输出的字数实时跳动（不再一直停在「自主查阅与编纲中」）。 */
+      var live = a.stream && (a.stream.reasoningChars || a.stream.textChars || a.stream.toolChars)
+        ? '<p class="rd-agent-note" data-live="stream">' + [a.stream.reasoningChars ? '已思考 ' + count(a.stream.reasoningChars) + ' 字' : '',
+          a.stream.textChars ? '已输出 ' + count(a.stream.textChars) + ' 字' : '', a.stream.toolChars ? '工具参数 ' + count(a.stream.toolChars) + ' 字' : ''].filter(Boolean).join(' · ') + '</p>'
+        : '';
       return '<div class="rd-agent" data-kind="' + kind + '" data-state="' + esc(stale ? 'stale' : a.state) + '">'
         + '<div class="rd-agent-top"><span class="rd-agent-dot" aria-hidden="true"></span>'
         + '<b class="rd-agent-label">' + esc(stale ? '断点已过期' : a.activityLabel || '') + '</b>'
         + '<span class="rd-agent-kind">' + (kind === 'plan' ? '总导演 · 编纲' : '总导演 · 结构重构') + '</span></div>'
         + '<div class="rd-agent-stats">' + badges.join('') + '</div>'
+        + live
         + (note ? '<p class="rd-agent-note">' + note + '</p>' : '') + '</div>';
     }
 
@@ -323,11 +353,23 @@
     }
 
     /* 实时日志下面：最近一版草稿（折叠着）与已经插过的话。 */
+    var DRAFT_ORDER = ['outline.md', 'index.json', 'first_brief.md', 'self_check.md', 'restructure_note.md', 'notes.md'];
     function flowDraftHtml(s) {
       var a = s.plan || s.restructureDraft;
       if (!a) return '';
       var plan = !!s.plan, html = '';
-      if (a.lastOutput) {
+      var w = a.workspace, files = a.draftFiles || {};
+      if (w && !w.empty) {
+        /* 草稿工作台：总导演边写边存的那一稿（不必等定稿或失败才看得见）。大纲在最前面，其余槽位跟在后面。 */
+        var slots = (w.slots || []).filter(function (slot) { return slot.written; });
+        var body = '<p class="ra-note">' + (w.slots || []).map(function (slot) {
+          return esc(slot.file) + '：' + (slot.written ? esc(count(slot.chars)) + ' 字' + (slot.partial ? '（半稿）' : '') : '未写');
+        }).join('；') + '</p>'
+          + DRAFT_ORDER.filter(function (name) { return slots.some(function (slot) { return slot.file === name; }); }).map(function (name) {
+            return '<div class="ra-sub">' + esc(name) + '</div><div class="rd-pre" data-draft-file="' + esc(name) + '">' + esc(files[name] || '') + '</div>';
+          }).join('');
+        html += fold(plan ? 'ws-draft' : 'rs-ws-draft', (plan ? '草稿预览（' : '重构草稿预览（') + (w.outlineChars ? 'outline.md ' + esc(draftShape(w)) : '共 ' + esc(count(w.totalChars)) + ' 字') + '）', body, false);
+      } else if (a.lastOutput) {
         html += fold(plan ? 'last-out' : 'rs-last-out', (plan ? '最近一版草稿预览（' : '最近一版重构草稿预览（') + esc(a.lastOutput.length) + ' 字）', '<div class="rd-pre">' + esc(a.lastOutput) + '</div>', false);
       }
       if (a.feedback.length) {
@@ -492,11 +534,12 @@
         + numberField('l2Cooldown', '重构后冷却几个回合', settings.l2Cooldown, 0, 20)
         + numberField('plannerMaxTokens', '编纲回复上限（tokens）', settings.plannerMaxTokens, 2048, 65536, 256)
         + numberField('judgeMaxTokens', '场记回复上限（tokens）', settings.judgeMaxTokens, 512, 16384, 128)
-        + numberField('timeoutSec', '单次请求超时（秒）', Math.round(settings.timeoutMs / 1000), 20, 900)
+        + numberField('timeoutSec', '请求超时（秒）', Math.round(settings.timeoutMs / 1000), 20, 900)
         + selectField('cfg.floatMode', '状态浮窗', [['all', '显示全部后台任务'], ['major', '只显示编纲、重构、归档']], settings.floatMode)
         + selectField('cfg.wbPolicy', '新角色建档', [['preview', '列出来等我点写入'], ['auto', '权限允许时自动写入'], ['none', '不建档']], settings.wbPolicy)
         + selectField('cfg.wbTemplateId', '角色条目模板', [['', '模板库的默认模板']].concat(templates.map(function (item) { return [item.id, item.name + (item.builtin ? '（内置）' : '') + ' → ' + item.targetWorldbook]; })), settings.wbTemplateId)
         + '</div>'
+        + '<p class="ra-note">总导演流式接收：请求超时按「连续多久没有收到新数据」计，模型一直在思考或输出就不会被掐断（另有 6 倍超时、至少 30 分钟的总时长上限）；通道不支持流式时仍是整次请求的总时长。</p>'
         + switchField('cfg.autoArchive', settings.autoArchive, '满足完结条件后自动归档', '关着时会停在「待完结」等你确认；自动归档时新角色条目全部保留，一次性条目照常停用')
         + '<div class="ra-row ra-mt">' + button('dir-config-save', '保存配置', 'is-small is-main')
         + '<button type="button" class="ra-btn is-small" data-act="guide-jump" data-tab-target="settings" data-section="ra-director-model-card">导演用哪个模型</button>'
@@ -577,6 +620,15 @@
     function refresh(reason) {
       if (!visible || !skeleton()) return;
       var s = director.getStatus();
+      /*
+       * 流式进度一秒刷两三次：只重画工作态的那一行与实时日志，不动状态卡（按钮在那里，重建会吞掉正按着的点击）、
+       * 不动草稿预览与插话框（IME 组字、滚动位置都在那里）。
+       */
+      if (reason === 'stream') {
+        replaceBlock('rd-flow-head', flowHeadHtml(s), true);
+        updateLive();
+        return;
+      }
       if (s.chatLabel !== lastChatLabel) {
         lastChatLabel = s.chatLabel;
         clearSay();

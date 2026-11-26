@@ -397,3 +397,207 @@ test('Gemini 各代在 OpenAI 兼容反代、自定义原生格式与原生连�
   assert.equal(customNative[2].reasoning_effort, 'low');
   assert.equal(customNative[2].custom_include_body, undefined);
 });
+
+/* ---------- 流式接收（reader-llm-stream.js + 传输层 + 网关） ---------- */
+
+const streamScope = vm.createContext({ setTimeout, clearTimeout, AbortController });
+for (const path of ['reader-env.js', 'reader-llm-stream.js', 'reader-agent-transport.js', 'reader-llm-gateway.js']) {
+  vm.runInContext(readFileSync(new URL('../src/' + path, import.meta.url), 'utf8'), streamScope);
+}
+const S = streamScope.__ReaderIIModules;
+const streamGateway = S.createLlmGateway({});
+const sse = (payload) => 'data: ' + JSON.stringify(payload) + '\n\n';
+const plainJson = (value) => JSON.parse(JSON.stringify(value));
+const chatMessages = [{ role: 'user', content: '写大纲' }];
+const lsTool = [{ type: 'function', function: { name: 'ls', description: '列目录', parameters: { type: 'object', properties: {} } } }];
+
+test('SSE 组装：OpenAI 的正文、思考与多个工具调用按 index 拼接（附带签名原样保留），拼回与非流式同形状的响应', () => {
+  const progress = [];
+  const collector = S.llmStream.createCollector({ onProgress: (p) => progress.push({ phase: p.phase, toolName: p.toolName, textChars: p.textChars }), throttleMs: 0 });
+  const text = [
+    ': keep-alive\n\n',
+    sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: { role: 'assistant', reasoning_content: '先想' } }] }),
+    sse({ choices: [{ index: 0, delta: { reasoning_content: '一想。' } }] }),
+    sse({ choices: [{ index: 0, delta: { content: '我先查' } }] }),
+    sse({ choices: [{ index: 0, delta: { content: '两条。' } }] }),
+    sse({ choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'call_a', type: 'function', function: { name: 'read', arguments: '{"pa' } }] } }] }),
+    sse({ choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: 'th":"wb:/书/甲"}' } },
+      { index: 1, id: 'call_b', function: { name: 'draft_write', arguments: '' }, extra_content: { google: { thought_signature: 'sig-b' } } }] } }] }),
+    sse({ choices: [{ index: 0, delta: { tool_calls: [{ index: 1, function: { arguments: '{"file":"outline.md","content":"### 板块 A"}' } }] }, finish_reason: 'tool_calls' }] }),
+    sse({ choices: [], usage: { total_tokens: 42 } }),
+    'data: [DONE]\n\n',
+  ].join('').replace(/\n/g, '\r\n');
+  /* 七个字一段地喂：段落边界会落在 \r 与 \n 之间、JSON 中间、多字节字符前后。 */
+  for (let at = 0; at < text.length; at += 7) collector.write(text.slice(at, at + 7));
+  const data = collector.finish();
+  assert.equal(data.usage.total_tokens, 42);
+  const reply = streamGateway.parseToolResponse(data);
+  assert.equal(reply.text, '我先查两条。');
+  assert.equal(reply.reasoning, '先想一想。');
+  assert.equal(reply.finish, 'tool_calls');
+  assert.deepEqual(plainJson(reply.toolCalls.map((call) => [call.id, call.name, JSON.parse(call.arguments)])),
+    [['call_a', 'read', { path: 'wb:/书/甲' }], ['call_b', 'draft_write', { file: 'outline.md', content: '### 板块 A' }]]);
+  assert.deepEqual(plainJson(reply.message.tool_calls[1].extra_content), { google: { thought_signature: 'sig-b' } });
+  assert.equal(reply.message.reasoning_content, '先想一想。', '思考型模型的思考随工具调用带回');
+  assert.ok(progress.some((p) => p.phase === 'thinking') && progress.some((p) => p.phase === 'tool' && p.toolName === 'draft_write'));
+  assert.equal(collector.stats().done, true);
+  /* 流里的 error 对象：带着状态码报错。 */
+  const failing = S.llmStream.createCollector();
+  failing.write(sse({ choices: [{ delta: { content: '写到一半' } }] }) + 'event: error\ndata: {"message":"overloaded","code":529}\n\n');
+  assert.throws(() => failing.finish(), (error) => error.status === 529 && /overloaded/.test(error.message));
+});
+
+test('SSE 组装：Anthropic（thinking / text / tool_use 的 input_json）与 Gemini（thought / text / functionCall）拼回各自的原始形状', () => {
+  const claude = S.llmStream.createCollector();
+  [{ type: 'message_start', message: { id: 'msg1', model: 'claude-x', usage: { input_tokens: 3 } } },
+    { type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '' } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: '想一想' } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'signature_delta', signature: 'sig-c' } },
+    { type: 'content_block_stop', index: 0 },
+    { type: 'content_block_start', index: 1, content_block: { type: 'text', text: '' } },
+    { type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: '好，' } },
+    { type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: '写草稿。' } },
+    { type: 'ping' },
+    { type: 'content_block_start', index: 2, content_block: { type: 'tool_use', id: 'tu1', name: 'draft_write', input: {} } },
+    { type: 'content_block_delta', index: 2, delta: { type: 'input_json_delta', partial_json: '{"file":"notes.md",' } },
+    { type: 'content_block_delta', index: 2, delta: { type: 'input_json_delta', partial_json: '"content":"笔记"}' } },
+    { type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: { output_tokens: 9 } },
+    { type: 'message_stop' }].forEach((evt) => claude.write('event: ' + evt.type + '\ndata: ' + JSON.stringify(evt) + '\n\n'));
+  const claudeData = claude.finish();
+  assert.deepEqual(plainJson([claudeData.stop_reason, claudeData.content[0].signature, claudeData.usage.output_tokens]), ['tool_use', 'sig-c', 9]);
+  const claudeReply = streamGateway.parseToolResponse(claudeData);
+  assert.equal(claudeReply.text, '好，写草稿。');
+  assert.deepEqual(plainJson(claudeReply.toolCalls.map((call) => [call.id, call.name, JSON.parse(call.arguments)])), [['tu1', 'draft_write', { file: 'notes.md', content: '笔记' }]]);
+
+  const gemini = S.llmStream.createCollector();
+  [{ candidates: [{ content: { role: 'model', parts: [{ text: '先想', thought: true }] } }] },
+    { candidates: [{ content: { parts: [{ text: '正文一' }] } }] },
+    { candidates: [{ content: { parts: [{ text: '正文二' }] } }] },
+    { candidates: [{ content: { parts: [{ functionCall: { name: 'draft_read', args: { file: 'outline.md' } }, thoughtSignature: 'sig-g' }] }, finishReason: 'STOP' }], usageMetadata: { totalTokenCount: 5 } }]
+    .forEach((chunk) => gemini.write('data: ' + JSON.stringify(chunk) + '\r\n\r\n'));
+  const geminiReply = streamGateway.parseToolResponse(gemini.finish());
+  assert.equal(geminiReply.text, '正文一正文二');
+  assert.deepEqual(plainJson(geminiReply.toolCalls.map((call) => [call.name, JSON.parse(call.arguments)])), [['draft_read', { file: 'outline.md' }]]);
+  assert.equal(geminiReply.message.tool_calls[0].signature, 'sig-g', 'Gemini 的思考签名随调用带回');
+});
+
+test('浏览器酒馆的同源 XHR 用 onprogress 增量读 SSE：不走展示用 fetch、实时回报进度；默认与 Tauri 宿主保持整份 JSON', async () => {
+  const sends = [], progress = [];
+  const ctx = { getRequestHeaders: () => ({ 'X-CSRF-Token': 'fixture' }) };
+  const host = {
+    SillyTavern: { getContext: () => ctx },
+    fetch: () => assert.fail('调用了展示用 fetch'),
+    XMLHttpRequest: class {
+      constructor() { this.headers = {}; this.responseText = ''; this.status = 0; }
+      open(method, url) { this.method = method; this.url = url; }
+      setRequestHeader(key, value) { this.headers[key] = value; }
+      send(text) {
+        this.body = JSON.parse(text);
+        sends.push(this);
+        if (!this.body.stream) {
+          setTimeout(() => { this.status = 200; this.responseText = JSON.stringify({ choices: [{ message: { content: '整份' } }] }); this.onload(); }, 2);
+          return;
+        }
+        const parts = [sse({ choices: [{ delta: { reasoning_content: '思考中' } }] }), sse({ choices: [{ delta: { content: '第一段，' } }] }),
+          sse({ choices: [{ delta: { content: '第二段。' }, finish_reason: 'stop' }] }), 'data: [DONE]\n\n'];
+        let index = 0;
+        const tick = () => {
+          if (this.aborted) return;
+          this.status = 200;
+          if (index < parts.length) { this.responseText += parts[index++]; this.onprogress(); setTimeout(tick, 5); }
+          else this.onload();
+        };
+        setTimeout(tick, 5);
+      }
+      abort() { this.aborted = true; if (this.onabort) this.onabort(); }
+    },
+  };
+  const gateway = S.createLlmGateway({ host });
+  const api = { apiurl: 'https://proxy.test/v1', key: 'k', model: 'm', source: 'openai' };
+  const reply = await gateway.chatTools({ api, route: 'agent', messages: chatMessages, tools: lsTool, stream: true, onStream: (p) => progress.push(p), retries: 0, timeoutMs: 1000 });
+  assert.equal(reply.text, '第一段，第二段。');
+  assert.deepEqual([sends.length, sends[0].url, sends[0].body.stream, sends[0].headers['X-CSRF-Token']], [1, '/api/backends/chat-completions/generate', true, 'fixture']);
+  assert.ok(progress.length >= 2 && progress[0].phase === 'thinking' && progress.at(-1).textChars === 8, '进度先是思考，最后是正文的字数');
+  assert.equal(reply.stream.textChars, 8);
+  /* 不要求流式时：同一条通道照旧整份 JSON。 */
+  assert.equal((await gateway.chatTools({ api, route: 'agent', messages: chatMessages, tools: lsTool, retries: 0 })).text, '整份');
+  assert.equal(sends[1].body.stream, false);
+  /* TauriTavern 的 safeInvoke 一次性返回：要了流式也按非流式发。 */
+  const invoked = [];
+  const tauri = S.createLlmGateway({ host: { SillyTavern: { getContext: () => ctx }, fetch: () => assert.fail('调用了展示用 fetch'),
+    __TAURITAVERN__: { invoke: { safeInvoke: async (name, args) => { invoked.push(args); return { choices: [{ message: { content: 'Tauri 整份' } }] }; } } } } });
+  assert.equal((await tauri.chatTools({ api, route: 'agent', messages: chatMessages, tools: lsTool, stream: true, retries: 0 })).text, 'Tauri 整份');
+  assert.equal(invoked[0].dto.stream, false);
+});
+
+/* 直连通道的流式假响应：每 30 毫秒吐一段；hang 为 true 时吐完不收尾（模拟上游卡住）。记下每次请求的 signal。 */
+function pacedFetch(pieces, hang, log) {
+  const enc = new TextEncoder();
+  return async (_url, init) => {
+    const body = JSON.parse(init.body);
+    log.push({ body, signal: init.signal });
+    let timer = null;
+    const stream = new ReadableStream({
+      start(controller) {
+        let index = 0;
+        const next = () => {
+          if (index < pieces.length) { controller.enqueue(enc.encode(pieces[index++])); timer = setTimeout(next, 30); }
+          else if (!hang) controller.close();
+        };
+        init.signal.addEventListener('abort', () => {
+          clearTimeout(timer);
+          try { controller.error(Object.assign(new Error('Aborted'), { name: 'AbortError' })); } catch { /* 已经关了 */ }
+        }, { once: true });
+        next();
+      },
+    });
+    return new Response(stream, { headers: { 'content-type': 'text/event-stream' } });
+  };
+}
+
+test('流式空闲超时：持续有数据时超过 timeoutMs 的总时长也不误杀；真正静默超过 timeoutMs 才报 TimeoutError，带回 partialText 并真正中止请求', async () => {
+  const api = { apiurl: 'https://direct.test/v1', key: 'k', model: 'm', source: 'openai' };
+  const longLog = [];
+  const pieces = Array.from({ length: 10 }, (_, i) => sse({ choices: [{ delta: { content: '第' + i + '段。' } }] })).concat(['data: [DONE]\n\n']);
+  const steady = S.createLlmGateway({ host: { fetch: pacedFetch(pieces, false, longLog), TextDecoder } });
+  const started = Date.now();
+  const text = await steady.chat({ api, route: 'agent', messages: chatMessages, stream: true, timeoutMs: 80, retries: 0 });
+  assert.ok(Date.now() - started > 250, '整段流式输出远超 timeoutMs');
+  assert.equal(text, Array.from({ length: 10 }, (_, i) => '第' + i + '段。').join(''));
+  assert.equal(longLog[0].body.stream, true);
+
+  const line = '雨夜的旧港，钟楼的指针慢了七分钟。';
+  const half = line.repeat(7);
+  const stuckLog = [];
+  const stuck = S.createLlmGateway({ host: { fetch: pacedFetch([sse({ choices: [{ delta: { reasoning_content: '想' } }] }), sse({ choices: [{ delta: { content: half } }] }), sse({ choices: [{ delta: { content: half } }] })], true, stuckLog), TextDecoder } });
+  await assert.rejects(stuck.chat({ api, route: 'agent', messages: chatMessages, stream: true, timeoutMs: 80, retries: 2 }), (error) => {
+    assert.equal(error.name, 'TimeoutError');
+    assert.match(error.message, /没有收到新数据/);
+    assert.equal(error.partialText, half + half);
+    assert.deepEqual([error.hasToolCalls, error.streamed, error.streamStats.textChars, error.streamStats.reasoningChars], [false, true, half.length * 2, 1]);
+    return true;
+  });
+  assert.equal(stuckLog.length, 1, '已经吐出实质正文的流式失败不从头重试');
+  assert.equal(stuckLog[0].signal.aborted, true, '超时会真正中止在途的请求');
+});
+
+test('上游没理会 stream 直接回 JSON 时照常解析；上游拒绝 stream 参数时立刻改发非流式并按连接记住', async () => {
+  const bodies = [];
+  const fetch = async (_url, init) => {
+    const body = JSON.parse(init.body);
+    bodies.push(body);
+    if (bodies.length === 1) return Response.json({ choices: [{ message: { content: '上游直接回了 JSON' } }] });
+    if (bodies.length === 2) return new Response(JSON.stringify({ error: { message: 'stream is not supported for this model' } }), { status: 400 });
+    return Response.json({ choices: [{ message: { content: '非流式成功' } }] });
+  };
+  const gateway = S.createLlmGateway({ host: { fetch, TextDecoder } });
+  assert.equal(await gateway.chat({ api: { apiurl: 'https://a.test/v1', model: 'm1', source: 'openai' }, route: 'agent', messages: chatMessages, stream: true, retries: 0 }), '上游直接回了 JSON');
+  assert.equal(bodies[0].stream, true);
+  const picky = { apiurl: 'https://b.test/v1', model: 'm2', source: 'openai' };
+  assert.equal(await gateway.chat({ api: picky, route: 'agent', messages: chatMessages, stream: true, retries: 0 }), '非流式成功');
+  assert.deepEqual([bodies[1].stream, bodies[2].stream], [true, false]);
+  await gateway.chat({ api: picky, route: 'agent', messages: chatMessages, stream: true, retries: 0 });
+  assert.equal(bodies[3].stream, false, '记住这条连接不接受 stream');
+  await gateway.chat({ api: { apiurl: 'https://a.test/v1', model: 'm1', source: 'openai' }, route: 'agent', messages: chatMessages, retries: 0 });
+  assert.equal(bodies[4].stream, false, '没要求流式就是原来的整份请求');
+});

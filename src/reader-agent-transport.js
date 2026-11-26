@@ -40,12 +40,20 @@
   }
 
   modules.hasAgentCompletionTransport = function (env) { return !!transport(env); };
+  /* 只有浏览器的同源 XHR 能边收边读（onprogress）；TauriTavern 的 safeInvoke 一次性返回整份 JSON，不流式。 */
+  modules.agentCompletionStreams = function (env) { var route = transport(env); return !!(route && route.ctx); };
 
-  // 没有这两种宿主接口时同步返回 null，交给调用方选择兼容路径。每次调用最多发送一次。
-  modules.sendAgentCompletion = function (env, body, signal, timeoutMs) {
+  /*
+   * 没有这两种宿主接口时同步返回 null，交给调用方选择兼容路径。每次调用最多发送一次。
+   * options.collector（reader-llm-stream.js 的接收器）：流式接收。XHR 每次 onprogress 把新到的文字喂给它，
+   * 结束时交出组装好的响应；响应体不是 SSE 时接收器自己按 JSON 解析。这时 timeoutMs 按「连续多久没有新数据」计。
+   * Tauri 通道忽略 collector，照旧整份返回。
+   */
+  modules.sendAgentCompletion = function (env, body, signal, timeoutMs, options) {
     var route = transport(env);
     if (!route) return null;
     var host = env.host;
+    var collector = route.ctx && options && options.collector ? options.collector : null;
     return new Promise(function (resolve, reject) {
       var settled = false, cancel = null, timer = null;
       function finish(error, value) {
@@ -64,21 +72,26 @@
         }
       }
       function onAbort() { interrupt(abortError()); }
+      function arm() {
+        if (!(Number(timeoutMs) > 0)) return;
+        if (timer !== null) clearTimeout(timer);
+        timer = setTimeout(function () {
+          var error = new Error(collector ? '模型响应超时（连续 ' + Math.round(timeoutMs / 1000) + ' 秒没有收到新数据）' : '模型响应超时');
+          error.name = 'TimeoutError';
+          interrupt(error);
+        }, timeoutMs);
+      }
       if (signal && signal.aborted) { onAbort(); return; }
       if (signal) signal.addEventListener('abort', onAbort, { once: true });
-      if (Number(timeoutMs) > 0) timer = setTimeout(function () {
-        var error = new Error('模型响应超时');
-        error.name = 'TimeoutError';
-        interrupt(error);
-      }, timeoutMs);
+      arm();
 
       async function sendNative() {
         var abi = route.abi;
-        var dto = body;
+        var dto = body.stream ? Object.assign({}, body, { stream: false }) : body;
         if (body.chat_completion_source === 'opencode') {
           var stableId = await abi.api.chat.current.handle().stableId();
           if (settled) return;
-          dto = Object.assign({}, body, { _tauritavern_stable_chat_id: stableId });
+          dto = Object.assign({}, dto, { _tauritavern_stable_chat_id: stableId });
         }
         var requestId = host.crypto && typeof host.crypto.randomUUID === 'function'
           ? host.crypto.randomUUID() : 'reader-' + Date.now().toString(36) + '-' + (++nextId).toString(36);
@@ -99,8 +112,30 @@
         xhr.open('POST', '/api/backends/chat-completions/generate', true);
         var headers = Object.assign({ 'Content-Type': 'application/json' }, route.ctx.getRequestHeaders());
         Object.keys(headers).forEach(function (name) { xhr.setRequestHeader(name, headers[name]); });
+        var cursor = 0;
+        var ok = function () { return xhr.status >= 200 && xhr.status < 300; };
+        /* 只把新到的那一段交给接收器；报错的响应（4xx / 5xx）不喂，等 onload 按报错处理。 */
+        var feed = function () {
+          var text = String(xhr.responseText || '');
+          if (text.length <= cursor) return;
+          var piece = text.slice(cursor);
+          cursor = text.length;
+          collector.write(piece);
+        };
+        if (collector) {
+          xhr.onprogress = function () {
+            if (settled || !ok()) return;
+            arm();
+            try { feed(); } catch (error) { interrupt(error); }
+          };
+        }
         xhr.onload = function () {
           var data;
+          if (collector && ok()) {
+            try { feed(); data = collector.finish(); } catch (error) { finish(error); return; }
+            finish(null, data);
+            return;
+          }
           try { data = JSON.parse(xhr.responseText); } catch (_) {
             finish(xhr.status >= 200 && xhr.status < 300 ? new Error('酒馆生成接口返回了无效的 JSON') : requestError(xhr.responseText, xhr.status));
             return;

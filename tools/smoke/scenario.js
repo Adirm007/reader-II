@@ -668,7 +668,9 @@ async function main() {
     let release;
     const gate = new Promise((resolve) => { release = resolve; });
     const before = mock.llmCalls.length;
-    mock.replies.push(call('read', { path: 'wb:/设定集/王都' }), async () => { await gate; return dirDelivery; });
+    /* 第一轮在查世界书的同时，把板块 A–B 先写进总导演的私有草稿工作台（文本协议下同一轮可以并列多个工具块）。 */
+    const dirAB = dirOutline.slice(0, dirOutline.indexOf('### 板块 C')).trim();
+    mock.replies.push(call('read', { path: 'wb:/设定集/王都' }) + '\n' + call('draft_write', { file: 'outline.md', content: dirAB }), async () => { await gate; return dirDelivery; });
     try {
       $('#rd-say-text').value = '这一卷不要阴谋';
       $('[data-act="dir-activate"]').click();
@@ -690,6 +692,12 @@ async function main() {
       assert(!$('#rd-flow-bar').hidden && getComputedStyle($('#rd-flow-bar')).display !== 'none', '有活在跑时活动条应显示');
       assert(/导演 · 编纲 · 自主查阅与编纲（已查 1 项资料）/.test($('#rd-live').textContent) && /查阅世界书 wb:\/设定集\/王都/.test($('#rd-live').textContent), '实时日志应写着当前动作与查阅过程：' + $('#rd-live').textContent.slice(0, 160));
       assert(!/\d\s*\/\s*4/.test($('#rd-flow-card').textContent), '工作流卡里不该再出现「几/4」的步数');
+      /* 草稿工作台：徽章写着草稿进度，折叠的「草稿预览」里能看到已经写下的大纲（不必等定稿或失败）。写草稿不算「查阅资料」。 */
+      assert(/草稿 [\d,]+ 字 · 板块 A–B/.test(stats), '工作态徽章应显示草稿进度：' + stats);
+      const draftFold = $('#rd-flow-draft details[data-fold="ws-draft"]');
+      assert(draftFold && /草稿预览（outline\.md [\d,]+ 字，含板块 A–B）/.test(draftFold.querySelector('summary').textContent)
+        && draftFold.querySelector('[data-draft-file="outline.md"]')?.textContent.includes('### 板块 B'), '草稿预览里应有工作台里的大纲');
+      assert(/写入草稿 outline\.md/.test($('#rd-live').textContent), '实时日志应记下写入草稿');
       /* 页面被事件驱动着重画了好几轮：插话框还是同一个节点，里面打到一半的字还在。 */
       assert($('#rd-say-text') === sayBox && sayBox.value === '打到一半的插话', '插话框在重画中被重建了，或者打到一半的字丢了');
       sayBox.value = '';
